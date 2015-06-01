@@ -6860,6 +6860,10 @@ const char *hangup_cause2sip(int cause)
 			return "488 Not Acceptable Here";
 		case AST_CAUSE_INTERWORKING:	/* Unspecified Interworking issues */
 			return "500 Network error";
+		/* CUSTOM SS7 */
+		case AST_CAUSE_MANDATORY_IE_MISSING:
+		case AST_CAUSE_INVALID_IE_CONTENTS:
+			return "488 Not Acceptable Here";
 
 		case AST_CAUSE_NOTDEFINED:
 		default:
