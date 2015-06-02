@@ -94,6 +94,17 @@ int ast_bridge_add_channel(struct ast_bridge *bridge, struct ast_channel *chan,
 		struct ast_bridge_features *features, int play_tone, const char *xfersound);
 
 
+/*! \brief Realtime Call Control datastore structure */
+struct ast_bridge_combo {
+	int run_away;
+	struct ast_channel *ch0;
+	struct ast_channel *ch1;
+	struct ast_bridge_config *config;
+};
+
+/*! \brief Realtime Call Control datastore callback */
+struct ast_bridge_combo *ast_bridge_combo_get(struct ast_channel *chan);
+
 
 /*!
  * \brief parse L option and read associated channel variables to set warning, warning frequency, and timelimit

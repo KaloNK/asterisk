@@ -161,6 +161,28 @@ ASTERISK_REGISTER_FILE()
 								<para>File to play as warning if <replaceable>y</replaceable> is
 								defined. The default is to say the time remaining.</para>
 							</variable>
+							<variable name="LIMIT_RTCC_INTERVAL">
+								<value name="interval"/>
+								<para>Recalculate the timelimit every <replaceable>interval</replaceable> ms.</para>
+							</variable>
+							<variable name="LIMIT_RTCC_APP">
+								<value name="appname"/>
+								<para>Application to use: AppName(AppArgs). The application should set CALL_LIMIT_DIFF variable
+								with the change in call limit duartion (in ms where 0 = no change) or to change the limit and
+								config->nexteventts (obtained via RTCC datastore) accordingly.
+								If no application is given, but interval is present, a Manager Event will be generated.</para>
+							</variable>
+							<variable name="LIMIT_RTCC_DELAY">
+								<value name="interval"/>
+								<para>Delay <replaceable>interval</replaceable> ms before checking the CALL_LIMIT_DIFF value
+								after the application is execututed or the Manager Event is sent.</para>
+							</variable>
+							<variable name="LIMIT_RTCC_END">
+								<value name="appname"/>
+								<para>Application to execute on call end: AppName(AppArgs). This is like running h exten,
+								but is only executed if the call was answered (bridged) and the structure containing the two channels and
+								the bridge configuration can be used (via RTCC datastore), which is otherwise impossible.</para>
+							</variable>
 						</variablelist>
 					</option>
 					<option name="S(x)">
@@ -610,7 +632,7 @@ static int pre_bridge_setup(struct ast_channel *chan, struct ast_channel *peer, 
 	return 0;
 }
 
-int ast_bridge_call_with_flags(struct ast_channel *chan, struct ast_channel *peer, struct ast_bridge_config *config, unsigned int flags)
+static int ast_bridge_call_with_flags_do(struct ast_channel *chan, struct ast_channel *peer, struct ast_bridge_config *config, unsigned int flags)
 {
 	int res;
 	struct ast_bridge *bridge;
@@ -675,6 +697,370 @@ int ast_bridge_call_with_flags(struct ast_channel *chan, struct ast_channel *pee
 
 	if (res && config->end_bridge_callback) {
 		config->end_bridge_callback(config->end_bridge_callback_data);
+	}
+
+	return res;
+}
+
+static pthread_t bridge_sched_thread = AST_PTHREADT_NULL;
+
+AST_MUTEX_DEFINE_STATIC(bridge_sched_thread_lock);
+
+struct ast_sched_context *bridge_sched = NULL;
+
+static void* bridge_sched_monitor(void * data)
+{
+	ast_mutex_t bridge_sched_mutex;
+	ast_cond_t bridge_sched_cond;
+	struct timespec timeout = {0,0};
+	struct timeval next_sched;
+
+	ast_mutex_init(&bridge_sched_mutex);
+	ast_cond_init(&bridge_sched_cond, NULL);
+
+	ast_debug(4, "Bridge scheduler thread starting.\n");
+
+	for(;;)
+	{
+		int nexteventms = ast_sched_wait(bridge_sched);
+		if(nexteventms == -1)  {
+			break;
+		}
+
+		next_sched = ast_tvadd(ast_tvnow(), ast_samp2tv(nexteventms, 1000));
+		timeout.tv_sec = next_sched.tv_sec;
+		timeout.tv_nsec = next_sched.tv_usec * 1000;
+
+		ast_mutex_lock(&bridge_sched_mutex);
+		ast_cond_timedwait(&bridge_sched_cond, &bridge_sched_mutex, &timeout);
+		ast_mutex_unlock(&bridge_sched_mutex);
+
+		ast_sched_runq(bridge_sched);
+	}
+
+	ast_debug(4, "Bridge scheduler thread stopping.\n");
+
+	ast_mutex_lock(&bridge_sched_thread_lock);
+	ast_mutex_destroy(&bridge_sched_mutex);
+	ast_cond_destroy(&bridge_sched_cond);
+	ast_sched_context_destroy(bridge_sched);
+	bridge_sched = NULL;
+	bridge_sched_thread = AST_PTHREADT_NULL;
+	ast_mutex_unlock(&bridge_sched_thread_lock);
+
+	return 0;
+}
+
+static int bridge_shed_add(int when, ast_sched_cb callback, const void *data, int variable)
+{
+	int sched_id = -1;
+
+	ast_mutex_lock(&bridge_sched_thread_lock);
+
+	if (!bridge_sched && !(bridge_sched = ast_sched_context_create())) {
+		ast_log(LOG_ERROR, "Failed to create bridge scheduler context\n");
+		goto exit;
+	}
+
+	sched_id = ast_sched_add_variable(bridge_sched, when, callback, data, 1);
+
+	if (sched_id < 0) {
+		ast_log(LOG_ERROR, "Failed to add callback to bridge scheduler thread\n");
+		goto exit;
+	}
+
+	if (bridge_sched_thread == AST_PTHREADT_NULL
+			&& (ast_pthread_create_background(&bridge_sched_thread, NULL,
+				&bridge_sched_monitor, NULL) < 0)) {
+		ast_log(LOG_ERROR, "Failed to start bridge scheduler thread\n");
+		ast_sched_context_destroy(bridge_sched);
+		sched_id = -1;
+	}
+
+exit:
+	ast_mutex_unlock(&bridge_sched_thread_lock);
+
+	return sched_id;
+}
+
+/*!
+ * Should be called with the thread locked
+ */
+static void bridge_shed_done(int sched_id)
+{
+	if (sched_id > 0) {
+		if (!bridge_sched || ((ast_sched_when(bridge_sched, sched_id) != -1) && ast_sched_del(bridge_sched, sched_id))) {
+				ast_debug(4, "Schedule %d was not found - probably already exited.\n", sched_id);
+		}
+	}
+}
+
+static void ast_rtcc_datastore_destroy_cb(void *data)
+{
+	ast_free(data);
+}
+
+static const struct ast_datastore_info ast_rtcc_datastore_info = {
+	.type = "RTCC",
+	.destroy = ast_rtcc_datastore_destroy_cb
+};
+
+struct ast_bridge_combo *ast_bridge_combo_get(struct ast_channel *chan)
+{
+	struct ast_datastore *rtcc_datastore = NULL;
+
+	rtcc_datastore = ast_channel_datastore_find(chan, &ast_rtcc_datastore_info, NULL);
+	if (!rtcc_datastore) {
+		return NULL;
+	}
+
+	return rtcc_datastore->data;
+}
+
+static int ast_rtcc_callback(const void *data)
+{
+	struct ast_bridge_combo *rtcc_data = (struct ast_bridge_combo *)data;
+	struct ast_app *app;
+	struct timeval last_run = ast_tvnow();
+	long delay_ms = 0;
+	char *s, *app_name = "", *app_data = "";
+	const char *r, *ch0_name, *ch1_name, *ch0_uniqueid, *ch1_uniqueid, *ch0_cid_num, *ch1_cid_num;
+	int res = 0;
+
+	/* Make sure the call does not get hungup while we work and rtcc_data destroyed */
+	ast_mutex_lock(&bridge_sched_thread_lock);
+
+		/* No more schedules after the warning, hangup or if disabled */
+	if (!rtcc_data || rtcc_data->run_away || !rtcc_data->ch0 || !rtcc_data->ch1) {
+		goto exit;
+	}
+	if (!rtcc_data->config || !rtcc_data->config->rtcc_check_interval) {
+		goto exit;
+	}
+	if (!rtcc_data->config->timelimit || ((rtcc_data->config->timelimit - rtcc_data->config->play_warning)
+			< ast_tvdiff_ms(ast_tvnow(), rtcc_data->config->start_time))) {
+		goto exit;
+	}
+
+	ast_channel_lock(rtcc_data->ch0);
+	/* Make a copy so we do not need to access them directly later */
+	ch0_name = ast_strdup(ast_channel_name(rtcc_data->ch0));
+	ch0_uniqueid = ast_strdup(ast_channel_uniqueid(rtcc_data->ch0));
+	ch0_cid_num = ast_strdup(ast_channel_caller(rtcc_data->ch0)->id.number.str);
+
+	r = pbx_builtin_getvar_helper(rtcc_data->ch0,"LIMIT_RTCC_DELAY");
+	if (!ast_strlen_zero(r)) {
+		delay_ms = atol(r);
+	}
+
+	if (!ast_strlen_zero(rtcc_data->config->rtcc_app)) {
+		s = ast_strdupa(rtcc_data->config->rtcc_app);
+		app_name = strsep(&s,"(");
+		memset(&app_data, 0, sizeof(app_data));
+		if (!ast_strlen_zero(s)) {
+			app_data = ast_strip(s);
+		}
+
+		if (!ast_strlen_zero(app_data) && (s = strrchr(app_data, ')'))) {
+			app_data[strlen(app_data)-strlen(s)] = '\0';
+		}
+	}
+	ast_channel_unlock(rtcc_data->ch0);
+
+	ast_channel_lock(rtcc_data->ch1);
+	ch1_name = ast_strdup(ast_channel_name(rtcc_data->ch1));
+	ch1_uniqueid = ast_strdup(ast_channel_uniqueid(rtcc_data->ch1));
+	ch1_cid_num = ast_strdup(ast_channel_caller(rtcc_data->ch1)->id.number.str);
+//	ch1_cid_num = ast_strdup(ast_channel_connected(rtcc_data->ch1->)id.number.str);
+	ast_channel_unlock(rtcc_data->ch1);
+
+	if (!ast_strlen_zero(app_name) && app_data) {
+		app = pbx_findapp(app_name);
+		if (!app) {
+			ast_log(LOG_WARNING, "Could not find application (%s). Timelimit not checked for call (%s), but will try to rechesdule.\n", app_name, ch0_uniqueid);
+			ast_mutex_unlock(&bridge_sched_thread_lock);
+		} else {
+			char with_data[2048];
+			struct ast_channel *chan = ast_channel_get_by_name(ch0_name);
+
+			if (!chan) {
+				ast_log(LOG_NOTICE, "Channel (%s) has gone away. Exiting!\n", ch0_name);
+				goto exit;
+			}
+			memset(with_data, 0, 2048);
+
+			ast_channel_lock(chan);
+			pbx_substitute_variables_helper(chan, app_data, with_data, sizeof(with_data) - 1);
+			ast_channel_unlock(chan);
+			if (option_verbose > 10) {
+				ast_verb(4, "Substitute %s TO %s\n", app_data, with_data);
+			}
+			ast_mutex_unlock(&bridge_sched_thread_lock);
+			// release the lock as we may delay processing, but keep the chan ref
+			res = pbx_exec(chan, app, with_data);
+			ast_channel_unref(chan);
+		}
+
+		if (res) {
+			ast_log(LOG_ERROR, "Error executing application (%s). Timelimit not checked for call (%s)\n", app_name, ch0_uniqueid);
+			return -1;
+		}
+	} else {
+		ast_mutex_unlock(&bridge_sched_thread_lock);
+		manager_event(EVENT_FLAG_CALL, "RTCC_GetTimeLimitChange", 
+		      "Channel1: %s\r\n"
+		      "Channel2: %s\r\n"
+		      "Uniqueid1: %s\r\n"
+		      "Uniqueid2: %s\r\n"
+		      "CallerID1: %s\r\n"
+		      "CallerID2: %s\r\n",
+		      ch0_name, ch1_name, ch0_uniqueid, ch1_uniqueid, ch0_cid_num, ch1_cid_num);
+	}
+
+	if (delay_ms > 0) {
+		usleep(delay_ms*1000);
+	}
+
+	ast_mutex_lock(&bridge_sched_thread_lock);
+	{
+		long res_ms;
+		struct ast_channel *chan = ast_channel_get_by_name(ch0_name);
+
+		/* Make sure the call was not hungup while work and wait */
+		if (!chan || !rtcc_data || rtcc_data->run_away || !rtcc_data->config || !rtcc_data->config->rtcc_check_interval || !rtcc_data->config->timelimit ) {
+			/* The data, config or channel is gone or no more checks - run away without reschedule */
+			if (option_verbose > 10) {
+				ast_verb(4, "RTCC lost the channel for call %s. Exiting!\n", ch0_uniqueid);
+			}
+			if (chan) {
+				ast_channel_unref(chan);
+			}
+			goto exit;
+		}
+
+		ast_channel_lock(chan);
+		const char *r = pbx_builtin_getvar_helper(chan,"CALL_LIMIT_DIFF");
+		pbx_builtin_setvar_helper(chan, "CALL_LIMIT_DIFF", "0");
+		if (r && (res_ms = atoi(r)) && (res_ms -= rtcc_data->config->timelimit)) {
+			if (ast_tvzero(*ast_channel_whentohangup(chan))) {
+				struct timeval new_time = { res_ms , 0 };
+
+				new_time = ast_tvadd(*ast_channel_whentohangup(chan), new_time);
+				ast_channel_setwhentohangup_tv(chan, new_time);
+			}
+			rtcc_data->config->timelimit += res_ms;
+			rtcc_data->config->nexteventts.tv_sec += (res_ms / 1000);
+			if (option_verbose > 10) {
+				ast_verb(4, "RTCC executed for call %s. New limit %ld\n", ch0_uniqueid, rtcc_data->config->timelimit);
+			}
+		} else if (option_verbose > 10) {
+			ast_verb(4, "RTCC executed for call %s. No changes. Current limit %ld\n", ch0_uniqueid, rtcc_data->config->timelimit);
+		}
+		res = ast_tvdiff_ms(ast_tvadd(last_run, ast_samp2tv(rtcc_data->config->rtcc_check_interval, 1000)),ast_tvnow());
+		ast_channel_unlock(chan);
+		ast_channel_unref(chan);
+	}
+
+	// we are inside sched_thread_lock so it is safe to access config
+	if ((res && !rtcc_data->config->rtcc_check_interval) || !rtcc_data->config->timelimit || ((rtcc_data->config->timelimit - rtcc_data->config->play_warning) < ast_tvdiff_ms(ast_tvnow(), rtcc_data->config->start_time))) {
+		/* No more schedules after the warning or if disabled */
+		res = 0;
+	}
+
+exit:
+	ast_mutex_unlock(&bridge_sched_thread_lock);
+	return res;
+}
+
+int ast_bridge_call_with_flags(struct ast_channel *chan, struct ast_channel *peer, struct ast_bridge_config *config, unsigned int flags)
+{
+	int res = 0;
+	int rtcc_sched_id = 0;
+	struct ast_bridge_combo *rtcc_data = NULL;
+
+	if (config->rtcc_check_interval) {
+		struct ast_datastore *rtcc_datastore = NULL;
+
+		rtcc_data = ast_malloc(sizeof(*rtcc_data));
+		rtcc_data->run_away = 0;
+		rtcc_data->config = config;
+//		rtcc_data->ch0 = chan;
+		rtcc_data->ch0 = ast_channel_get_by_name(ast_channel_name(chan));
+//		rtcc_data->ch1 = peer;
+		rtcc_data->ch1 = ast_channel_get_by_name(ast_channel_name(peer));
+
+		rtcc_datastore = ast_datastore_alloc(&ast_rtcc_datastore_info, NULL);
+		rtcc_datastore->data = rtcc_data;
+		ast_channel_datastore_add(chan, rtcc_datastore);
+
+		rtcc_sched_id = bridge_shed_add(config->rtcc_check_interval, &ast_rtcc_callback, rtcc_data, 1);
+	}
+
+	res = ast_bridge_call_with_flags(chan, peer, config, flags);
+
+	if (config->rtcc_check_interval) {
+		struct ast_datastore *rtcc_datastore = NULL;
+
+		ast_mutex_lock(&bridge_sched_thread_lock);
+		rtcc_data->run_away = 1;
+		config->rtcc_check_interval = 0;
+		bridge_shed_done(rtcc_sched_id);
+		ast_mutex_unlock(&bridge_sched_thread_lock);
+		sched_yield();
+
+		if (!ast_strlen_zero(config->rtcc_end)) {
+			char *s, *app_name = "", *app_data = "";
+
+			s = ast_strdupa(config->rtcc_end);
+			app_name = strsep(&s,"(");
+			memset(&app_data, 0, sizeof(app_data));
+			if (!ast_strlen_zero(s)) {
+				app_data = ast_strip(s);
+			}
+
+			if (!ast_strlen_zero(app_data) && (s = strrchr(app_data, ')'))) {
+				app_data[strlen(app_data)-strlen(s)] = '\0';
+			}
+			if (!ast_strlen_zero(app_name) && app_data) {
+				struct ast_app *theapp;
+
+				theapp = pbx_findapp(app_name);
+				if (!theapp) {
+					ast_log(LOG_WARNING, "Could not find end application (%s) for call (%s)\n", app_name, ast_channel_uniqueid(chan));
+				}
+				else {
+					char with_data[2048];
+
+					memset(with_data, 0, 2048);
+
+					ast_channel_lock(chan);
+					pbx_substitute_variables_helper(chan, app_data, with_data, sizeof(with_data) - 1);
+					ast_channel_unlock(chan);
+					if (option_verbose > 10) {
+						ast_verb(4, "Substitute %s TO %s\n", app_data, with_data);
+					}
+					if (pbx_exec(chan, theapp, with_data)) {
+						ast_log(LOG_ERROR, "Error executing end application (%s) for call (%s)\n", app_name, ast_channel_uniqueid(chan));
+					}
+				}
+			}
+		}
+		ast_mutex_lock(&bridge_sched_thread_lock);
+		ast_channel_lock(chan);		// lock channel too, so we can protect rtcc app
+		ast_channel_unref(rtcc_data->ch0);
+		ast_channel_unref(rtcc_data->ch1);
+		rtcc_datastore = ast_channel_datastore_find(chan, &ast_rtcc_datastore_info, NULL);
+		if (rtcc_datastore) {
+			ast_debug(1,"Freeing RTCC datastore\n");
+			ast_channel_datastore_remove(chan, rtcc_datastore);
+			ast_datastore_free(rtcc_datastore);
+		}
+		if (rtcc_data) {
+//			ast_free(rtcc_data);	// done from datastore_free
+			rtcc_data = NULL;
+		}
+		ast_channel_unlock(chan);
+		ast_mutex_unlock(&bridge_sched_thread_lock);
 	}
 
 	return res;
@@ -870,6 +1256,7 @@ int ast_bridge_timelimit(struct ast_channel *chan, struct ast_bridge_config *con
 	const char *var;
 	int play_to_caller = 0, play_to_callee = 0;
 	int delta;
+	long rtcc_delay = 0;
 
 	limit_str = strsep(&stringp, ":");
 	warning_str = strsep(&stringp, ":");
@@ -938,6 +1325,22 @@ int ast_bridge_timelimit(struct ast_channel *chan, struct ast_bridge_config *con
 	var = pbx_builtin_getvar_helper(chan, "LIMIT_CONNECT_FILE");
 	config->start_sound = !ast_strlen_zero(var) ? ast_strdup(var) : NULL;
 
+	var = pbx_builtin_getvar_helper(chan,"LIMIT_RTCC_INTERVAL");
+	if (!ast_strlen_zero(var)) {
+		config->rtcc_check_interval = atol(var);
+	}
+
+	var = pbx_builtin_getvar_helper(chan,"LIMIT_RTCC_DELAY");
+	if (!ast_strlen_zero(var)) {
+		rtcc_delay = atol(var);
+	}
+
+	var = pbx_builtin_getvar_helper(chan,"LIMIT_RTCC_APP");
+	config->rtcc_app = S_OR(var, NULL);
+
+	var = pbx_builtin_getvar_helper(chan,"LIMIT_RTCC_END");
+	config->rtcc_end = S_OR(var, NULL);
+
 	ast_channel_unlock(chan);
 
 	/* undo effect of S(x) in case they are both used */
@@ -945,7 +1348,7 @@ int ast_bridge_timelimit(struct ast_channel *chan, struct ast_bridge_config *con
 	calldurationlimit->tv_usec = 0;
 
 	/* more efficient to do it like S(x) does since no advanced opts */
-	if (!config->play_warning && !config->start_sound && !config->end_sound && config->timelimit) {
+	if (!config->rtcc_check_interval && !config->play_warning && !config->start_sound && !config->end_sound && config->timelimit) {
 		calldurationlimit->tv_sec = config->timelimit / 1000;
 		calldurationlimit->tv_usec = (config->timelimit % 1000) * 1000;
 		ast_verb(3, "Setting call duration limit to %.3lf seconds.\n",
@@ -958,6 +1361,12 @@ int ast_bridge_timelimit(struct ast_channel *chan, struct ast_bridge_config *con
 	} else {
 		ast_verb(4, "Limit Data for this call:\n");
 		ast_verb(4, "timelimit      = %ld ms (%.3lf s)\n", config->timelimit, config->timelimit / 1000.0);
+		if (config->rtcc_check_interval) {
+			ast_verb(4, "RTCC check each   = %ld ms (%.3lf s)\n", config->rtcc_check_interval, config->rtcc_check_interval / 1000.0);
+			ast_verb(4, "RTCC app    = %s\n", config->rtcc_app ? config->rtcc_app : "Manager Event");
+			ast_verb(4, "RTCC delay  = %ld (%.3lf s)\n", rtcc_delay, rtcc_delay / 1000.0);
+			ast_verb(4, "RTCC end    = %s\n", config->rtcc_end ? config->rtcc_end : "");
+		}
 		ast_verb(4, "play_warning   = %ld ms (%.3lf s)\n", config->play_warning, config->play_warning / 1000.0);
 		ast_verb(4, "play_to_caller = %s\n", play_to_caller ? "yes" : "no");
 		ast_verb(4, "play_to_callee = %s\n", play_to_callee ? "yes" : "no");
