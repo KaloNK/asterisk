@@ -931,6 +931,9 @@ struct ast_bridge_config {
 	long timelimit;
 	long play_warning;
 	long warning_freq;
+	long rtcc_check_interval;
+	const char *rtcc_app;
+	const char *rtcc_end;
 	const char *warning_sound;
 	const char *end_sound;
 	const char *start_sound;
