@@ -4303,7 +4303,7 @@ static struct callattempt *wait_for_answer(struct queue_ent *qe, struct callatte
 						*stuff++ = '\0';
 						tech = tmpchan;
 					} else {
-						snprintf(tmpchan, sizeof(tmpchan), "%s@%s", ast_channel_call_forward(o->chan), ast_channel_context(o->chan));
+						snprintf(tmpchan, sizeof(tmpchan), "%s@%s/n", ast_channel_call_forward(o->chan), ast_channel_context(o->chan));
 						stuff = tmpchan;
 						tech = "Local";
 					}

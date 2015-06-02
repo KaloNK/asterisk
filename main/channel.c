@@ -5617,7 +5617,7 @@ struct ast_channel *ast_call_forward(struct ast_channel *caller, struct ast_chan
 		const char *forward_context;
 		ast_channel_lock(orig);
 		forward_context = pbx_builtin_getvar_helper(orig, "FORWARD_CONTEXT");
-		snprintf(tmpchan, sizeof(tmpchan), "%s@%s", ast_channel_call_forward(orig), S_OR(forward_context, ast_channel_context(orig)));
+		snprintf(tmpchan, sizeof(tmpchan), "%s@%s/n", ast_channel_call_forward(orig), S_OR(forward_context, ast_channel_context(orig)));
 		ast_channel_unlock(orig);
 		data = tmpchan;
 		type = "Local";
