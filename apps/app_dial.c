@@ -850,7 +850,7 @@ static void do_forward(struct chanlist *o, struct cause_args *num,
 		if (ast_strlen_zero(forward_context)) {
 			forward_context = NULL;
 		}
-		snprintf(tmpchan, sizeof(tmpchan), "%s@%s", ast_channel_call_forward(c), forward_context ? forward_context : ast_channel_context(c));
+		snprintf(tmpchan, sizeof(tmpchan), "%s@%s/n", ast_channel_call_forward(c), forward_context ? forward_context : ast_channel_context(c));
 		ast_channel_unlock(c);
 		stuff = tmpchan;
 		tech = "Local";
