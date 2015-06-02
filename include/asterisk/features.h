@@ -181,6 +181,17 @@ const char *ast_pickup_ext(void);
  */
 void ast_bridge_end_dtmf(struct ast_channel *chan, char digit, struct timeval start, const char *why);
 
+/*! \brief Realtime Call Control datastore structure */
+struct ast_bridge_combo {
+	int run_away;
+	struct ast_channel *ch0;
+	struct ast_channel *ch1;
+	struct ast_bridge_config *config;
+};
+
+/*! \brief Realtime Call Control datastore callback */
+struct ast_bridge_combo *ast_bridge_combo_get(struct ast_channel *chan);
+
 /*! \brief Bridge a call, optionally allowing redirection */
 int ast_bridge_call(struct ast_channel *chan, struct ast_channel *peer,struct ast_bridge_config *config);
 
