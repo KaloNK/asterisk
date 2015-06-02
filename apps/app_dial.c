@@ -275,6 +275,28 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 							<para>If specified, <replaceable>filename</replaceable> specifies the sound prompt to play as
 							a warning when time <replaceable>x</replaceable> is reached. If not set, the time remaining will be announced.</para>
 						</variable>
+						<variable name="LIMIT_RTCC_INTERVAL">
+							<value name="interval"/>
+							<para>Recalculate the timelimit every <replaceable>interval</replaceable> ms.</para>
+						</variable>
+						<variable name="LIMIT_RTCC_APP">
+							<value name="appname"/>
+							<para>Application to use: AppName(AppArgs). The application should set CALL_LIMIT_DIFF variable
+							with the change in call limit duartion (in ms where 0 = no change) or to change the limit and
+							config->nexteventts (obtained via RTCC datastore) accordingly.
+							If no application is given, but interval is present, a Manager Event will be generated.</para>
+						</variable>
+						<variable name="LIMIT_RTCC_DELAY">
+							<value name="interval"/>
+							<para>Delay <replaceable>interval</replaceable> ms before checking the CALL_LIMIT_DIFF value
+							after the application is execututed or the Manager Event is sent.</para>
+						</variable>
+						<variable name="LIMIT_RTCC_END">
+							<value name="appname"/>
+							<para>Application to execute on call end: AppName(AppArgs). This is like running h exten,
+							but is only executed if the call was answered (bridged) and the structure containing the two channels and
+							the bridge configuration can be used (via RTCC datastore), which is otherwise impossible.</para>
+						</variable>
 					</variablelist>
 				</option>
 				<option name="m">
