@@ -997,7 +997,7 @@ int ast_bridge_call_with_flags(struct ast_channel *chan, struct ast_channel *pee
 		rtcc_sched_id = bridge_shed_add(config->rtcc_check_interval, &ast_rtcc_callback, rtcc_data, 1);
 	}
 
-	res = ast_bridge_call_with_flags(chan, peer, config, flags);
+	res = ast_bridge_call_with_flags_do(chan, peer, config, flags);
 
 	if (config->rtcc_check_interval) {
 		struct ast_datastore *rtcc_datastore = NULL;
