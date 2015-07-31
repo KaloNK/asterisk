@@ -991,7 +991,11 @@ enum ast_sorcery_apply_result __ast_sorcery_insert_wizard_mapping(struct ast_sor
 		}
 	}
 
+	ast_debug(5, "Calling wizard %s open callback on object type %s\n",
+		name, object_type->name);
 	if (wizard->callbacks.open && !(object_wizard->data = wizard->callbacks.open(data))) {
+		ast_log(LOG_WARNING, "Wizard '%s' failed to open mapping for object type '%s' with data: %s\n",
+			name, object_type->name, S_OR(data, ""));
 		AST_VECTOR_RW_UNLOCK(&object_type->wizards);
 		return AST_SORCERY_APPLY_FAIL;
 	}
@@ -1104,6 +1108,25 @@ static int sorcery_extended_fields_handler(const void *obj, struct ast_variable 
 	}
 
 	return 0;
+}
+
+int ast_sorcery_object_unregister(struct ast_sorcery *sorcery, const char *type)
+{
+	struct ast_sorcery_object_type *object_type;
+	int res = -1;
+
+	ao2_wrlock(sorcery->types);
+	object_type = ao2_find(sorcery->types, type, OBJ_SEARCH_KEY | OBJ_NOLOCK);
+	if (object_type && object_type->type.type == ACO_ITEM) {
+		ao2_unlink_flags(sorcery->types, object_type, OBJ_NOLOCK);
+		res = 0;
+	}
+	ao2_unlock(sorcery->types);
+
+	/* XXX may need to add an instance unregister observer callback on success. */
+
+	ao2_cleanup(object_type);
+	return res;
 }
 
 int __ast_sorcery_object_register(struct ast_sorcery *sorcery, const char *type, unsigned int hidden, unsigned int reloadable, aco_type_item_alloc alloc, sorcery_transform_handler transform, sorcery_apply_handler apply)
@@ -1574,10 +1597,13 @@ struct ast_json *ast_sorcery_objectset_json_create(const struct ast_sorcery *sor
 			char *buf = NULL;
 			struct ast_json *value = NULL;
 
-			if ((res = object_field->handler(object, object_field->args, &buf))
+			if (object_field->handler(object, object_field->args, &buf)
 				|| !(value = ast_json_string_create(buf))
 				|| ast_json_object_set(json, object_field->name, value)) {
-				res = -1;
+				ast_free(buf);
+				ast_debug(5, "Skipping field '%s' for object type '%s'\n",
+					object_field->name, object_type->name);
+				continue;
 			}
 
 			ast_free(buf);
@@ -1918,9 +1944,7 @@ static int sorcery_wizard_create(void *obj, void *arg, int flags)
 	const struct sorcery_details *details = arg;
 
 	if (!object_wizard->wizard->callbacks.create) {
-		ast_assert(0);
-		ast_log(LOG_ERROR, "Sorcery wizard '%s' doesn't contain a 'create' virtual function.\n",
-			object_wizard->wizard->callbacks.name);
+		ast_debug(5, "Sorcery wizard '%s' does not support creation\n", object_wizard->wizard->callbacks.name);
 		return 0;
 	}
 	return (!object_wizard->caching && !object_wizard->wizard->callbacks.create(details->sorcery, object_wizard->data, details->obj)) ? CMP_MATCH | CMP_STOP : 0;
@@ -2013,7 +2037,12 @@ static int sorcery_wizard_update(void *obj, void *arg, int flags)
 	const struct ast_sorcery_object_wizard *object_wizard = obj;
 	const struct sorcery_details *details = arg;
 
-	return (object_wizard->wizard->callbacks.update && !object_wizard->wizard->callbacks.update(details->sorcery, object_wizard->data, details->obj) &&
+	if (!object_wizard->wizard->callbacks.update) {
+		ast_debug(5, "Sorcery wizard '%s' does not support updating\n", object_wizard->wizard->callbacks.name);
+		return 0;
+	}
+
+	return (!object_wizard->wizard->callbacks.update(details->sorcery, object_wizard->data, details->obj) &&
 		!object_wizard->caching) ? CMP_MATCH | CMP_STOP : 0;
 }
 
@@ -2081,7 +2110,12 @@ static int sorcery_wizard_delete(void *obj, void *arg, int flags)
 	const struct ast_sorcery_object_wizard *object_wizard = obj;
 	const struct sorcery_details *details = arg;
 
-	return (object_wizard->wizard->callbacks.delete && !object_wizard->wizard->callbacks.delete(details->sorcery, object_wizard->data, details->obj) &&
+	if (!object_wizard->wizard->callbacks.delete) {
+		ast_debug(5, "Sorcery wizard '%s' does not support deletion\n", object_wizard->wizard->callbacks.name);
+		return 0;
+	}
+
+	return (!object_wizard->wizard->callbacks.delete(details->sorcery, object_wizard->data, details->obj) &&
 		!object_wizard->caching) ? CMP_MATCH | CMP_STOP : 0;
 }
 
@@ -2332,4 +2366,9 @@ int ast_sorcery_is_object_field_registered(const struct ast_sorcery_object_type 
 
 	ao2_cleanup(object_field);
 	return res;
+}
+
+const char *ast_sorcery_get_module(const struct ast_sorcery *sorcery)
+{
+	return sorcery->module_name;
 }

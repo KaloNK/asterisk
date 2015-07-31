@@ -617,6 +617,17 @@ int ast_sorcery_get_wizard_mapping(struct ast_sorcery *sorcery,
 	const char *type, int index, struct ast_sorcery_wizard **wizard, void **data);
 
 /*!
+ * \brief Unregister an object type
+ *
+ * \param sorcery Pointer to a sorcery structure
+ * \param type Type of object
+ *
+ * \retval 0 success
+ * \retval -1 failure
+ */
+int ast_sorcery_object_unregister(struct ast_sorcery *sorcery, const char *type);
+
+/*!
  * \brief Register an object type
  *
  * \param sorcery Pointer to a sorcery structure
@@ -1278,6 +1289,15 @@ struct ast_sorcery_object_type *ast_sorcery_get_object_type(const struct ast_sor
  */
 int ast_sorcery_is_object_field_registered(const struct ast_sorcery_object_type *object_type,
 		const char *field_name);
+
+/*!
+ * \brief Get the module that has opened the provided sorcery instance.
+ *
+ * \param sorcery The sorcery instance
+ *
+ * \return The module
+ */
+const char *ast_sorcery_get_module(const struct ast_sorcery *sorcery);
 
 #if defined(__cplusplus) || defined(c_plusplus)
 }

@@ -302,9 +302,9 @@
 				<configOption name="rewrite_contact">
 					<synopsis>Allow Contact header to be rewritten with the source IP address-port</synopsis>
 					<description><para>
-						On inbound SIP messages from this endpoint, the Contact header will be changed to have the
-						source IP address and port. This option does not affect outbound messages send to this
-						endpoint.
+						On inbound SIP messages from this endpoint, the Contact header or an appropriate Record-Route
+						header will be changed to have the source IP address and port. This option does not affect
+						outbound messages sent to this endpoint.
 					</para></description>
 				</configOption>
 				<configOption name="rtp_ipv6" default="no">
@@ -469,6 +469,15 @@
 					<description><para>
 						This option only applies if <replaceable>media_encryption</replaceable> is
 						set to <literal>sdes</literal> or <literal>dtls</literal>.
+					</para></description>
+				</configOption>
+				<configOption name="g726_non_standard" default="no">
+					<synopsis>Force g.726 to use AAL2 packing order when negotiating g.726 audio</synopsis>
+					<description><para>
+                                                When set to "yes" and an endpoint negotiates g.726 audio then use g.726 for AAL2
+                                                packing order instead of what is recommended by RFC3551. Since this essentially
+                                                replaces the underlying 'g726' codec with 'g726aal2' then 'g726aal2' needs to be
+                                                specified in the endpoint's allowed codec list.
 					</para></description>
 				</configOption>
 				<configOption name="inband_progress" default="no">
@@ -776,6 +785,30 @@
 					<description><para>
 						If specified, any channel created for this endpoint will automatically
 						have this accountcode set on it.
+					</para></description>
+				</configOption>
+				<configOption name="rtp_keepalive">
+					<synopsis>Number of seconds between RTP comfort noise keepalive packets.</synopsis>
+					<description><para>
+						At the specified interval, Asterisk will send an RTP comfort noise frame. This may
+						be useful for situations where Asterisk is behind a NAT or firewall and must keep a
+						hole open in order to allow for media to arrive at Asterisk.
+					</para></description>
+				</configOption>
+				<configOption name="rtp_timeout" default="0">
+					<synopsis>Maximum number of seconds without receiving RTP (while off hold) before terminating call.</synopsis>
+					<description><para>
+						This option configures the number of seconds without RTP (while off hold) before
+						considering a channel as dead. When the number of seconds is reached the underlying
+						channel is hung up. By default this option is set to 0, which means do not check.
+					</para></description>
+				</configOption>
+				<configOption name="rtp_timeout_hold" default="0">
+					<synopsis>Maximum number of seconds without receiving RTP (while on hold) before terminating call.</synopsis>
+					<description><para>
+						This option configures the number of seconds without RTP (while on hold) before
+						considering a channel as dead. When the number of seconds is reached the underlying
+						channel is hung up. By default this option is set to 0, which means do not check.
 					</para></description>
 				</configOption>
 			</configObject>
@@ -1857,6 +1890,15 @@
  ***/
 
 #define MOD_DATA_CONTACT "contact"
+
+/*! Number of serializers in pool if one not supplied. */
+#define SERIALIZER_POOL_SIZE		8
+
+/*! Next serializer pool index to use. */
+static int serializer_pool_pos;
+
+/*! Pool of serializers to use if not supplied. */
+static struct ast_taskprocessor *serializer_pool[SERIALIZER_POOL_SIZE];
 
 static pjsip_endpoint *ast_pjsip_endpoint;
 
@@ -3313,22 +3355,81 @@ int ast_sip_append_body(pjsip_tx_data *tdata, const char *body_text)
 	return 0;
 }
 
-struct ast_taskprocessor *ast_sip_create_serializer(void)
+struct ast_taskprocessor *ast_sip_create_serializer_group(struct ast_serializer_shutdown_group *shutdown_group)
 {
 	struct ast_taskprocessor *serializer;
 	char name[AST_UUID_STR_LEN];
 
 	ast_uuid_generate_str(name, sizeof(name));
 
-	serializer = ast_threadpool_serializer(name, sip_threadpool);
+	serializer = ast_threadpool_serializer_group(name, sip_threadpool, shutdown_group);
 	if (!serializer) {
 		return NULL;
 	}
 	return serializer;
 }
 
+struct ast_taskprocessor *ast_sip_create_serializer(void)
+{
+	return ast_sip_create_serializer_group(NULL);
+}
+
+/*!
+ * \internal
+ * \brief Shutdown the serializers in the default pool.
+ * \since 14.0.0
+ *
+ * \return Nothing
+ */
+static void serializer_pool_shutdown(void)
+{
+	int idx;
+
+	for (idx = 0; idx < SERIALIZER_POOL_SIZE; ++idx) {
+		ast_taskprocessor_unreference(serializer_pool[idx]);
+		serializer_pool[idx] = NULL;
+	}
+}
+
+/*!
+ * \internal
+ * \brief Setup the serializers in the default pool.
+ * \since 14.0.0
+ *
+ * \retval 0 on success.
+ * \retval -1 on error.
+ */
+static int serializer_pool_setup(void)
+{
+	int idx;
+
+	for (idx = 0; idx < SERIALIZER_POOL_SIZE; ++idx) {
+		serializer_pool[idx] = ast_sip_create_serializer();
+		if (!serializer_pool[idx]) {
+			serializer_pool_shutdown();
+			return -1;
+		}
+	}
+	return 0;
+}
+
 int ast_sip_push_task(struct ast_taskprocessor *serializer, int (*sip_task)(void *), void *task_data)
 {
+	if (!serializer) {
+		unsigned int pos;
+
+		/*
+		 * Pick a serializer to use from the pool.
+		 *
+		 * Note: We don't care about any reentrancy behavior
+		 * when incrementing serializer_pool_pos.  If it gets
+		 * incorrectly incremented it doesn't matter.
+		 */
+		pos = serializer_pool_pos++;
+		pos %= SERIALIZER_POOL_SIZE;
+		serializer = serializer_pool[pos];
+	}
+
 	if (serializer) {
 		return ast_taskprocessor_push(serializer, sip_task, task_data);
 	} else {
@@ -3381,18 +3482,10 @@ int ast_sip_push_task_synchronous(struct ast_taskprocessor *serializer, int (*si
 	std.task = sip_task;
 	std.task_data = task_data;
 
-	if (serializer) {
-		if (ast_taskprocessor_push(serializer, sync_task, &std)) {
-			ast_mutex_destroy(&std.lock);
-			ast_cond_destroy(&std.cond);
-			return -1;
-		}
-	} else {
-		if (ast_threadpool_push(sip_threadpool, sync_task, &std)) {
-			ast_mutex_destroy(&std.lock);
-			ast_cond_destroy(&std.cond);
-			return -1;
-		}
+	if (ast_sip_push_task(serializer, sync_task, &std)) {
+		ast_mutex_destroy(&std.lock);
+		ast_cond_destroy(&std.cond);
+		return -1;
 	}
 
 	ast_mutex_lock(&std.lock);
@@ -3683,6 +3776,18 @@ static int load_module(void)
 		return AST_MODULE_LOAD_DECLINE;
 	}
 
+	if (serializer_pool_setup()) {
+		ast_log(LOG_ERROR, "Failed to create SIP serializer pool. Aborting load\n");
+		ast_threadpool_shutdown(sip_threadpool);
+		ast_sip_destroy_system();
+		pj_pool_release(memory_pool);
+		memory_pool = NULL;
+		pjsip_endpt_destroy(ast_pjsip_endpoint);
+		ast_pjsip_endpoint = NULL;
+		pj_caching_pool_destroy(&caching_pool);
+		return AST_MODULE_LOAD_DECLINE;
+	}
+
 	ast_sip_initialize_dns();
 
 	pjsip_tsx_layer_init_module(ast_pjsip_endpoint);
@@ -3812,6 +3917,7 @@ static int unload_module(void)
 	 */
 	ast_sip_push_task_synchronous(NULL, unload_pjsip, NULL);
 
+	serializer_pool_shutdown();
 	ast_threadpool_shutdown(sip_threadpool);
 
 	ast_sip_destroy_cli();

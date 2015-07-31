@@ -328,7 +328,7 @@ int AST_OPTIONAL_API_NAME(ast_websocket_write)(struct ast_websocket *session, en
 	if (length == 126) {
 		put_unaligned_uint16(&frame[2], htons(actual_length));
 	} else if (length == 127) {
-		put_unaligned_uint64(&frame[2], htonl(actual_length));
+		put_unaligned_uint64(&frame[2], htobe64(actual_length));
 	}
 
 	ao2_lock(session);
@@ -781,13 +781,6 @@ int AST_OPTIONAL_API_NAME(ast_websocket_uri_cb)(struct ast_tcptls_session_instan
 			return 0;
 		}
 
-		fprintf(ser->f, "HTTP/1.1 101 Switching Protocols\r\n"
-			"Upgrade: %s\r\n"
-			"Connection: Upgrade\r\n"
-			"Sec-WebSocket-Accept: %s\r\n",
-			upgrade,
-			websocket_combine_key(key, base64, sizeof(base64)));
-
 		/* RFC 6455, Section 4.1:
 		 *
 		 * 6. If the response includes a |Sec-WebSocket-Protocol| header
@@ -798,11 +791,23 @@ int AST_OPTIONAL_API_NAME(ast_websocket_uri_cb)(struct ast_tcptls_session_instan
 		 *    Connection_.
 		 */
 		if (protocol) {
-			fprintf(ser->f, "Sec-WebSocket-Protocol: %s\r\n",
+			fprintf(ser->f, "HTTP/1.1 101 Switching Protocols\r\n"
+				"Upgrade: %s\r\n"
+				"Connection: Upgrade\r\n"
+				"Sec-WebSocket-Accept: %s\r\n"
+				"Sec-WebSocket-Protocol: %s\r\n\r\n",
+				upgrade,
+				websocket_combine_key(key, base64, sizeof(base64)),
 				protocol);
+		} else {
+			fprintf(ser->f, "HTTP/1.1 101 Switching Protocols\r\n"
+				"Upgrade: %s\r\n"
+				"Connection: Upgrade\r\n"
+				"Sec-WebSocket-Accept: %s\r\n\r\n",
+				upgrade,
+				websocket_combine_key(key, base64, sizeof(base64)));
 		}
 
-		fprintf(ser->f, "\r\n");
 		fflush(ser->f);
 	} else {
 

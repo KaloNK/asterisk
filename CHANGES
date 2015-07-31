@@ -17,6 +17,38 @@ AMI
  * A new ContactStatus event has been added that reflects res_pjsip contact
    lifecycle changes:  Created, Removed, Reachable, Unreachable, Unknown.
 
+ * Added the Linkedid header to the common channel headers listed for each
+   channel in AMI events.
+
+ARI
+------------------
+ * A new feature has been added that enables the retrieval of modules and
+   module information through an HTTP request. Information on a single module
+   can be also be retrieved. Individual modules can be loaded to Asterisk, as
+   well as unloaded and reloaded.
+
+* A new resource has been added to the 'asterisk' resource, 'config/dynamic'.
+   This resource allows for push configuration of sorcery derived objects
+   within Asterisk. The resource supports creation, retrieval, updating, and
+   deletion. Sorcery derived objects that are manipulated by this resource
+   must have a sorcery wizard that supports the desired operations.
+
+
+res_pjsip
+------------------
+* A new 'g726_non_standard' endpoint option has been added that, when set to
+  'yes' and g.726 audio is negotiated, forces the codec to be treated as if it
+  is AAL2 packed on the channel.
+
+* A new 'rtp_keepalive' endpoint option has been added. This option specifies
+  an interval, in seconds, at which we will send RTP comfort noise packets to
+  the endpoint. This functions identically to chan_sip's "rtpkeepalive" option.
+
+* New 'rtp_timeout' and 'rtp_timeout_hold' endpoint options have been added.
+  These options specify the amount of time, in seconds, that Asterisk will wait
+  before terminating the call due to lack of received RTP. These are identical
+  to chan_sip's rtptimeout and rtpholdtimeout options.
+
 ------------------------------------------------------------------------------
 --- Functionality changes from Asterisk 13.3.0 to Asterisk 13.4.0 ------------
 ------------------------------------------------------------------------------

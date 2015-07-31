@@ -3175,10 +3175,24 @@ static int match_and_cleanup_peer_sched(void *peerobj, void *arg, int flags)
 
 static void unlink_peers_from_tables(peer_unlink_flag_t flag)
 {
-	ao2_t_callback(peers, OBJ_NODATA | OBJ_UNLINK | OBJ_MULTIPLE,
+	struct ao2_iterator *peers_iter;
+
+	/*
+	 * We must remove the ref outside of the peers container to prevent
+	 * a deadlock condition when unsubscribing from stasis while it is
+	 * invoking a subscription event callback.
+	 */
+	peers_iter = ao2_t_callback(peers, OBJ_UNLINK | OBJ_MULTIPLE,
 		match_and_cleanup_peer_sched, &flag, "initiating callback to remove marked peers");
-	ao2_t_callback(peers_by_ip, OBJ_NODATA | OBJ_UNLINK | OBJ_MULTIPLE,
+	if (peers_iter) {
+		ao2_iterator_destroy(peers_iter);
+	}
+
+	peers_iter = ao2_t_callback(peers_by_ip, OBJ_UNLINK | OBJ_MULTIPLE,
 		match_and_cleanup_peer_sched, &flag, "initiating callback to remove marked peers_by_ip");
+	if (peers_iter) {
+		ao2_iterator_destroy(peers_iter);
+	}
 }
 
 /* \brief Unlink all marked peers from ao2 containers */
@@ -9244,6 +9258,15 @@ static struct sip_pvt *__find_call(struct sip_request *req, struct ast_sockaddr 
 
 			switch (found) {
 			case SIP_REQ_MATCH:
+				sip_pvt_lock(sip_pvt_ptr);
+				if (args.method != SIP_RESPONSE && args.authentication_present
+						&& strcmp(args.fromtag, sip_pvt_ptr->theirtag)) {
+					/* If we have a request that uses athentication and the fromtag is
+					 * different from that in the original call dialog, update the
+					 * fromtag in the saved call dialog */
+					ast_string_field_set(sip_pvt_ptr, theirtag, args.fromtag);
+				}
+				sip_pvt_unlock(sip_pvt_ptr);
 				ao2_iterator_destroy(iterator);
 				dialog_unref(fork_pvt, "unref fork_pvt");
 				free_via(via);
@@ -19754,8 +19777,7 @@ static void cleanup_stale_contexts(char *new, char *old)
 			}
 
 		}
-		if (stalecontext)
-			ast_context_destroy(ast_context_find(stalecontext), "SIP");
+		ast_context_destroy_by_name(stalecontext, "SIP");
 	}
 }
 
@@ -24914,10 +24936,12 @@ static int handle_invite_replaces(struct sip_pvt *p, struct sip_request *req,
 		if (ast_bridge_impart(bridge, c, replaces_chan, NULL,
 			AST_BRIDGE_IMPART_CHAN_INDEPENDENT)) {
 			ast_hangup(c);
+			ast_channel_unref(c);
 		}
 	} else {
 		ast_channel_move(replaces_chan, c);
 		ast_hangup(c);
+		ast_channel_unref(c);
 	}
 	sip_pvt_lock(p);
 	return 0;
@@ -30406,8 +30430,11 @@ static struct sip_peer *build_peer(const char *name, struct ast_variable *v, str
 		if (!ast_sockaddr_isnull(&peer->addr)) {
 			ao2_t_unlink(peers_by_ip, peer, "ao2_unlink peer from peers_by_ip table");
 		}
-		if (!(peer->the_mark))
+		if (!(peer->the_mark)) {
 			firstpass = 0;
+		} else {
+			ast_format_cap_remove_by_type(peer->caps, AST_MEDIA_TYPE_UNKNOWN);
+		}
 	} else {
 		if (!(peer = ao2_t_alloc(sizeof(*peer), sip_destroy_peer_fn, "allocate a peer struct"))) {
 			return NULL;
@@ -34544,7 +34571,6 @@ static int unload_module(void)
 {
 	struct sip_pvt *p;
 	struct sip_threadinfo *th;
-	struct ast_context *con;
 	struct ao2_iterator i;
 	int wait_count;
 
@@ -34722,10 +34748,7 @@ static int unload_module(void)
 	close(sipsock);
 	io_context_destroy(io);
 	ast_sched_context_destroy(sched);
-	con = ast_context_find(used_context);
-	if (con) {
-		ast_context_destroy(con, "SIP");
-	}
+	ast_context_destroy_by_name(used_context, "SIP");
 	ast_unload_realtime("sipregs");
 	ast_unload_realtime("sippeers");
 	ast_cc_monitor_unregister(&sip_cc_monitor_callbacks);

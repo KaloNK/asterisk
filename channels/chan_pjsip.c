@@ -388,7 +388,9 @@ static struct ast_channel *chan_pjsip_new(struct ast_sip_session *session, int s
 	chan = ast_channel_alloc_with_endpoint(1, state,
 		S_COR(session->id.number.valid, session->id.number.str, ""),
 		S_COR(session->id.name.valid, session->id.name.str, ""),
-		session->endpoint->accountcode, "", "", assignedids, requestor, 0,
+		session->endpoint->accountcode,
+		exten, session->endpoint->context,
+		assignedids, requestor, 0,
 		session->endpoint->persistent, "PJSIP/%s-%08x",
 		ast_sorcery_object_get_id(session->endpoint),
 		(unsigned) ast_atomic_fetchadd_int((int *) &chan_idx, +1));
@@ -445,8 +447,6 @@ static struct ast_channel *chan_pjsip_new(struct ast_sip_session *session, int s
 	ast_party_id_copy(&ast_channel_caller(chan)->id, &session->id);
 	ast_party_id_copy(&ast_channel_caller(chan)->ani, &session->id);
 
-	ast_channel_context_set(chan, session->endpoint->context);
-	ast_channel_exten_set(chan, S_OR(exten, "s"));
 	ast_channel_priority_set(chan, 1);
 
 	ast_channel_callgroup_set(chan, session->endpoint->pickup.callgroup);
@@ -625,8 +625,19 @@ static struct ast_frame *chan_pjsip_read(struct ast_channel *ast)
 		return f;
 	}
 
+	ast_rtp_instance_set_last_rx(media->rtp, time(NULL));
+
 	if (f->frametype != AST_FRAME_VOICE) {
 		return f;
+	}
+
+	if (ast_format_cap_iscompatible_format(channel->session->endpoint->media.codecs, f->subclass.format) == AST_FORMAT_CMP_NOT_EQUAL) {
+		ast_debug(1, "Oooh, got a frame with format of %s on channel '%s' when endpoint '%s' is not configured for it\n",
+			ast_format_get_name(f->subclass.format), ast_channel_name(ast),
+			ast_sorcery_object_get_id(channel->session->endpoint));
+
+		ast_frfree(f);
+		return &ast_null_frame;
 	}
 
 	if (channel->session->dsp) {

@@ -3905,11 +3905,7 @@ static struct ast_frame *__ast_read(struct ast_channel *chan, int dropaudio)
 		switch (f->frametype) {
 		case AST_FRAME_CONTROL:
 			if (f->subclass.integer == AST_CONTROL_ANSWER) {
-				if (!ast_test_flag(ast_channel_flags(chan), AST_FLAG_OUTGOING)) {
-					ast_debug(1, "Ignoring answer on an inbound call!\n");
-					ast_frfree(f);
-					f = &ast_null_frame;
-				} else if (prestate == AST_STATE_UP && ast_channel_is_bridged(chan)) {
+				if (prestate == AST_STATE_UP && ast_channel_is_bridged(chan)) {
 					ast_debug(1, "Dropping duplicate answer!\n");
 					ast_frfree(f);
 					f = &ast_null_frame;
@@ -4660,6 +4656,11 @@ int ast_indicate_data(struct ast_channel *chan, int _condition,
 		/* We have a tone to play, yay. */
 		ast_debug(1, "Driver for channel '%s' does not support indication %u, emulating it\n", ast_channel_name(chan), condition);
 		res = ast_playtones_start(chan, 0, ts->data, 1);
+		if (!res) {
+			ast_test_suite_event_notify("RINGING_INBAND",
+					"Channel: %s\r\n",
+					ast_channel_name(chan));
+		}
 		ts = ast_tone_zone_sound_unref(ts);
 	}
 
@@ -7408,7 +7409,7 @@ int ast_moh_start(struct ast_channel *chan, const char *mclass, const char *inte
 
 	ast_verb(3, "Music class %s requested but no musiconhold loaded.\n", mclass ? mclass : (interpclass ? interpclass : "default"));
 
-	return 0;
+	return -1;
 }
 
 void ast_moh_stop(struct ast_channel *chan)

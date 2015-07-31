@@ -1119,7 +1119,7 @@ static int hintdevice_cmp_multiple(void *obj, void *arg, int flags)
 		right_key = right->hintdevice;
 		/* Fall through */
 	case OBJ_SEARCH_KEY:
-		cmp = strcmp(left->hintdevice, right_key);
+		cmp = strcasecmp(left->hintdevice, right_key);
 		break;
 	case OBJ_SEARCH_PARTIAL_KEY:
 		/*
@@ -1143,7 +1143,7 @@ static int hintdevice_remove_cb(void *obj, void *arg, void *data, int flags)
 	char *device = arg;
 	struct ast_hint *hint = data;
 
-	if (!strcmp(candidate->hintdevice, device)
+	if (!strcasecmp(candidate->hintdevice, device)
 		&& candidate->hint == hint) {
 		return CMP_MATCH;
 	}
@@ -8742,9 +8742,9 @@ struct ast_context *ast_context_find_or_create(struct ast_context **extcontexts,
 		ast_rdlock_contexts();
 		local_contexts = &contexts;
 		tmp = ast_hashtab_lookup(contexts_table, &search);
-		ast_unlock_contexts();
 		if (tmp) {
 			tmp->refcount++;
+			ast_unlock_contexts();
 			return tmp;
 		}
 	} else { /* local contexts just in a linked list; search there for the new context; slow, linear search, but not frequent */
@@ -8768,11 +8768,13 @@ struct ast_context *ast_context_find_or_create(struct ast_context **extcontexts,
 		tmp->refcount = 1;
 	} else {
 		ast_log(LOG_ERROR, "Danger! We failed to allocate a context for %s!\n", name);
+		if (!extcontexts) {
+			ast_unlock_contexts();
+		}
 		return NULL;
 	}
 
 	if (!extcontexts) {
-		ast_wrlock_contexts();
 		tmp->next = *local_contexts;
 		*local_contexts = tmp;
 		ast_hashtab_insert_safe(contexts_table, tmp); /*put this context into the tree */
@@ -9671,18 +9673,24 @@ int ast_context_add_ignorepat2(struct ast_context *con, const char *value, const
 
 int ast_ignore_pattern(const char *context, const char *pattern)
 {
-	struct ast_context *con = ast_context_find(context);
+	int ret = 0;
+	struct ast_context *con;
 
+	ast_rdlock_contexts();
+	con = ast_context_find(context);
 	if (con) {
 		struct ast_ignorepat *pat;
 
 		for (pat = con->ignorepats; pat; pat = pat->next) {
-			if (ast_extension_match(pat->pattern, pattern))
-				return 1;
+			if (ast_extension_match(pat->pattern, pattern)) {
+				ret = 1;
+				break;
+			}
 		}
 	}
+	ast_unlock_contexts();
 
-	return 0;
+	return ret;
 }
 
 /*
@@ -10890,6 +10898,22 @@ void __ast_context_destroy(struct ast_context *list, struct ast_hashtab *context
 	}
 }
 
+int ast_context_destroy_by_name(const char *context, const char *registrar)
+{
+	struct ast_context *con;
+	int ret = -1;
+
+	ast_wrlock_contexts();
+	con = ast_context_find(context);
+	if (con) {
+		ast_context_destroy(con, registrar);
+		ret = 0;
+	}
+	ast_unlock_contexts();
+
+	return ret;
+}
+
 void ast_context_destroy(struct ast_context *con, const char *registrar)
 {
 	ast_wrlock_contexts();
@@ -11567,6 +11591,8 @@ int pbx_builtin_setvar_helper(struct ast_channel *chan, const char *name, const 
 	struct ast_var_t *newvariable;
 	struct varshead *headp;
 	const char *nametail = name;
+	/*! True if the old value was not an empty string. */
+	int old_value_existed = 0;
 
 	if (name[strlen(name) - 1] == ')') {
 		char *function = ast_strdupa(name);
@@ -11593,6 +11619,7 @@ int pbx_builtin_setvar_helper(struct ast_channel *chan, const char *name, const 
 		if (strcmp(ast_var_name(newvariable), nametail) == 0) {
 			/* there is already such a variable, delete it */
 			AST_LIST_REMOVE_CURRENT(entries);
+			old_value_existed = !ast_strlen_zero(ast_var_value(newvariable));
 			ast_var_delete(newvariable);
 			break;
 		}
@@ -11605,6 +11632,9 @@ int pbx_builtin_setvar_helper(struct ast_channel *chan, const char *name, const 
 		}
 		AST_LIST_INSERT_HEAD(headp, newvariable, entries);
 		ast_channel_publish_varset(chan, name, value);
+	} else if (old_value_existed) {
+		/* We just deleted a non-empty dialplan variable. */
+		ast_channel_publish_varset(chan, name, "");
 	}
 
 	if (chan)
