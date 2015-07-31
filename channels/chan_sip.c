@@ -9116,6 +9116,15 @@ static struct sip_pvt *find_call(struct sip_request *req, struct ast_sockaddr *a
 
 			switch (found) {
 			case SIP_REQ_MATCH:
+				sip_pvt_lock(sip_pvt_ptr);
+				if (args.method != SIP_RESPONSE && args.authentication_present
+						&& strcmp(args.fromtag, sip_pvt_ptr->theirtag)) {
+					/* If we have a request that uses athentication and the fromtag is
+					 * different from that in the original call dialog, update the
+					 * fromtag in the saved call dialog */
+					ast_string_field_set(sip_pvt_ptr, theirtag, args.fromtag);
+				}
+				sip_pvt_unlock(sip_pvt_ptr);
 				ao2_iterator_destroy(iterator);
 				dialog_unref(fork_pvt, "unref fork_pvt");
 				free_via(via);
@@ -19513,8 +19522,7 @@ static void cleanup_stale_contexts(char *new, char *old)
 			}
 			
 		}
-		if (stalecontext)
-			ast_context_destroy(ast_context_find(stalecontext), "SIP");
+		ast_context_destroy_by_name(stalecontext, "SIP");
 	}
 }
 
@@ -25117,6 +25125,39 @@ static int sip_t38_abort(const void *data)
 	return 0;
 }
 
+/*! \brief Checks state of the p->refer->refer_call state: can it be picked up?
+ *
+ * It will terminate the call if it cannot be picked up; e.g. because it
+ * was gone, or because it wasn't in a ringing state.
+ *
+ * \return 1 if terminated, 0 if ok
+ */
+static int terminate_on_invalid_replaces_state(struct sip_pvt *p, struct sip_request *req, const char *replace_id)
+{
+	if (p->refer->refer_call == p) {
+		ast_log(LOG_NOTICE, "INVITE with replaces into its own call id (%s == %s)!\n", replace_id, p->callid);
+		transmit_response_reliable(p, "400 Bad request", req);	/* The best way to not not accept the transfer */
+
+	} else if (!p->refer->refer_call->owner) {
+		/* Oops, someting wrong anyway, no owner, no call */
+		ast_log(LOG_NOTICE, "Supervised transfer attempted to replace non-existing call id (%s)!\n", replace_id);
+		/* Check for better return code */
+		transmit_response_reliable(p, "481 Call Leg Does Not Exist (Replace)", req);
+
+	} else if (ast_channel_state(p->refer->refer_call->owner) != AST_STATE_RINGING &&
+			ast_channel_state(p->refer->refer_call->owner) != AST_STATE_RING &&
+			ast_channel_state(p->refer->refer_call->owner) != AST_STATE_UP) {
+		ast_log(LOG_NOTICE, "Supervised transfer attempted to replace non-ringing or active call id (%s)!\n", replace_id);
+		transmit_response_reliable(p, "603 Declined (Replaces)", req);
+
+	} else {
+		/* Ok */
+		return 0;
+	}
+	/* Terminated */
+	return 1;
+}
+
 /*!
  * \brief bare-bones support for SIP UPDATE
  *
@@ -25318,6 +25359,7 @@ static int handle_request_invite(struct sip_pvt *p, struct sip_request *req, str
 	int gotdest;
 	const char *p_replaces;
 	char *replace_id = NULL;
+	int magic_call_id = 0;
 	int refer_locked = 0;
 	const char *required;
 	unsigned int required_profile = 0;
@@ -25549,40 +25591,27 @@ static int handle_request_invite(struct sip_pvt *p, struct sip_request *req, str
 					ast_channel_unlock(subscription->owner);
 				}
 				subscription = dialog_unref(subscription, "unref dialog subscription");
+				magic_call_id = !ast_strlen_zero(pickup.exten);
 			}
 		}
 
-		/* This locks both refer_call pvt and refer_call pvt's owner!!!*/
-		if (!error && ast_strlen_zero(pickup.exten) && (p->refer->refer_call = get_sip_pvt_byid_locked(replace_id, totag, fromtag)) == NULL) {
-			ast_log(LOG_NOTICE, "Supervised transfer attempted to replace non-existent call id (%s)!\n", replace_id);
-			transmit_response_reliable(p, "481 Call Leg Does Not Exist (Replaces)", req);
-			error = 1;
-		} else {
-			refer_locked = 1;
-		}
-
-		/* The matched call is the call from the transferer to Asterisk .
-			We want to bridge the bridged part of the call to the
-			incoming invite, thus taking over the refered call */
-
-		if (p->refer->refer_call == p) {
-			ast_log(LOG_NOTICE, "INVITE with replaces into it's own call id (%s == %s)!\n", replace_id, p->callid);
-			transmit_response_reliable(p, "400 Bad request", req);	/* The best way to not not accept the transfer */
-			error = 1;
-		}
-
-		if (!error && ast_strlen_zero(pickup.exten) && !p->refer->refer_call->owner) {
-			/* Oops, someting wrong anyway, no owner, no call */
-			ast_log(LOG_NOTICE, "Supervised transfer attempted to replace non-existing call id (%s)!\n", replace_id);
-			/* Check for better return code */
-			transmit_response_reliable(p, "481 Call Leg Does Not Exist (Replace)", req);
-			error = 1;
-		}
-
-		if (!error && ast_strlen_zero(pickup.exten) && ast_channel_state(p->refer->refer_call->owner) != AST_STATE_RINGING && ast_channel_state(p->refer->refer_call->owner) != AST_STATE_RING && ast_channel_state(p->refer->refer_call->owner) != AST_STATE_UP) {
-			ast_log(LOG_NOTICE, "Supervised transfer attempted to replace non-ringing or active call id (%s)!\n", replace_id);
-			transmit_response_reliable(p, "603 Declined (Replaces)", req);
-			error = 1;
+		if (!error) {
+			if (magic_call_id) {
+				;
+			/* This locks both refer_call pvt and refer_call pvt's owner!!!*/
+			} else if ((p->refer->refer_call = get_sip_pvt_byid_locked(replace_id, totag, fromtag))) {
+				/* The matched call is the call from the transferer to Asterisk .
+					We want to bridge the bridged part of the call to the
+					incoming invite, thus taking over the refered call */
+				refer_locked = 1;
+				if (terminate_on_invalid_replaces_state(p, req, replace_id)) {
+					error = 1;
+				}
+			} else {
+				ast_log(LOG_NOTICE, "Supervised transfer attempted to replace non-existent call id (%s)!\n", replace_id);
+				transmit_response_reliable(p, "481 Call Leg Does Not Exist (Replaces)", req);
+				error = 1;
+			}
 		}
 
 		if (error) {	/* Give up this dialog */
@@ -25824,10 +25853,51 @@ static int handle_request_invite(struct sip_pvt *p, struct sip_request *req, str
 				goto request_invite_cleanup;
 			}
 
+			/* We cannot call sip_new with any channel locks
+			 * held. Unlock the referred channel if locked. */
+			if (refer_locked) {
+				sip_pvt_unlock(p->refer->refer_call);
+				if (p->refer->refer_call->owner) {
+					ast_channel_unlock(p->refer->refer_call->owner);
+				}
+			}
+
 			/* First invitation - create the channel.  Allocation
 			 * failures are handled below. */
-
 			c = sip_new(p, AST_STATE_DOWN, S_OR(p->peername, NULL), NULL, p->logger_callid);
+
+			/* Reacquire the lock on the referred call. */
+			if (refer_locked) {
+				/* Reuse deadlock avoid pattern found in
+				 * get_sip_pvt_byid_locked. */
+				sip_pvt_lock(p->refer->refer_call);
+				while (p->refer->refer_call->owner && ast_channel_trylock(p->refer->refer_call->owner)) {
+					sip_pvt_unlock(p->refer->refer_call);
+					usleep(1);
+					sip_pvt_lock(p->refer->refer_call);
+				}
+
+				/* And now, check once more that the call is still
+				 * still available. Yuck. Bail out if it isn't. */
+				if (terminate_on_invalid_replaces_state(p, req, replace_id)) {
+					/* Free the referred call: it's not ours anymore. */
+					sip_pvt_unlock(p->refer->refer_call);
+					if (p->refer->refer_call->owner) {
+						ast_channel_unlock(p->refer->refer_call->owner);
+					}
+					p->refer->refer_call = dialog_unref(p->refer->refer_call, "unref dialog p->refer->refer_call");
+					refer_locked = 0;
+					/* Kill the channel we just created. */
+					sip_pvt_unlock(p);
+					ast_hangup(c);
+					sip_pvt_lock(p); /* pvt is expected to remain locked on return, so re-lock it */
+					/* Mark the call as failed. */
+					sip_scheddestroy(p, DEFAULT_TRANS_TIMEOUT);
+					p->invitestate = INV_COMPLETED;
+					res = INV_REQ_ERROR;
+					goto request_invite_cleanup;
+				}
+			}
 
 			if (cc_recall_core_id != -1) {
 				ast_setup_cc_recall_datastore(c, cc_recall_core_id);
@@ -25887,7 +25957,7 @@ static int handle_request_invite(struct sip_pvt *p, struct sip_request *req, str
 		p->lastinvite = seqno;
 
 	if (c && replace_id) {	/* Attended transfer or call pickup - we're the target */
-		if (!ast_strlen_zero(pickup.exten)) {
+		if (magic_call_id) {
 			append_history(p, "Xfer", "INVITE/Replace received");
 
 			/* Let the caller know we're giving it a shot */
@@ -26058,7 +26128,7 @@ static int handle_request_invite(struct sip_pvt *p, struct sip_request *req, str
 
 request_invite_cleanup:
 
-	if (refer_locked && p->refer && p->refer->refer_call) {
+	if (refer_locked) {
 		sip_pvt_unlock(p->refer->refer_call);
 		if (p->refer->refer_call->owner) {
 			ast_channel_unlock(p->refer->refer_call->owner);
@@ -26982,11 +27052,14 @@ static int handle_request_bye(struct sip_pvt *p, struct sip_request *req)
 				if (bridged_to) {
 					/* Don't actually hangup here... */
 					ast_queue_control(c, AST_CONTROL_UNHOLD);
+					sip_pvt_unlock(p);
 					ast_channel_unlock(c);  /* async_goto can do a masquerade, no locks can be held during a masq */
 					ast_async_goto(bridged_to, p->context, p->refer->refer_to, 1);
 					ast_channel_lock(c);
-				} else
+					sip_pvt_lock(p);
+				} else {
 					ast_queue_hangup(p->owner);
+				}
 			}
 		} else {
 			ast_log(LOG_WARNING, "Invalid transfer information from '%s'\n", ast_sockaddr_stringify(&p->recv));
@@ -34873,7 +34946,6 @@ static int unload_module(void)
 {
 	struct sip_pvt *p;
 	struct sip_threadinfo *th;
-	struct ast_context *con;
 	struct ao2_iterator i;
 	int wait_count;
 
@@ -35049,10 +35121,7 @@ static int unload_module(void)
 	close(sipsock);
 	io_context_destroy(io);
 	ast_sched_context_destroy(sched);
-	con = ast_context_find(used_context);
-	if (con) {
-		ast_context_destroy(con, "SIP");
-	}
+	ast_context_destroy_by_name(used_context, "SIP");
 	ast_unload_realtime("sipregs");
 	ast_unload_realtime("sippeers");
 	ast_cc_monitor_unregister(&sip_cc_monitor_callbacks);
