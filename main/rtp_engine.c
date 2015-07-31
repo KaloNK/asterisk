@@ -190,6 +190,10 @@ struct ast_rtp_instance {
 	struct ast_srtp *srtp;
 	/*! Channel unique ID */
 	char channel_uniqueid[AST_MAX_UNIQUEID];
+	/*! Time of last packet sent */
+	time_t last_tx;
+	/*! Time of last packet received */
+	time_t last_rx;
 };
 
 /*! List of RTP engines that are currently registered */
@@ -1798,7 +1802,9 @@ int ast_rtp_engine_unload_format(struct ast_format *format)
 			rtp_engine_mime_type_cleanup(x);
 			continue;
 		}
-		ast_rtp_mime_types[y] = ast_rtp_mime_types[x];
+		if (x != y) {
+			ast_rtp_mime_types[y] = ast_rtp_mime_types[x];
+		}
 		y++;
 	}
 	mime_types_len = y;
@@ -2203,4 +2209,24 @@ int ast_rtp_engine_init()
 	add_static_payload(107, ast_format_opus, 0);
 
 	return 0;
+}
+
+time_t ast_rtp_instance_get_last_tx(const struct ast_rtp_instance *rtp)
+{
+	return rtp->last_tx;
+}
+
+void ast_rtp_instance_set_last_tx(struct ast_rtp_instance *rtp, time_t time)
+{
+	rtp->last_tx = time;
+}
+
+time_t ast_rtp_instance_get_last_rx(const struct ast_rtp_instance *rtp)
+{
+	return rtp->last_rx;
+}
+
+void ast_rtp_instance_set_last_rx(struct ast_rtp_instance *rtp, time_t time)
+{
+	rtp->last_rx = time;
 }

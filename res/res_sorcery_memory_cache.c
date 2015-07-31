@@ -118,8 +118,6 @@ struct sorcery_memory_cache {
 	unsigned int object_lifetime_maximum;
 	/*! \brief The amount of time (in seconds) before an object is marked as stale, 0 if disabled */
 	unsigned int object_lifetime_stale;
-	/*! \brief Whether objects are prefetched from normal storage at load time, 0 if disabled */
-	unsigned int prefetch;
 	/** \brief Whether all objects are expired when the object type is reloaded, 0 if disabled */
 	unsigned int expire_on_reload;
 	/*! \brief Heap of cached objects. Oldest object is at the top. */
@@ -866,7 +864,7 @@ static void *sorcery_memory_cache_retrieve_id(const struct ast_sorcery *sorcery,
 
 /*!
  * \internal
- * \brief Callback function to finish configuring the memory cache and to prefetch objects
+ * \brief Callback function to finish configuring the memory cache
  *
  * \param data The sorcery memory cache
  * \param sorcery The sorcery instance
@@ -984,8 +982,6 @@ static void *sorcery_memory_cache_open(const char *data)
 					value);
 				return NULL;
 			}
-		} else if (!strcasecmp(name, "prefetch")) {
-			cache->prefetch = ast_true(value);
 		} else if (!strcasecmp(name, "expire_on_reload")) {
 			cache->expire_on_reload = ast_true(value);
 		} else {
@@ -1153,7 +1149,6 @@ static char *sorcery_memory_cache_show(struct ast_cli_entry *e, int cmd, struct 
 	} else {
 		ast_cli(a->fd, "Object staleness is not enabled - cached objects will not go stale\n");
 	}
-	ast_cli(a->fd, "Prefetch: %s\n", AST_CLI_ONOFF(cache->prefetch));
 	ast_cli(a->fd, "Expire all objects on reload: %s\n", AST_CLI_ONOFF(cache->expire_on_reload));
 
 	ao2_ref(cache, -1);
@@ -1609,7 +1604,7 @@ AST_TEST_DEFINE(open_with_valid_options)
 			"\t* Creates a memory cache with default configuration\n"
 			"\t* Creates a memory cache with a maximum object count of 10 and verifies it\n"
 			"\t* Creates a memory cache with a maximum object lifetime of 60 and verifies it\n"
-			"\t* Creates a memory cache with a stale object lifetime of 90 and verifies it\n";
+			"\t* Creates a memory cache with a stale object lifetime of 90 and verifies it";
 		return AST_TEST_NOT_RUN;
 	case TEST_EXECUTE:
 		break;
@@ -1680,7 +1675,7 @@ AST_TEST_DEFINE(open_with_invalid_options)
 			"\t* Create a memory cache with a maximum object lifetime of -1\n"
 			"\t* Create a memory cache with a maximum object lifetime of toast\n"
 			"\t* Create a memory cache with a stale object lifetime of -1\n"
-			"\t* Create a memory cache with a stale object lifetime of toast\n";
+			"\t* Create a memory cache with a stale object lifetime of toast";
 		return AST_TEST_NOT_RUN;
 	case TEST_EXECUTE:
 		break;
@@ -1763,7 +1758,7 @@ AST_TEST_DEFINE(create_and_retrieve)
 			"\t* Creates a sorcery instance with a test object\n"
 			"\t* Creates a test object with an id of test\n"
 			"\t* Pushes the test object into the memory cache\n"
-			"\t* Confirms that the test object is in the cache\n";
+			"\t* Confirms that the test object is in the cache";
 		return AST_TEST_NOT_RUN;
 	case TEST_EXECUTE:
 		break;
@@ -1845,7 +1840,7 @@ AST_TEST_DEFINE(update)
 			"\t* Confirms that the test object is in the cache\n"
 			"\t* Creates a new test object with the same id of test\n"
 			"\t* Pushes the new test object into the memory cache\n"
-			"\t* Confirms that the new test object has replaced the old one\n";
+			"\t* Confirms that the new test object has replaced the old one";
 		return AST_TEST_NOT_RUN;
 	case TEST_EXECUTE:
 		break;
@@ -1937,7 +1932,7 @@ AST_TEST_DEFINE(delete)
 			"\t* Pushes the test object into the memory cache\n"
 			"\t* Confirms that the test object is in the cache\n"
 			"\t* Deletes the test object from the cache\n"
-			"\t* Confirms that the test object is no longer in the cache\n";
+			"\t* Confirms that the test object is no longer in the cache";
 		return AST_TEST_NOT_RUN;
 	case TEST_EXECUTE:
 		break;
@@ -2061,7 +2056,7 @@ AST_TEST_DEFINE(maximum_objects)
 			"\t* Deletes charlie from the memory cache\n"
 			"\t* Confirms that only bob is in the memory cache\n"
 			"\t* Pushes alice into the memory cache\n"
-			"\t* Confirms that bob and alice are in the memory cache\n";
+			"\t* Confirms that bob and alice are in the memory cache";
 		return AST_TEST_NOT_RUN;
 	case TEST_EXECUTE:
 		break;
@@ -2176,7 +2171,7 @@ AST_TEST_DEFINE(expiration)
 			"\t* Creates a memory cache with a maximum object lifetime of 5 seconds\n"
 			"\t* Pushes 10 objects into the memory cache\n"
 			"\t* Waits (up to) 10 seconds for expiration to occur\n"
-			"\t* Confirms that the objects have been removed from the cache\n";
+			"\t* Confirms that the objects have been removed from the cache";
 		return AST_TEST_NOT_RUN;
 	case TEST_EXECUTE:
 		break;
@@ -2391,7 +2386,7 @@ AST_TEST_DEFINE(stale)
 			"\t\t* Retrieve the stale cached object\n"
 			"\t\t* Ensure that the stale object retrieved is the same as the fresh one from earlier\n"
 			"\t\t* Wait for the cache to update with new data\n"
-			"\t\t* Ensure that new data in the cache matches backend data\n";
+			"\t\t* Ensure that new data in the cache matches backend data";
 		return AST_TEST_NOT_RUN;
 	case TEST_EXECUTE:
 		break;
@@ -2556,6 +2551,10 @@ static int load_module(void)
 		return AST_MODULE_LOAD_DECLINE;
 	}
 
+	/* This causes the stale unit test to execute last, so if a sorcery instance persists
+	 * longer than expected subsequent unit tests don't fail when setting it up.
+	 */
+	AST_TEST_REGISTER(stale);
 	AST_TEST_REGISTER(open_with_valid_options);
 	AST_TEST_REGISTER(open_with_invalid_options);
 	AST_TEST_REGISTER(create_and_retrieve);
@@ -2563,7 +2562,6 @@ static int load_module(void)
 	AST_TEST_REGISTER(delete);
 	AST_TEST_REGISTER(maximum_objects);
 	AST_TEST_REGISTER(expiration);
-	AST_TEST_REGISTER(stale);
 
 	return AST_MODULE_LOAD_SUCCESS;
 }

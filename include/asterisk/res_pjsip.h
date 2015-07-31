@@ -168,6 +168,8 @@ struct ast_sip_contact {
 	int authenticate_qualify;
 	/*! Qualify timeout. 0 is diabled. */
 	double qualify_timeout;
+	/*! Endpoint that added the contact, only available in observers */
+	struct ast_sip_endpoint *endpoint;
 };
 
 #define CONTACT_STATUS "contact_status"
@@ -284,21 +286,21 @@ enum ast_sip_auth_type {
 #define SIP_SORCERY_AUTH_TYPE "auth"
 
 struct ast_sip_auth {
-	/* Sorcery ID of the auth is its name */
+	/*! Sorcery ID of the auth is its name */
 	SORCERY_OBJECT(details);
 	AST_DECLARE_STRING_FIELDS(
-		/* Identification for these credentials */
+		/*! Identification for these credentials */
 		AST_STRING_FIELD(realm);
-		/* Authentication username */
+		/*! Authentication username */
 		AST_STRING_FIELD(auth_user);
-		/* Authentication password */
+		/*! Authentication password */
 		AST_STRING_FIELD(auth_pass);
-		/* Authentication credentials in MD5 format (hash of user:realm:pass) */
+		/*! Authentication credentials in MD5 format (hash of user:realm:pass) */
 		AST_STRING_FIELD(md5_creds);
 	);
-	/* The time period (in seconds) that a nonce may be reused */
+	/*! The time period (in seconds) that a nonce may be reused */
 	unsigned int nonce_lifetime;
-	/* Used to determine what to use when authenticating */
+	/*! Used to determine what to use when authenticating */
 	enum ast_sip_auth_type type;
 };
 
@@ -500,6 +502,12 @@ struct ast_sip_media_rtp_configuration {
 	enum ast_sip_session_media_encryption encryption;
 	/*! Do we want to optimistically support encryption if possible? */
 	unsigned int encryption_optimistic;
+	/*! Number of seconds between RTP keepalive packets */
+	unsigned int keepalive;
+	/*! Number of seconds before terminating channel due to lack of RTP (when not on hold) */
+	unsigned int timeout;
+	/*! Number of seconds before terminating channel due to lack of RTP (when on hold) */
+	unsigned int timeout_hold;
 };
 
 /*!
@@ -557,6 +565,8 @@ struct ast_sip_endpoint_media_configuration {
 	unsigned int tos_video;
 	/*! Priority for video streams */
 	unsigned int cos_video;
+	/*! Is g.726 packed in a non standard way */
+	unsigned int g726_non_standard;
 };
 
 /*!
@@ -950,12 +960,14 @@ struct ast_sip_contact *ast_sip_location_retrieve_contact(const char *contact_na
  * \param expiration_time Optional expiration time of the contact
  * \param path_info Path information
  * \param user_agent User-Agent header from REGISTER request
+ * \param endpoint The endpoint that resulted in the contact being added
  *
  * \retval -1 failure
  * \retval 0 success
  */
 int ast_sip_location_add_contact(struct ast_sip_aor *aor, const char *uri,
-	struct timeval expiration_time, const char *path_info, const char *user_agent);
+	struct timeval expiration_time, const char *path_info, const char *user_agent,
+	struct ast_sip_endpoint *endpoint);
 
 /*!
  * \brief Update a contact
@@ -1095,6 +1107,23 @@ struct ast_sip_endpoint *ast_sip_get_artificial_endpoint(void);
  * \retval non-NULL Newly-created serializer
  */
 struct ast_taskprocessor *ast_sip_create_serializer(void);
+
+struct ast_serializer_shutdown_group;
+
+/*!
+ * \brief Create a new serializer for SIP tasks
+ * \since 13.5.0
+ *
+ * See \ref ast_threadpool_serializer for more information on serializers.
+ * SIP creates serializers so that tasks operating on similar data will run
+ * in sequence.
+ *
+ * \param shutdown_group Group shutdown controller. (NULL if no group association)
+ *
+ * \retval NULL Failure
+ * \retval non-NULL Newly-created serializer
+ */
+struct ast_taskprocessor *ast_sip_create_serializer_group(struct ast_serializer_shutdown_group *shutdown_group);
 
 /*!
  * \brief Set a serializer on a SIP dialog so requests and responses are automatically serialized
@@ -1751,7 +1780,7 @@ const char *ast_sip_auth_type_to_str(enum ast_sip_auth_type type);
  */
 int ast_sip_auths_to_str(const struct ast_sip_auth_vector *auths, char **buf);
 
-/*
+/*!
  * \brief AMI variable container
  */
 struct ast_sip_ami {
@@ -2020,5 +2049,14 @@ unsigned int ast_sip_get_max_initial_qualify_time(void);
 
 const char *ast_sip_get_contact_status_label(const enum ast_sip_contact_status_type status);
 const char *ast_sip_get_contact_short_status_label(const enum ast_sip_contact_status_type status);
+
+/*!
+ * \brief Set a request to use the next value in the list of resolved addresses.
+ *
+ * \param tdata the tx data from the original request
+ * \retval 0 No more addresses to try
+ * \retval 1 The request was successfully re-intialized
+ */
+int ast_sip_failover_request(pjsip_tx_data *tdata);
 
 #endif /* _RES_PJSIP_H */

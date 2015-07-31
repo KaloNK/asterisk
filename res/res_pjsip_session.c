@@ -1039,7 +1039,10 @@ void ast_sip_session_resume_reinvite(struct ast_sip_session *session)
 		return;
 	}
 
-	pjsip_endpt_process_rx_data(ast_sip_get_pjsip_endpoint(), session->deferred_reinvite, NULL, NULL);
+	if (session->channel) {
+		pjsip_endpt_process_rx_data(ast_sip_get_pjsip_endpoint(),
+			session->deferred_reinvite, NULL, NULL);
+	}
 	pjsip_rx_data_free_cloned(session->deferred_reinvite);
 	session->deferred_reinvite = NULL;
 }
@@ -1158,7 +1161,7 @@ static void session_destructor(void *obj)
 	struct ast_sip_session_delayed_request *delay;
 
 	ast_debug(3, "Destroying SIP session with endpoint %s\n",
-			ast_sorcery_object_get_id(session->endpoint));
+		session->endpoint ? ast_sorcery_object_get_id(session->endpoint) : "<none>");
 
 	while ((supplement = AST_LIST_REMOVE_HEAD(&session->supplements, next))) {
 		if (supplement->session_destroy) {
@@ -1209,13 +1212,16 @@ static int add_supplements(struct ast_sip_session *session)
 static int add_session_media(void *obj, void *arg, int flags)
 {
 	struct sdp_handler_list *handler_list = obj;
-	struct ast_sip_session * session = arg;
+	struct ast_sip_session *session = arg;
 	RAII_VAR(struct ast_sip_session_media *, session_media, NULL, ao2_cleanup);
+
 	session_media = ao2_alloc(sizeof(*session_media) + strlen(handler_list->stream_type), session_media_dtor);
 	if (!session_media) {
 		return CMP_STOP;
 	}
 	session_media->encryption = session->endpoint->media.rtp.encryption;
+	session_media->keepalive_sched_id = -1;
+	session_media->timeout_sched_id = -1;
 	/* Safe use of strcpy */
 	strcpy(session_media->stream_type, handler_list->stream_type);
 	ao2_link(session->media, session_media);
@@ -1250,9 +1256,11 @@ struct ast_sip_channel_pvt *ast_sip_channel_pvt_alloc(void *pvt, struct ast_sip_
 struct ast_sip_session *ast_sip_session_alloc(struct ast_sip_endpoint *endpoint,
 	struct ast_sip_contact *contact, pjsip_inv_session *inv_session)
 {
-	RAII_VAR(struct ast_sip_session *, session, ao2_alloc(sizeof(*session), session_destructor), ao2_cleanup);
+	RAII_VAR(struct ast_sip_session *, session, NULL, ao2_cleanup);
 	struct ast_sip_session_supplement *iter;
 	int dsp_features = 0;
+
+	session = ao2_alloc(sizeof(*session), session_destructor);
 	if (!session) {
 		return NULL;
 	}
@@ -1293,6 +1301,7 @@ struct ast_sip_session *ast_sip_session_alloc(struct ast_sip_endpoint *endpoint,
 
 	if (dsp_features) {
 		if (!(session->dsp = ast_dsp_new())) {
+			/* Release the ref held by session->inv_session */
 			ao2_ref(session, -1);
 			return NULL;
 		}
@@ -1301,6 +1310,7 @@ struct ast_sip_session *ast_sip_session_alloc(struct ast_sip_endpoint *endpoint,
 	}
 
 	if (add_supplements(session)) {
+		/* Release the ref held by session->inv_session */
 		ao2_ref(session, -1);
 		return NULL;
 	}
@@ -1685,6 +1695,23 @@ int ast_sip_session_defer_termination(struct ast_sip_session *session)
 	return res;
 }
 
+/*!
+ * \internal
+ * \brief Stop the defer termination timer if it is still running.
+ * \since 13.5.0
+ *
+ * \param session Which session to stop the timer.
+ *
+ * \return Nothing
+ */
+static void sip_session_defer_termination_stop_timer(struct ast_sip_session *session)
+{
+	if (pj_timer_heap_cancel(pjsip_endpt_get_timer_heap(ast_sip_get_pjsip_endpoint()),
+		&session->scheduled_termination)) {
+		ao2_ref(session, -1);
+	}
+}
+
 void ast_sip_session_defer_termination_cancel(struct ast_sip_session *session)
 {
 	if (!session->defer_terminate) {
@@ -1699,10 +1726,7 @@ void ast_sip_session_defer_termination_cancel(struct ast_sip_session *session)
 	}
 
 	/* Stop the termination timer if it is still running. */
-	if (pj_timer_heap_cancel(pjsip_endpt_get_timer_heap(ast_sip_get_pjsip_endpoint()),
-		&session->scheduled_termination)) {
-		ao2_ref(session, -1);
-	}
+	sip_session_defer_termination_stop_timer(session);
 }
 
 struct ast_sip_session *ast_sip_dialog_get_session(pjsip_dialog *dlg)
@@ -2244,27 +2268,64 @@ static void handle_outgoing(struct ast_sip_session *session, pjsip_tx_data *tdat
 	}
 }
 
-static int session_end(struct ast_sip_session *session)
+static void session_end(struct ast_sip_session *session)
 {
 	struct ast_sip_session_supplement *iter;
 
 	/* Stop the scheduled termination */
-	if (pj_timer_heap_cancel(pjsip_endpt_get_timer_heap(ast_sip_get_pjsip_endpoint()), &session->scheduled_termination)) {
-		ao2_ref(session, -1);
-	}
+	sip_session_defer_termination_stop_timer(session);
 
-	/* Session is dead. Let's get rid of the reference to the session */
+	/* Session is dead.  Notify the supplements. */
 	AST_LIST_TRAVERSE(&session->supplements, iter, next) {
 		if (iter->session_end) {
 			iter->session_end(session);
 		}
 	}
+}
 
-	session->inv_session->mod_data[session_module.id] = NULL;
+/*!
+ * \internal
+ * \brief Complete ending session activities.
+ * \since 13.5.0
+ *
+ * \param vsession Which session to complete stopping.
+ *
+ * \retval 0 on success.
+ * \retval -1 on error.
+ */
+static int session_end_completion(void *vsession)
+{
+	struct ast_sip_session *session = vsession;
+
 	ast_sip_dialog_set_serializer(session->inv_session->dlg, NULL);
 	ast_sip_dialog_set_endpoint(session->inv_session->dlg, NULL);
+
+	/* Now we can release the ref that was held by session->inv_session */
 	ao2_cleanup(session);
 	return 0;
+}
+
+static int check_request_status(pjsip_inv_session *inv, pjsip_event *e)
+{
+	struct ast_sip_session *session = inv->mod_data[session_module.id];
+	pjsip_transaction *tsx = e->body.tsx_state.tsx;
+
+	if (tsx->status_code != 503 && tsx->status_code != 408) {
+		return 0;
+	}
+
+	if (!ast_sip_failover_request(tsx->last_tx)) {
+		return 0;
+	}
+
+	pjsip_inv_uac_restart(inv, PJ_FALSE);
+	/*
+	 * Bump the ref since it will be on a new transaction and
+	 * we don't want it to go away along with the old transaction.
+	 */
+	pjsip_tx_data_add_ref(tsx->last_tx);
+	ast_sip_session_send_request(session, tsx->last_tx);
+	return 1;
 }
 
 static void session_inv_on_state_changed(pjsip_inv_session *inv, pjsip_event *e)
@@ -2299,11 +2360,20 @@ static void session_inv_on_state_changed(pjsip_inv_session *inv, pjsip_event *e)
 			handle_outgoing(session, e->body.tsx_state.src.tdata);
 			break;
 		case PJSIP_EVENT_RX_MSG:
-			handle_incoming(session, e->body.tsx_state.src.rdata, type,
-					AST_SIP_SESSION_BEFORE_MEDIA);
+			if (!check_request_status(inv, e)) {
+				handle_incoming(session, e->body.tsx_state.src.rdata, type,
+						AST_SIP_SESSION_BEFORE_MEDIA);
+			}
 			break;
 		case PJSIP_EVENT_TRANSPORT_ERROR:
 		case PJSIP_EVENT_TIMER:
+			/*
+			 * Check the request status on transport error or timeout. A transport
+			 * error can occur when a TCP socket closes and that can be the result
+			 * of a 503. Also we may need to failover on a timeout (408).
+			 */
+			check_request_status(inv, e);
+			break;
 		case PJSIP_EVENT_USER:
 		case PJSIP_EVENT_UNKNOWN:
 		case PJSIP_EVENT_TSX_STATE:
@@ -2337,9 +2407,7 @@ static void session_inv_on_tsx_state_changed(pjsip_inv_session *inv, pjsip_trans
 
 	print_debug_details(inv, tsx, e);
 	if (!session) {
-		/* Transaction likely timed out after the call was hung up. Just
-		 * ignore such transaction changes
-		 */
+		/* The session has ended.  Ignore the transaction change. */
 		return;
 	}
 	switch (e->body.tsx_state.type) {
@@ -2420,7 +2488,48 @@ static void session_inv_on_tsx_state_changed(pjsip_inv_session *inv, pjsip_trans
 		}
 		break;
 	case PJSIP_EVENT_TRANSPORT_ERROR:
+		/*
+		 * Clear the module data now to block session_inv_on_state_changed()
+		 * from calling session_end() if it hasn't already done so.
+		 */
+		inv->mod_data[session_module.id] = NULL;
+
+		if (inv->state != PJSIP_INV_STATE_DISCONNECTED) {
+			session_end(session);
+		}
+
+		/*
+		 * Pass the session ref held by session->inv_session to
+		 * session_end_completion().
+		 */
+		session_end_completion(session);
+		return;
 	case PJSIP_EVENT_TIMER:
+		/*
+		 * The timer event is run by the pjsip monitor thread and not
+		 * by the session serializer.
+		 */
+		if (inv->state == PJSIP_INV_STATE_DISCONNECTED) {
+			/*
+			 * We are locking because ast_sip_dialog_get_session() needs
+			 * the dialog locked to get the session by other threads.
+			 */
+			pjsip_dlg_inc_lock(inv->dlg);
+			session = inv->mod_data[session_module.id];
+			inv->mod_data[session_module.id] = NULL;
+			pjsip_dlg_dec_lock(inv->dlg);
+
+			/*
+			 * Pass the session ref held by session->inv_session to
+			 * session_end_completion().
+			 */
+			if (ast_sip_push_task(session->serializer, session_end_completion, session)) {
+				/* Do it anyway even though this is not the right thread. */
+				session_end_completion(session);
+			}
+			return;
+		}
+		break;
 	case PJSIP_EVENT_USER:
 	case PJSIP_EVENT_UNKNOWN:
 	case PJSIP_EVENT_TSX_STATE:

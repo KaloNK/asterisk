@@ -312,6 +312,9 @@ struct ast_sorcery_wizard {
 
 	/*! \brief Callback for closing a wizard */
 	void (*close)(void *data);
+
+	/* \brief Callback for whether or not the wizard believes the object is stale */
+	int (*is_stale)(const struct ast_sorcery *sorcery, void *data, void *object);
 };
 
 /*! \brief Interface for a sorcery object type observer */
@@ -615,6 +618,17 @@ int ast_sorcery_get_wizard_mapping_count(struct ast_sorcery *sorcery,
  */
 int ast_sorcery_get_wizard_mapping(struct ast_sorcery *sorcery,
 	const char *type, int index, struct ast_sorcery_wizard **wizard, void **data);
+
+/*!
+ * \brief Unregister an object type
+ *
+ * \param sorcery Pointer to a sorcery structure
+ * \param type Type of object
+ *
+ * \retval 0 success
+ * \retval -1 failure
+ */
+int ast_sorcery_object_unregister(struct ast_sorcery *sorcery, const char *type);
 
 /*!
  * \brief Register an object type
@@ -1191,6 +1205,20 @@ int ast_sorcery_update(const struct ast_sorcery *sorcery, void *object);
 int ast_sorcery_delete(const struct ast_sorcery *sorcery, void *object);
 
 /*!
+ * \brief Determine if a sorcery object is stale with respect to its backing datastore
+ * \since 14.0.0
+ *
+ * This function will query the wizard(s) backing the particular sorcery object to
+ * determine if the in-memory object is now stale. No action is taken to update
+ * the object. Callers of this function may use one of the ast_sorcery_retrieve
+ * functions to obtain a new instance of the object if desired.
+ *
+ * \retval 0 the object is not stale
+ * \retval 1 the object is stale
+ */
+int ast_sorcery_is_stale(const struct ast_sorcery *sorcery, void *object);
+
+/*!
  * \brief Decrease the reference count of a sorcery structure
  *
  * \param sorcery Pointer to a sorcery structure
@@ -1205,6 +1233,16 @@ void ast_sorcery_unref(struct ast_sorcery *sorcery);
  * \retval unique identifier
  */
 const char *ast_sorcery_object_get_id(const void *object);
+
+/*!
+ * \since 14.0.0
+ * \brief Get when the socery object was created
+ *
+ * \param object Pointer to a sorcery object
+ *
+ * \retval The time when the object was created
+ */
+const struct timeval ast_sorcery_object_get_created(const void *object);
 
 /*!
  * \brief Get the type of a sorcery object

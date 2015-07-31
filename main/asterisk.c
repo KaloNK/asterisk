@@ -248,6 +248,7 @@ int daemon(int, int);  /* defined in libresolv of all places */
 #include "asterisk/endpoints.h"
 #include "asterisk/codec.h"
 #include "asterisk/format_cache.h"
+#include "asterisk/media_cache.h"
 
 #include "../defaults.h"
 
@@ -4511,6 +4512,11 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
+	if (ast_dns_system_resolver_init()) {		/* Initialize the default DNS resolver */
+		printf("Failed: ast_dns_system_resolver_init\n%s", term_quit());
+		exit(1);
+	}
+
 	if ((moduleresult = load_modules(1))) {		/* Load modules, pre-load only */
 		printf("Failed: load_modules\n%s", term_quit());
 		exit(moduleresult == -2 ? 2 : 1);
@@ -4599,6 +4605,16 @@ int main(int argc, char *argv[])
 	if ((moduleresult = load_modules(0))) {		/* Load modules */
 		printf("%s", term_quit());
 		exit(moduleresult == -2 ? 2 : 1);
+	}
+
+	/*
+	 * This has to load after the dynamic modules load, as items in the media
+	 * cache can't be constructed from items in the AstDB without their
+	 * bucket backends.
+	 */
+	if (ast_media_cache_init()) {
+		printf("Failed: ast_media_cache_init\n%s", term_quit());
+		exit(1);
 	}
 
 	/* loads the cli_permissoins.conf file needed to implement cli restrictions. */

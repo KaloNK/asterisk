@@ -30,6 +30,8 @@
 #include "asterisk/dns_naptr.h"
 #include "asterisk/res_pjsip.h"
 #include "include/res_pjsip_private.h"
+#include "asterisk/taskprocessor.h"
+#include "asterisk/threadpool.h"
 
 #ifdef HAVE_PJSIP_EXTERNAL_RESOLVER
 
@@ -52,6 +54,8 @@ struct sip_resolve {
 	struct ast_dns_query_set *queries;
 	/*! \brief Current viable server addresses */
 	pjsip_server_addresses addresses;
+	/*! \brief Serializer to run async callback into pjlib. */
+	struct ast_taskprocessor *serializer;
 	/*! \brief Callback to invoke upon completion */
 	pjsip_resolver_callback *callback;
 	/*! \brief User provided data */
@@ -97,6 +101,7 @@ static void sip_resolve_destroy(void *data)
 
 	AST_VECTOR_FREE(&resolve->resolving);
 	ao2_cleanup(resolve->queries);
+	ast_taskprocessor_unreference(resolve->serializer);
 }
 
 /*!
@@ -155,10 +160,9 @@ static int sip_resolve_add(struct sip_resolve *resolve, const char *name, int rr
 
 	if (!resolve->queries) {
 		resolve->queries = ast_dns_query_set_create();
-	}
-
-	if (!resolve->queries) {
-		return -1;
+		if (!resolve->queries) {
+			return -1;
+		}
 	}
 
 	if (!port) {
@@ -186,15 +190,18 @@ static int sip_resolve_add(struct sip_resolve *resolve, const char *name, int rr
 static int sip_resolve_invoke_user_callback(void *data)
 {
 	struct sip_resolve *resolve = data;
-	int idx;
 
-	for (idx = 0; idx < resolve->addresses.count; ++idx) {
+	if (DEBUG_ATLEAST(2)) {
 		/* This includes space for the IP address, [, ], :, and the port */
 		char addr[PJ_INET6_ADDRSTRLEN + 10];
+		int idx;
 
-		ast_debug(2, "[%p] Address '%d' is %s with transport '%s'\n",
-			resolve, idx, pj_sockaddr_print(&resolve->addresses.entry[idx].addr, addr, sizeof(addr), 3),
-			pjsip_transport_get_type_name(resolve->addresses.entry[idx].type));
+		for (idx = 0; idx < resolve->addresses.count; ++idx) {
+			pj_sockaddr_print(&resolve->addresses.entry[idx].addr, addr, sizeof(addr), 3);
+			ast_log(LOG_DEBUG, "[%p] Address '%d' is %s with transport '%s'\n",
+				resolve, idx, addr,
+				pjsip_transport_get_type_name(resolve->addresses.entry[idx].type));
+		}
 	}
 
 	ast_debug(2, "[%p] Invoking user callback with '%d' addresses\n", resolve, resolve->addresses.count);
@@ -396,7 +403,7 @@ static void sip_resolve_callback(const struct ast_dns_query_set *query_set)
 
 	/* Push a task to invoke the callback, we do this so it is guaranteed to run in a PJSIP thread */
 	ao2_ref(resolve, +1);
-	if (ast_sip_push_task(NULL, sip_resolve_invoke_user_callback, resolve)) {
+	if (ast_sip_push_task(resolve->serializer, sip_resolve_invoke_user_callback, resolve)) {
 		ao2_ref(resolve, -1);
 	}
 
@@ -514,7 +521,7 @@ static void sip_resolve(pjsip_resolver_t *resolver, pj_pool_t *pool, const pjsip
 	resolve->callback = cb;
 	resolve->token = token;
 
-	if (AST_VECTOR_INIT(&resolve->resolving, 2)) {
+	if (AST_VECTOR_INIT(&resolve->resolving, 4)) {
 		ao2_ref(resolve, -1);
 		cb(PJ_ENOMEM, token, NULL);
 		return;
@@ -563,6 +570,14 @@ static void sip_resolve(pjsip_resolver_t *resolver, pj_pool_t *pool, const pjsip
 		cb(PJ_ENOMEM, token, NULL);
 		return;
 	}
+	if (!resolve->queries) {
+		ast_debug(2, "[%p] No resolution queries for target '%s'\n", resolve, host);
+		ao2_ref(resolve, -1);
+		cb(PJLIB_UTIL_EDNSNOANSWERREC, token, NULL);
+		return;
+	}
+
+	resolve->serializer = ao2_bump(ast_threadpool_serializer_get_current());
 
 	ast_debug(2, "[%p] Starting initial resolution using parallel queries for target '%s'\n", resolve, host);
 	ast_dns_query_set_resolve_async(resolve->queries, sip_resolve_callback, resolve);
