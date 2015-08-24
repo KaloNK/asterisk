@@ -4665,7 +4665,7 @@ static int dahdi_digit_begin(struct ast_channel *chan, char digit)
 {
 	struct dahdi_pvt *pvt;
 	int idx;
-	int dtmf = -1;
+	int dtmf;
 	int res;
 
 	pvt = ast_channel_tech_pvt(chan);
@@ -4688,8 +4688,11 @@ static int dahdi_digit_begin(struct ast_channel *chan, char digit)
 		break;
 	}
 #endif
-	if ((dtmf = digit_to_dtmfindex(digit)) == -1)
+	dtmf = digit_to_dtmfindex(digit);
+	if (dtmf == -1) {
+		/* Not a valid DTMF digit */
 		goto out;
+	}
 
 	if (pvt->pulse || ioctl(pvt->subs[SUB_REAL].dfd, DAHDI_SENDTONE, &dtmf)) {
 		struct dahdi_dialoperation zo = {
@@ -4705,10 +4708,19 @@ static int dahdi_digit_begin(struct ast_channel *chan, char digit)
 		else
 			pvt->dialing = 1;
 	} else {
-		ast_debug(1, "Channel %s started VLDTMF digit '%c'\n",
-			ast_channel_name(chan), digit);
 		pvt->dialing = 1;
 		pvt->begindigit = digit;
+
+		/* Flush the write buffer in DAHDI to start sending the digit immediately. */
+		dtmf = DAHDI_FLUSH_WRITE;
+		res = ioctl(pvt->subs[SUB_REAL].dfd, DAHDI_FLUSH, &dtmf);
+		if (res) {
+			ast_log(LOG_WARNING, "Unable to flush the DAHDI write buffer to send DTMF on channel %d: %s\n",
+				pvt->channel, strerror(errno));
+		}
+
+		ast_debug(1, "Channel %s started VLDTMF digit '%c'\n",
+			ast_channel_name(chan), digit);
 	}
 
 out:
@@ -9631,45 +9643,59 @@ static int my_dahdi_write(struct dahdi_pvt *p, unsigned char *buf, int len, int 
 
 static int dahdi_write(struct ast_channel *ast, struct ast_frame *frame)
 {
-	struct dahdi_pvt *p = ast_channel_tech_pvt(ast);
+	struct dahdi_pvt *p;
 	int res;
 	int idx;
-	idx = dahdi_get_index(ast, p, 0);
-	if (idx < 0) {
-		ast_log(LOG_WARNING, "%s doesn't really exist?\n", ast_channel_name(ast));
-		return -1;
-	}
 
 	/* Write a frame of (presumably voice) data */
 	if (frame->frametype != AST_FRAME_VOICE) {
-		if (frame->frametype != AST_FRAME_IMAGE)
-			ast_log(LOG_WARNING, "Don't know what to do with frame type '%u'\n", frame->frametype);
+		if (frame->frametype != AST_FRAME_IMAGE) {
+			ast_log(LOG_WARNING, "Don't know what to do with frame type '%u'\n",
+				frame->frametype);
+		}
 		return 0;
 	}
 	if ((frame->subclass.format.id != AST_FORMAT_SLINEAR) &&
 		(frame->subclass.format.id != AST_FORMAT_ULAW) &&
 		(frame->subclass.format.id != AST_FORMAT_ALAW)) {
-		ast_log(LOG_WARNING, "Cannot handle frames in %s format\n", ast_getformatname(&frame->subclass.format));
+		ast_log(LOG_WARNING, "Cannot handle frames in %s format\n",
+			ast_getformatname(&frame->subclass.format));
 		return -1;
 	}
+
+	/* Return if it's not valid data */
+	if (!frame->data.ptr || !frame->datalen) {
+		return 0;
+	}
+
+	p = ast_channel_tech_pvt(ast);
+	ast_mutex_lock(&p->lock);
+
+	idx = dahdi_get_index(ast, p, 0);
+	if (idx < 0) {
+		ast_mutex_unlock(&p->lock);
+		ast_log(LOG_WARNING, "%s doesn't really exist?\n", ast_channel_name(ast));
+		return -1;
+	}
+
 	if (p->dialing) {
+		ast_mutex_unlock(&p->lock);
 		ast_debug(5, "Dropping frame since I'm still dialing on %s...\n",
 			ast_channel_name(ast));
 		return 0;
 	}
 	if (!p->owner) {
+		ast_mutex_unlock(&p->lock);
 		ast_debug(5, "Dropping frame since there is no active owner on %s...\n",
 			ast_channel_name(ast));
 		return 0;
 	}
 	if (p->cidspill) {
+		ast_mutex_unlock(&p->lock);
 		ast_debug(5, "Dropping frame since I've still got a callerid spill on %s...\n",
 			ast_channel_name(ast));
 		return 0;
 	}
-	/* Return if it's not valid data */
-	if (!frame->data.ptr || !frame->datalen)
-		return 0;
 
 	if (frame->subclass.format.id == AST_FORMAT_SLINEAR) {
 		if (!p->subs[idx].linear) {
@@ -9689,6 +9715,7 @@ static int dahdi_write(struct ast_channel *ast, struct ast_frame *frame)
 		}
 		res = my_dahdi_write(p, (unsigned char *)frame->data.ptr, frame->datalen, idx, 0);
 	}
+	ast_mutex_unlock(&p->lock);
 	if (res < 0) {
 		ast_log(LOG_WARNING, "write failed: %s\n", strerror(errno));
 		return -1;
