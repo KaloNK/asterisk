@@ -40,6 +40,8 @@
 #include "asterisk/file.h"
 #include "asterisk/cli.h"
 #include "asterisk/res_pjsip_cli.h"
+#include "asterisk/test.h"
+#include "asterisk/res_pjsip_presence_xml.h"
 
 /*** MODULEINFO
 	<depend>pjproject</depend>
@@ -2647,6 +2649,12 @@ int ast_sip_create_rdata(pjsip_rx_data *rdata, char *packet, const char *src_nam
 {
 	pj_str_t tmp;
 
+	/*
+	 * Initialize the error list in case there is a parse error
+	 * in the given packet.
+	 */
+	pj_list_init(&rdata->msg_info.parse_err);
+
 	rdata->tp_info.transport = PJ_POOL_ZALLOC_T(rdata->tp_info.pool, pjsip_transport);
 	if (!rdata->tp_info.transport) {
 		return -1;
@@ -2657,7 +2665,7 @@ int ast_sip_create_rdata(pjsip_rx_data *rdata, char *packet, const char *src_nam
 	rdata->pkt_info.src_port = src_port;
 
 	pjsip_parse_rdata(packet, strlen(packet), rdata);
-	if (!rdata->msg_info.msg) {
+	if (!rdata->msg_info.msg || !pj_list_empty(&rdata->msg_info.parse_err)) {
 		return -1;
 	}
 
@@ -3701,6 +3709,57 @@ static void remove_request_headers(pjsip_endpoint *endpt)
 	}
 }
 
+AST_TEST_DEFINE(xml_sanitization_end_null)
+{
+	char sanitized[8];
+
+	switch (cmd) {
+	case TEST_INIT:
+		info->name = "xml_sanitization_end_null";
+		info->category = "/res/res_pjsip/";
+		info->summary = "Ensure XML sanitization works as expected with a long string";
+		info->description = "This test sanitizes a string which exceeds the output\n"
+			"buffer size. Once done the string is confirmed to be NULL terminated.";
+		return AST_TEST_NOT_RUN;
+	case TEST_EXECUTE:
+		break;
+	}
+
+	ast_sip_sanitize_xml("aaaaaaaaaaaa", sanitized, sizeof(sanitized));
+	if (sanitized[7] != '\0') {
+		ast_test_status_update(test, "Sanitized XML string is not null-terminated when it should be\n");
+		return AST_TEST_FAIL;
+	}
+
+	return AST_TEST_PASS;
+}
+
+AST_TEST_DEFINE(xml_sanitization_exceeds_buffer)
+{
+	char sanitized[8];
+
+	switch (cmd) {
+	case TEST_INIT:
+		info->name = "xml_sanitization_exceeds_buffer";
+		info->category = "/res/res_pjsip/";
+		info->summary = "Ensure XML sanitization does not exceed buffer when output won't fit";
+		info->description = "This test sanitizes a string which before sanitization would\n"
+			"fit within the output buffer. After sanitization, however, the string would\n"
+			"exceed the buffer. Once done the string is confirmed to be NULL terminated.";
+		return AST_TEST_NOT_RUN;
+	case TEST_EXECUTE:
+		break;
+	}
+
+	ast_sip_sanitize_xml("<><><>&", sanitized, sizeof(sanitized));
+	if (sanitized[7] != '\0') {
+		ast_test_status_update(test, "Sanitized XML string is not null-terminated when it should be\n");
+		return AST_TEST_FAIL;
+	}
+
+	return AST_TEST_PASS;
+}
+
 /*!
  * \internal
  * \brief Reload configuration within a PJSIP thread
@@ -3870,6 +3929,9 @@ static int load_module(void)
 	ast_res_pjsip_init_options_handling(0);
 	ast_cli_register_multiple(cli_commands, ARRAY_LEN(cli_commands));
 
+	AST_TEST_REGISTER(xml_sanitization_end_null);
+	AST_TEST_REGISTER(xml_sanitization_exceeds_buffer);
+
 	return AST_MODULE_LOAD_SUCCESS;
 }
 
@@ -3912,6 +3974,9 @@ static int unload_pjsip(void *data)
 
 static int unload_module(void)
 {
+	AST_TEST_UNREGISTER(xml_sanitization_end_null);
+	AST_TEST_UNREGISTER(xml_sanitization_exceeds_buffer);
+
 	/* The thread this is called from cannot call PJSIP/PJLIB functions,
 	 * so we have to push the work to the threadpool to handle
 	 */

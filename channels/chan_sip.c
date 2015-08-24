@@ -3717,7 +3717,7 @@ static int __sip_xmit(struct sip_pvt *p, struct ast_str *data)
 	} else if (p->socket.tcptls_session) {
 		res = sip_tcptls_write(p->socket.tcptls_session, ast_str_buffer(data), ast_str_strlen(data));
 	} else if (p->socket.ws_session) {
-		if (!(res = ast_websocket_write(p->socket.ws_session, AST_WEBSOCKET_OPCODE_TEXT, ast_str_buffer(data), ast_str_strlen(data)))) {
+		if (!(res = ast_websocket_write_string(p->socket.ws_session, ast_str_buffer(data)))) {
 			/* The WebSocket API just returns 0 on success and -1 on failure, while this code expects the payload length to be returned */
 			res = ast_str_strlen(data);
 		}
@@ -7354,7 +7354,7 @@ static int sip_fixup(struct ast_channel *oldchan, struct ast_channel *newchan)
 		   redirect of both channels). Note that a channel can not be masqueraded *into*
 		   a native bridge. So there is no danger that this breaks a native bridge that
 		   should stay up. */
-		sip_set_rtp_peer(newchan, NULL, NULL, 0, 0, 0);
+		sip_set_rtp_peer(newchan, NULL, NULL, NULL, NULL, 0);
 		ret = 0;
 	}
 	ast_debug(3, "SIP Fixup: New owner for dialogue %s: %s (Old parent: %s)\n", p->callid, ast_channel_name(p->owner), ast_channel_name(oldchan));
@@ -12815,9 +12815,6 @@ static void add_codec_to_sdp(const struct sip_pvt *p,
 	} else if (ast_format_cmp(format, ast_format_g723) == AST_FORMAT_CMP_EQUAL) {
 		/* Indicate that we don't support VAD (G.723.1 annex A) */
 		ast_str_append(a_buf, 0, "a=fmtp:%d annexa=no\r\n", rtp_code);
-	} else if (ast_format_cmp(format, ast_format_ilbc) == AST_FORMAT_CMP_EQUAL) {
-		/* Add information about us using only 20/30 ms packetization */
-		ast_str_append(a_buf, 0, "a=fmtp:%d mode=%u\r\n", rtp_code, framing);
 	} else if (ast_format_cmp(format, ast_format_siren7) == AST_FORMAT_CMP_EQUAL) {
 		/* Indicate that we only expect 32Kbps */
 		ast_str_append(a_buf, 0, "a=fmtp:%d bitrate=32000\r\n", rtp_code);
@@ -28114,7 +28111,7 @@ static int handle_incoming(struct sip_pvt *p, struct sip_request *req, struct as
 		res = handle_request_invite(p, req, addr, seqno, recount, e, nounlock);
 
 		if (res < 9) {
-			sip_report_security_event(p, req, res);
+			sip_report_security_event(NULL, &p->recv, p, req, res);
 		}
 
 		switch (res) {
@@ -28153,7 +28150,7 @@ static int handle_incoming(struct sip_pvt *p, struct sip_request *req, struct as
 		break;
 	case SIP_REGISTER:
 		res = handle_request_register(p, req, addr, e);
-		sip_report_security_event(p, req, res);
+		sip_report_security_event(p->exten, NULL, p, req, res);
 		break;
 	case SIP_INFO:
 		if (req->debug)
