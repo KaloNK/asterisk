@@ -115,6 +115,10 @@ static int send_keepalive(const void *data)
 	time_t interval;
 	int send_keepalive;
 
+	if (!rtp) {
+		return 0;
+	}
+
 	keepalive = ast_rtp_instance_get_keepalive(rtp);
 
 	if (!ast_sockaddr_isnull(&session_media->direct_media_addr)) {
@@ -237,13 +241,13 @@ static void get_codecs(struct ast_sip_session *session, const struct pjmedia_sdp
 		}
 
 		ast_copy_pj_str(name, &rtpmap->enc_name, sizeof(name));
-                if (strcmp(name,"telephone-event") == 0) {
-                        tel_event++;
-                }
+		if (strcmp(name, "telephone-event") == 0) {
+			tel_event++;
+		}
 
 		ast_copy_pj_str(media, (pj_str_t*)&stream->desc.media, sizeof(media));
-		ast_rtp_codecs_payloads_set_rtpmap_type_rate(codecs, NULL, pj_strtoul(&stream->desc.fmt[i]),
-							     media, name, options, rtpmap->clock_rate);
+		ast_rtp_codecs_payloads_set_rtpmap_type_rate(codecs, NULL,
+			pj_strtoul(&stream->desc.fmt[i]), media, name, options, rtpmap->clock_rate);
 		/* Look for an optional associated fmtp attribute */
 		if (!(attr = pjmedia_sdp_media_find_attr2(stream, "fmtp", &rtpmap->pt))) {
 			continue;
@@ -270,8 +274,8 @@ static void get_codecs(struct ast_sip_session *session, const struct pjmedia_sdp
 			}
 		}
 	}
-	if ((tel_event==0) && (session->endpoint->dtmf == AST_SIP_DTMF_AUTO)) {
-                ast_rtp_instance_dtmf_mode_set(session_media->rtp, AST_RTP_DTMF_MODE_INBAND);
+	if (!tel_event && (session->endpoint->dtmf == AST_SIP_DTMF_AUTO)) {
+		ast_rtp_instance_dtmf_mode_set(session_media->rtp, AST_RTP_DTMF_MODE_INBAND);
 	}
 	/* Get the packetization, if it exists */
 	if ((attr = pjmedia_sdp_media_find_attr2(stream, "ptime", NULL))) {
@@ -282,8 +286,10 @@ static void get_codecs(struct ast_sip_session *session, const struct pjmedia_sdp
 	}
 }
 
-static int set_caps(struct ast_sip_session *session, struct ast_sip_session_media *session_media,
-		    const struct pjmedia_sdp_media *stream)
+static int set_caps(struct ast_sip_session *session,
+	struct ast_sip_session_media *session_media,
+	const struct pjmedia_sdp_media *stream,
+	int is_offer)
 {
 	RAII_VAR(struct ast_format_cap *, caps, NULL, ao2_cleanup);
 	RAII_VAR(struct ast_format_cap *, peer, NULL, ao2_cleanup);
@@ -328,8 +334,15 @@ static int set_caps(struct ast_sip_session *session, struct ast_sip_session_medi
 		return -1;
 	}
 
+	if (is_offer) {
+		/*
+		 * Setup rx payload type mapping to prefer the mapping
+		 * from the peer that the RFC says we SHOULD use.
+		 */
+		ast_rtp_codecs_payloads_xover(&codecs, &codecs, NULL);
+	}
 	ast_rtp_codecs_payloads_copy(&codecs, ast_rtp_instance_get_codecs(session_media->rtp),
-				     session_media->rtp);
+		session_media->rtp);
 
 	ast_format_cap_append_from_cap(session->req_caps, joint, AST_MEDIA_TYPE_UNKNOWN);
 
@@ -897,7 +910,7 @@ static int negotiate_incoming_sdp_stream(struct ast_sip_session *session, struct
 		pj_strdup(session->inv_session->pool, &session_media->transport, &stream->desc.transport);
  	}
 
-	if (set_caps(session, session_media, stream)) {
+	if (set_caps(session, session_media, stream, 1)) {
 		return 0;
 	}
 	return 1;
@@ -1138,8 +1151,12 @@ static int create_outgoing_sdp_stream(struct ast_sip_session *session, struct as
 	/* Add non-codec formats */
 	if (media_type != AST_MEDIA_TYPE_VIDEO) {
 		for (index = 1LL; index <= AST_RTP_MAX; index <<= 1) {
-			if (!(noncodec & index) || (rtp_code = ast_rtp_codecs_payload_code(ast_rtp_instance_get_codecs(session_media->rtp),
-											   0, NULL, index)) == -1) {
+			if (!(noncodec & index)) {
+				continue;
+			}
+			rtp_code = ast_rtp_codecs_payload_code(
+				ast_rtp_instance_get_codecs(session_media->rtp), 0, NULL, index);
+			if (rtp_code == -1) {
 				continue;
 			}
 
@@ -1241,7 +1258,7 @@ static int apply_negotiated_sdp_stream(struct ast_sip_session *session, struct a
 	/* Apply connection information to the RTP instance */
 	ast_sockaddr_set_port(addrs, remote_stream->desc.port);
 	ast_rtp_instance_set_remote_address(session_media->rtp, addrs);
-	if (set_caps(session, session_media, local_stream)) {
+	if (set_caps(session, session_media, remote_stream, 0)) {
 		return 1;
 	}
 

@@ -1,4 +1,4 @@
- /*
+/*
  * Asterisk -- An open source telephony toolkit.
  *
  * Copyright (C) 1999 - 2009, Digium, Inc.
@@ -78,14 +78,13 @@ extern "C" {
 #include "asterisk/stasis.h"
 #include "asterisk/vector.h"
 
-/* Maximum number of payloads supported */
-#if defined(LOW_MEMORY)
+/*! Maximum number of payload types RTP can support. */
 #define AST_RTP_MAX_PT 128
-#else
-#define AST_RTP_MAX_PT 196
-#endif
 
-/* Maximum number of generations */
+/*! First dynamic RTP payload type */
+#define AST_RTP_PT_FIRST_DYNAMIC 96
+
+/*! Maximum number of generations */
 #define AST_RED_MAX_GENERATION 5
 
 /*!
@@ -243,15 +242,19 @@ enum ast_rtp_instance_stat {
 
 /*! Structure that represents a payload */
 struct ast_rtp_payload_type {
-	/*! Is this an Asterisk value */
-	int asterisk_format;
 	/*! If asterisk_format is set, this is the internal
 	 * asterisk format represented by the payload */
 	struct ast_format *format;
+	/*! Is this an Asterisk value */
+	int asterisk_format;
 	/*! Actual internal RTP specific value of the payload */
 	int rtp_code;
 	/*! Actual payload number */
 	int payload;
+	/*! TRUE if this is the primary mapping to the format. */
+	unsigned int primary_mapping:1;
+	/*! When the payload type became non-primary. */
+	struct timeval when_retired;
 };
 
 /* Common RTCP report types */
@@ -578,16 +581,18 @@ struct ast_rtp_engine {
 
 /*! Structure that represents codec and packetization information */
 struct ast_rtp_codecs {
-	/*! Payloads present */
-	AST_VECTOR(, struct ast_rtp_payload_type *) payloads;
-	/*! The framing for this media session */
-	unsigned int framing;
 	/*! RW lock that protects elements in this structure */
 	ast_rwlock_t codecs_lock;
+	/*! Rx payload type mapping exceptions */
+	AST_VECTOR(, struct ast_rtp_payload_type *) payload_mapping_rx;
+	/*! Tx payload type mapping */
+	AST_VECTOR(, struct ast_rtp_payload_type *) payload_mapping_tx;
+	/*! The framing for this media session */
+	unsigned int framing;
 };
 
 #define AST_RTP_CODECS_NULL_INIT \
-    { .payloads = { 0, }, .framing = 0, .codecs_lock = AST_RWLOCK_INIT_VALUE, }
+    { .codecs_lock = AST_RWLOCK_INIT_VALUE, .payload_mapping_rx = { 0, }, .payload_mapping_tx = { 0, }, .framing = 0, }
 
 /*! Structure that represents the glue that binds an RTP instance to a channel */
 struct ast_rtp_glue {
@@ -625,7 +630,7 @@ struct ast_rtp_glue {
 	enum ast_rtp_glue_result (*get_trtp_info)(struct ast_channel *chan, struct ast_rtp_instance **instance);
 	/*! Callback for updating the destination that the remote side should send RTP to */
 	int (*update_peer)(struct ast_channel *chan, struct ast_rtp_instance *instance, struct ast_rtp_instance *vinstance, struct ast_rtp_instance *tinstance, const struct ast_format_cap *cap, int nat_active);
-	/*! Callback for retrieving codecs that the channel can do.  Result returned in result_cap*/
+	/*! Callback for retrieving codecs that the channel can do.  Result returned in result_cap. */
 	void (*get_codec)(struct ast_channel *chan, struct ast_format_cap *result_cap);
 	/*! Linked list information */
 	AST_RWLIST_ENTRY(ast_rtp_glue) entry;
@@ -1193,7 +1198,7 @@ int ast_rtp_codecs_payloads_initialize(struct ast_rtp_codecs *codecs);
 void ast_rtp_codecs_payloads_destroy(struct ast_rtp_codecs *codecs);
 
 /*!
- * \brief Clear payload information from an RTP instance
+ * \brief Clear rx and tx payload mapping information from an RTP instance
  *
  * \param codecs The codecs structure that payloads will be cleared from
  * \param instance Optionally the instance that the codecs structure belongs to
@@ -1231,7 +1236,19 @@ void ast_rtp_codecs_payloads_clear(struct ast_rtp_codecs *codecs, struct ast_rtp
 void ast_rtp_codecs_payloads_copy(struct ast_rtp_codecs *src, struct ast_rtp_codecs *dest, struct ast_rtp_instance *instance);
 
 /*!
- * \brief Record payload information that was seen in an m= SDP line
+ * \brief Crossover copy the tx payload mapping of src to the rx payload mapping of dest.
+ * \since 14.0.0
+ *
+ * \param src The source codecs structure
+ * \param dest The destination codecs structure that the values from src will be copied to
+ * \param instance Optionally the instance that the dst codecs structure belongs to
+ *
+ * \return Nothing
+ */
+void ast_rtp_codecs_payloads_xover(struct ast_rtp_codecs *src, struct ast_rtp_codecs *dest, struct ast_rtp_instance *instance);
+
+/*!
+ * \brief Record tx payload type information that was seen in an m= SDP line
  *
  * \param codecs The codecs structure to muck with
  * \param instance Optionally the instance that the codecs structure belongs to
@@ -1250,7 +1267,7 @@ void ast_rtp_codecs_payloads_copy(struct ast_rtp_codecs *src, struct ast_rtp_cod
 void ast_rtp_codecs_payloads_set_m_type(struct ast_rtp_codecs *codecs, struct ast_rtp_instance *instance, int payload);
 
 /*!
- * \brief Record payload information that was seen in an a=rtpmap: SDP line
+ * \brief Record tx payload type information that was seen in an a=rtpmap: SDP line
  *
  * \param codecs The codecs structure to muck with
  * \param instance Optionally the instance that the codecs structure belongs to
@@ -1276,7 +1293,7 @@ void ast_rtp_codecs_payloads_set_m_type(struct ast_rtp_codecs *codecs, struct as
 int ast_rtp_codecs_payloads_set_rtpmap_type(struct ast_rtp_codecs *codecs, struct ast_rtp_instance *instance, int payload, char *mimetype, char *mimesubtype, enum ast_rtp_options options);
 
 /*!
- * \brief Set payload type to a known MIME media type for a codec with a specific sample rate
+ * \brief Set tx payload type to a known MIME media type for a codec with a specific sample rate
  *
  * \param codecs RTP structure to modify
  * \param instance Optionally the instance that the codecs structure belongs to
@@ -1301,7 +1318,7 @@ int ast_rtp_codecs_payloads_set_rtpmap_type_rate(struct ast_rtp_codecs *codecs, 
 				  unsigned int sample_rate);
 
 /*!
- * \brief Remove payload information
+ * \brief Remove tx payload type mapped information
  *
  * \param codecs The codecs structure to muck with
  * \param instance Optionally the instance that the codecs structure belongs to
@@ -1320,7 +1337,7 @@ int ast_rtp_codecs_payloads_set_rtpmap_type_rate(struct ast_rtp_codecs *codecs, 
 void ast_rtp_codecs_payloads_unset(struct ast_rtp_codecs *codecs, struct ast_rtp_instance *instance, int payload);
 
 /*!
- * \brief Retrieve payload information by payload
+ * \brief Retrieve rx payload mapped information by payload type
  *
  * \param codecs Codecs structure to look in
  * \param payload Numerical payload to look up
@@ -1343,10 +1360,10 @@ void ast_rtp_codecs_payloads_unset(struct ast_rtp_codecs *codecs, struct ast_rtp
 struct ast_rtp_payload_type *ast_rtp_codecs_get_payload(struct ast_rtp_codecs *codecs, int payload);
 
 /*!
- * \brief Update the format associated with a payload in a codecs structure
+ * \brief Update the format associated with a tx payload type in a codecs structure
  *
  * \param codecs Codecs structure to operate on
- * \param payload Numerical payload to look up
+ * \param payload Numerical payload type to look up
  * \param format The format to replace the existing one
  *
  * \retval 0 success
@@ -1357,10 +1374,10 @@ struct ast_rtp_payload_type *ast_rtp_codecs_get_payload(struct ast_rtp_codecs *c
 int ast_rtp_codecs_payload_replace_format(struct ast_rtp_codecs *codecs, int payload, struct ast_format *format);
 
 /*!
- * \brief Retrieve the actual ast_format stored on the codecs structure for a specific payload
+ * \brief Retrieve the actual ast_format stored on the codecs structure for a specific tx payload type
  *
  * \param codecs Codecs structure to look in
- * \param payload Numerical payload to look up
+ * \param payload Numerical payload type to look up
  *
  * \retval pointer to format structure on success
  * \retval NULL on failure
@@ -1418,7 +1435,7 @@ unsigned int ast_rtp_lookup_sample_rate2(int asterisk_format, struct ast_format 
  * \code
  * struct ast_format_cap *astformats = ast_format_cap_alloc_nolock()
  * int nonastformats;
- * ast_rtp_codecs_payload_formats(&codecs, &astformats, &nonastformats);
+ * ast_rtp_codecs_payload_formats(&codecs, astformats, &nonastformats);
  * \endcode
  *
  * This retrieves all the formats known about in the codecs structure and puts the Asterisk ones in the integer
@@ -1429,14 +1446,20 @@ unsigned int ast_rtp_lookup_sample_rate2(int asterisk_format, struct ast_format 
 void ast_rtp_codecs_payload_formats(struct ast_rtp_codecs *codecs, struct ast_format_cap *astformats, int *nonastformats);
 
 /*!
- * \brief Retrieve a payload based on whether it is an Asterisk format and the code
+ * \brief Retrieve a rx mapped payload type based on whether it is an Asterisk format and the code
  *
  * \param codecs Codecs structure to look in
  * \param asterisk_format Non-zero if the given Asterisk format is present
  * \param format Asterisk format to look for
  * \param code The format to look for
  *
- * \retval Numerical payload
+ * \details
+ * Find the currently assigned rx mapped payload type based on whether it
+ * is an Asterisk format or non-format code.  If one is currently not
+ * assigned then create a rx payload type mapping.
+ *
+ * \retval Numerical payload type
+ * \retval -1 if could not assign.
  *
  * Example usage:
  *
@@ -1448,14 +1471,29 @@ void ast_rtp_codecs_payload_formats(struct ast_rtp_codecs *codecs, struct ast_fo
  *
  * \since 1.8
  */
-int ast_rtp_codecs_payload_code(struct ast_rtp_codecs *codecs, int asterisk_format, const struct ast_format *format, int code);
+int ast_rtp_codecs_payload_code(struct ast_rtp_codecs *codecs, int asterisk_format, struct ast_format *format, int code);
+
 /*!
- * \brief Search for a payload code in the ast_rtp_codecs structure
+ * \brief Retrieve a tx mapped payload type based on whether it is an Asterisk format and the code
+ * \since 14.0.0
  *
  * \param codecs Codecs structure to look in
+ * \param asterisk_format Non-zero if the given Asterisk format is present
+ * \param format Asterisk format to look for
  * \param code The format to look for
  *
- * \retval Numerical payload or -1 if unable to find payload in codecs
+ * \retval Numerical payload type
+ * \retval -1 if not found.
+ */
+int ast_rtp_codecs_payload_code_tx(struct ast_rtp_codecs *codecs, int asterisk_format, const struct ast_format *format, int code);
+
+/*!
+ * \brief Search for the tx payload type in the ast_rtp_codecs structure
+ *
+ * \param codecs Codecs structure to look in
+ * \param payload The payload type format to look for
+ *
+ * \retval Numerical payload type or -1 if unable to find payload in codecs
  *
  * Example usage:
  *
@@ -1464,9 +1502,8 @@ int ast_rtp_codecs_payload_code(struct ast_rtp_codecs *codecs, int asterisk_form
  * \endcode
  *
  * This looks for the numerical payload for ULAW in the codecs structure.
- *
  */
-int ast_rtp_codecs_find_payload_code(struct ast_rtp_codecs *codecs, int code);
+int ast_rtp_codecs_find_payload_code(struct ast_rtp_codecs *codecs, int payload);
 
 /*!
  * \brief Retrieve mime subtype information on a payload

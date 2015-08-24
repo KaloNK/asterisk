@@ -365,9 +365,7 @@ AST_TEST_DEFINE(resolver_set_result_off_nominal)
 		info->description =
 			"This test performs the following:\n"
 			"\t* Attempt to add a DNS result that is both bogus and secure\n"
-			"\t* Attempt to add a DNS result that has no canonical name\n"
-			"\t* Attempt to add a DNS result that has no answer\n"
-			"\t* Attempt to add a DNS result with a zero answer size";
+			"\t* Attempt to add a DNS result that has no canonical name";
 		return AST_TEST_NOT_RUN;
 	case TEST_EXECUTE:
 		break;
@@ -386,22 +384,6 @@ AST_TEST_DEFINE(resolver_set_result_off_nominal)
 	if (!ast_dns_resolver_set_result(&some_query, 0, 0, ns_r_noerror, NULL,
 				DNS_ANSWER, DNS_ANSWER_SIZE)) {
 		ast_test_status_update(test, "Successfully added result with no canonical name\n");
-		result = ast_dns_query_get_result(&some_query);
-		ast_dns_result_free(result);
-		return AST_TEST_FAIL;
-	}
-
-	if (!ast_dns_resolver_set_result(&some_query, 0, 0, ns_r_noerror, NULL,
-				NULL, DNS_ANSWER_SIZE)) {
-		ast_test_status_update(test, "Successfully added result with no answer\n");
-		result = ast_dns_query_get_result(&some_query);
-		ast_dns_result_free(result);
-		return AST_TEST_FAIL;
-	}
-
-	if (!ast_dns_resolver_set_result(&some_query, 0, 0, ns_r_noerror, NULL,
-				DNS_ANSWER, 0)) {
-		ast_test_status_update(test, "Successfully added result with answer size of zero\n");
 		result = ast_dns_query_get_result(&some_query);
 		ast_dns_result_free(result);
 		return AST_TEST_FAIL;
@@ -694,7 +676,7 @@ static void *resolution_thread(void *dns_query)
 	static const size_t V4_BUFSIZE = sizeof(struct in_addr);
 	char v4_buf[V4_BUFSIZE];
 
-	clock_gettime(CLOCK_REALTIME, &timeout);
+	timeout = ast_tsnow();
 	timeout.tv_sec += 5;
 
 	ast_mutex_lock(&test_resolver_data.lock);
@@ -1089,7 +1071,7 @@ AST_TEST_DEFINE(resolver_resolve_async)
 		goto cleanup;
 	}
 
-	clock_gettime(CLOCK_REALTIME, &timeout);
+	timeout = ast_tsnow();
 	timeout.tv_sec += 10;
 	ast_mutex_lock(&async_data->lock);
 	while (!async_data->complete) {
@@ -1279,7 +1261,7 @@ AST_TEST_DEFINE(resolver_resolve_async_cancel)
 		goto cleanup;
 	}
 
-	clock_gettime(CLOCK_REALTIME, &timeout);
+	timeout = ast_tsnow();
 	timeout.tv_sec += 10;
 	ast_mutex_lock(&async_data->lock);
 	while (!async_data->complete) {

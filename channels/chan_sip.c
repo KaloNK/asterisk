@@ -1205,7 +1205,7 @@ static void try_suggested_sip_codec(struct sip_pvt *p);
 static const char *get_sdp_iterate(int* start, struct sip_request *req, const char *name);
 static char get_sdp_line(int *start, int stop, struct sip_request *req, const char **value);
 static int find_sdp(struct sip_request *req);
-static int process_sdp(struct sip_pvt *p, struct sip_request *req, int t38action);
+static int process_sdp(struct sip_pvt *p, struct sip_request *req, int t38action, int is_offer);
 static int process_sdp_o(const char *o, struct sip_pvt *p);
 static int process_sdp_c(const char *c, struct ast_sockaddr *addr);
 static int process_sdp_a_sendonly(const char *a, int *sendonly);
@@ -3721,7 +3721,7 @@ static int __sip_xmit(struct sip_pvt *p, struct ast_str *data)
 	} else if (p->socket.tcptls_session) {
 		res = sip_tcptls_write(p->socket.tcptls_session, ast_str_buffer(data), ast_str_strlen(data));
 	} else if (p->socket.ws_session) {
-		if (!(res = ast_websocket_write(p->socket.ws_session, AST_WEBSOCKET_OPCODE_TEXT, ast_str_buffer(data), ast_str_strlen(data)))) {
+		if (!(res = ast_websocket_write_string(p->socket.ws_session, ast_str_buffer(data)))) {
 			/* The WebSocket API just returns 0 on success and -1 on failure, while this code expects the payload length to be returned */
 			res = ast_str_strlen(data);
 		}
@@ -7358,7 +7358,7 @@ static int sip_fixup(struct ast_channel *oldchan, struct ast_channel *newchan)
 		   redirect of both channels). Note that a channel can not be masqueraded *into*
 		   a native bridge. So there is no danger that this breaks a native bridge that
 		   should stay up. */
-		sip_set_rtp_peer(newchan, NULL, NULL, 0, 0, 0);
+		sip_set_rtp_peer(newchan, NULL, NULL, NULL, NULL, 0);
 		ret = 0;
 	}
 	ast_debug(3, "SIP Fixup: New owner for dialogue %s: %s (Old parent: %s)\n", p->callid, ast_channel_name(p->owner), ast_channel_name(oldchan));
@@ -9852,7 +9852,7 @@ static int has_media_stream(struct sip_pvt *p, enum media_type m)
  	Return 0 on success, a negative value on errors.
 	Must be called after find_sdp().
 */
-static int process_sdp(struct sip_pvt *p, struct sip_request *req, int t38action)
+static int process_sdp(struct sip_pvt *p, struct sip_request *req, int t38action, int is_offer)
 {
 	int res = 0;
 
@@ -10541,6 +10541,16 @@ static int process_sdp(struct sip_pvt *p, struct sip_request *req, int t38action
 
 	if (udptlportno == -1) {
 		change_t38_state(p, T38_DISABLED);
+	}
+
+	if (is_offer) {
+		/*
+		 * Setup rx payload type mapping to prefer the mapping
+		 * from the peer that the RFC says we SHOULD use.
+		 */
+		ast_rtp_codecs_payloads_xover(&newaudiortp, &newaudiortp, NULL);
+		ast_rtp_codecs_payloads_xover(&newvideortp, &newvideortp, NULL);
+		ast_rtp_codecs_payloads_xover(&newtextrtp, &newtextrtp, NULL);
 	}
 
 	/* Now gather all of the codecs that we are asked for: */
@@ -12805,9 +12815,6 @@ static void add_codec_to_sdp(const struct sip_pvt *p,
 	} else if (ast_format_cmp(format, ast_format_g723) == AST_FORMAT_CMP_EQUAL) {
 		/* Indicate that we don't support VAD (G.723.1 annex A) */
 		ast_str_append(a_buf, 0, "a=fmtp:%d annexa=no\r\n", rtp_code);
-	} else if (ast_format_cmp(format, ast_format_ilbc) == AST_FORMAT_CMP_EQUAL) {
-		/* Add information about us using only 20/30 ms packetization */
-		ast_str_append(a_buf, 0, "a=fmtp:%d mode=%u\r\n", rtp_code, framing);
 	} else if (ast_format_cmp(format, ast_format_siren7) == AST_FORMAT_CMP_EQUAL) {
 		/* Indicate that we only expect 32Kbps */
 		ast_str_append(a_buf, 0, "a=fmtp:%d bitrate=32000\r\n", rtp_code);
@@ -23030,7 +23037,7 @@ static void handle_response_invite(struct sip_pvt *p, int resp, const char *rest
 			if (p->invitestate != INV_CANCELLED) {
 				p->invitestate = INV_EARLY_MEDIA;
 			}
-			res = process_sdp(p, req, SDP_T38_NONE);
+			res = process_sdp(p, req, SDP_T38_NONE, FALSE);
 			if (!req->ignore && p->owner) {
 				/* Queue a progress frame only if we have SDP in 180 or 182 */
 				ast_queue_control(p->owner, AST_CONTROL_PROGRESS);
@@ -23115,7 +23122,7 @@ static void handle_response_invite(struct sip_pvt *p, int resp, const char *rest
 			if (p->invitestate != INV_CANCELLED) {
 				p->invitestate = INV_EARLY_MEDIA;
 			}
-			res = process_sdp(p, req, SDP_T38_NONE);
+			res = process_sdp(p, req, SDP_T38_NONE, FALSE);
 			if (!req->ignore && p->owner) {
 				/* Queue a progress frame */
 				ast_queue_control(p->owner, AST_CONTROL_PROGRESS);
@@ -23141,7 +23148,8 @@ static void handle_response_invite(struct sip_pvt *p, int resp, const char *rest
 		}
 		p->authtries = 0;
 		if (find_sdp(req)) {
-			if ((res = process_sdp(p, req, SDP_T38_ACCEPT)) && !req->ignore) {
+			res = process_sdp(p, req, SDP_T38_ACCEPT, FALSE);
+			if (res && !req->ignore) {
 				if (!reinvite) {
 					/* This 200 OK's SDP is not acceptable, so we need to ack, then hangup */
 					/* For re-invites, we try to recover */
@@ -24421,7 +24429,7 @@ static void handle_response(struct sip_pvt *p, int resp, const char *rest, struc
 					if (!req->ignore && sip_cancel_destroy(p))
 						ast_log(LOG_WARNING, "Unable to cancel SIP destruction.  Expect bad things.\n");
 					if (find_sdp(req))
-						process_sdp(p, req, SDP_T38_NONE);
+						process_sdp(p, req, SDP_T38_NONE, FALSE);
 					if (p->owner) {
 						/* Queue a progress frame */
 						ast_queue_control(p->owner, AST_CONTROL_PROGRESS);
@@ -25499,7 +25507,7 @@ static int handle_request_invite(struct sip_pvt *p, struct sip_request *req, str
 			}
 			/* Handle SDP here if we already have an owner */
 			if (find_sdp(req)) {
-				if (process_sdp(p, req, SDP_T38_INITIATE)) {
+				if (process_sdp(p, req, SDP_T38_INITIATE, TRUE)) {
 					if (!ast_strlen_zero(sip_get_header(req, "Content-Encoding"))) {
 						/* Asterisk does not yet support any Content-Encoding methods.  Always
 						 * attempt to process the sdp, but return a 415 if a Content-Encoding header
@@ -25564,7 +25572,7 @@ static int handle_request_invite(struct sip_pvt *p, struct sip_request *req, str
 
 		/* We have a successful authentication, process the SDP portion if there is one */
 		if (find_sdp(req)) {
-			if (process_sdp(p, req, SDP_T38_INITIATE)) {
+			if (process_sdp(p, req, SDP_T38_INITIATE, TRUE)) {
 				/* Asterisk does not yet support any Content-Encoding methods.  Always
 				 * attempt to process the sdp, but return a 415 if a Content-Encoding header
 				 * was present after processing fails. */
@@ -28108,7 +28116,7 @@ static int handle_incoming(struct sip_pvt *p, struct sip_request *req, struct as
 		res = handle_request_invite(p, req, addr, seqno, recount, e, nounlock);
 
 		if (res < 9) {
-			sip_report_security_event(p, req, res);
+			sip_report_security_event(NULL, &p->recv, p, req, res);
 		}
 
 		switch (res) {
@@ -28147,7 +28155,7 @@ static int handle_incoming(struct sip_pvt *p, struct sip_request *req, struct as
 		break;
 	case SIP_REGISTER:
 		res = handle_request_register(p, req, addr, e);
-		sip_report_security_event(p, req, res);
+		sip_report_security_event(p->exten, NULL, p, req, res);
 		break;
 	case SIP_INFO:
 		if (req->debug)
@@ -28170,7 +28178,7 @@ static int handle_incoming(struct sip_pvt *p, struct sip_request *req, struct as
 			p->pendinginvite = 0;
 			acked = __sip_ack(p, seqno, 1 /* response */, 0);
 			if (p->owner && find_sdp(req)) {
-				if (process_sdp(p, req, SDP_T38_NONE)) {
+				if (process_sdp(p, req, SDP_T38_NONE, FALSE)) {
 					return -1;
 				}
 				if (ast_test_flag(&p->flags[0], SIP_DIRECT_MEDIA)) {

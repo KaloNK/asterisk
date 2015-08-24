@@ -229,14 +229,17 @@ static int mime_types_len = 0;
  * See http://www.iana.org/assignments/rtp-parameters for a list of
  * assigned values
  */
-static struct ast_rtp_payload_type static_RTP_PT[AST_RTP_MAX_PT];
+static struct ast_rtp_payload_type *static_RTP_PT[AST_RTP_MAX_PT];
 static ast_rwlock_t static_RTP_PT_lock;
 
 /*! \brief \ref stasis topic for RTP related messages */
 static struct stasis_topic *rtp_topic;
 
 
-/*! \internal \brief Destructor for \c ast_rtp_payload_type */
+/*!
+ * \internal
+ * \brief Destructor for \c ast_rtp_payload_type
+ */
 static void rtp_payload_type_dtor(void *obj)
 {
 	struct ast_rtp_payload_type *payload = obj;
@@ -248,7 +251,8 @@ struct ast_rtp_payload_type *ast_rtp_engine_alloc_payload_type(void)
 {
 	struct ast_rtp_payload_type *payload;
 
-	payload = ao2_alloc(sizeof(*payload), rtp_payload_type_dtor);
+	payload = ao2_alloc_options(sizeof(*payload), rtp_payload_type_dtor,
+		AO2_ALLOC_OPT_LOCK_NOLOCK);
 
 	return payload;
 }
@@ -576,22 +580,32 @@ int ast_rtp_codecs_payloads_initialize(struct ast_rtp_codecs *codecs)
 
 	codecs->framing = 0;
 	ast_rwlock_init(&codecs->codecs_lock);
-	res = AST_VECTOR_INIT(&codecs->payloads, AST_RTP_MAX_PT);
+	res = AST_VECTOR_INIT(&codecs->payload_mapping_rx, AST_RTP_MAX_PT);
+	res |= AST_VECTOR_INIT(&codecs->payload_mapping_tx, AST_RTP_MAX_PT);
+	if (res) {
+		AST_VECTOR_FREE(&codecs->payload_mapping_rx);
+		AST_VECTOR_FREE(&codecs->payload_mapping_tx);
+	}
 
 	return res;
 }
 
 void ast_rtp_codecs_payloads_destroy(struct ast_rtp_codecs *codecs)
 {
-	int i;
+	int idx;
+	struct ast_rtp_payload_type *type;
 
-	for (i = 0; i < AST_VECTOR_SIZE(&codecs->payloads); i++) {
-		struct ast_rtp_payload_type *type;
-
-		type = AST_VECTOR_GET(&codecs->payloads, i);
-		ao2_t_cleanup(type, "destroying ast_rtp_codec");
+	for (idx = 0; idx < AST_VECTOR_SIZE(&codecs->payload_mapping_rx); ++idx) {
+		type = AST_VECTOR_GET(&codecs->payload_mapping_rx, idx);
+		ao2_t_cleanup(type, "destroying ast_rtp_codec rx mapping");
 	}
-	AST_VECTOR_FREE(&codecs->payloads);
+	AST_VECTOR_FREE(&codecs->payload_mapping_rx);
+
+	for (idx = 0; idx < AST_VECTOR_SIZE(&codecs->payload_mapping_tx); ++idx) {
+		type = AST_VECTOR_GET(&codecs->payload_mapping_tx, idx);
+		ao2_t_cleanup(type, "destroying ast_rtp_codec tx mapping");
+	}
+	AST_VECTOR_FREE(&codecs->payload_mapping_tx);
 
 	ast_rwlock_destroy(&codecs->codecs_lock);
 }
@@ -599,6 +613,7 @@ void ast_rtp_codecs_payloads_destroy(struct ast_rtp_codecs *codecs)
 void ast_rtp_codecs_payloads_clear(struct ast_rtp_codecs *codecs, struct ast_rtp_instance *instance)
 {
 	ast_rtp_codecs_payloads_destroy(codecs);
+	ast_rtp_codecs_payloads_initialize(codecs);
 
 	if (instance && instance->engine && instance->engine->payload_set) {
 		int i;
@@ -606,74 +621,307 @@ void ast_rtp_codecs_payloads_clear(struct ast_rtp_codecs *codecs, struct ast_rtp
 			instance->engine->payload_set(instance, i, 0, NULL, 0);
 		}
 	}
+}
 
-	ast_rtp_codecs_payloads_initialize(codecs);
+/*!
+ * \internal
+ * \brief Clear the rx primary mapping flag on all other matching mappings.
+ * \since 14.0.0
+ *
+ * \param codecs Codecs that need rx clearing.
+ * \param to_match Payload type object to compare against.
+ *
+ * \note It is assumed that codecs is write locked before calling.
+ *
+ * \return Nothing
+ */
+static void payload_mapping_rx_clear_primary(struct ast_rtp_codecs *codecs, struct ast_rtp_payload_type *to_match)
+{
+	int idx;
+	struct ast_rtp_payload_type *current;
+	struct ast_rtp_payload_type *new_type;
+	struct timeval now;
+
+	if (!to_match->primary_mapping) {
+		return;
+	}
+
+	now = ast_tvnow();
+	for (idx = 0; idx < AST_VECTOR_SIZE(&codecs->payload_mapping_rx); ++idx) {
+		current = AST_VECTOR_GET(&codecs->payload_mapping_rx, idx);
+
+		if (!current || current == to_match || !current->primary_mapping) {
+			continue;
+		}
+		if (current->asterisk_format && to_match->asterisk_format) {
+			if (ast_format_cmp(current->format, to_match->format) == AST_FORMAT_CMP_NOT_EQUAL) {
+				continue;
+			}
+		} else if (!current->asterisk_format && !to_match->asterisk_format) {
+			if (current->rtp_code != to_match->rtp_code) {
+				continue;
+			}
+		} else {
+			continue;
+		}
+
+		/* Replace current with non-primary marked version */
+		new_type = ast_rtp_engine_alloc_payload_type();
+		if (!new_type) {
+			continue;
+		}
+		*new_type = *current;
+		new_type->primary_mapping = 0;
+		new_type->when_retired = now;
+		ao2_bump(new_type->format);
+		AST_VECTOR_REPLACE(&codecs->payload_mapping_rx, idx, new_type);
+		ao2_ref(current, -1);
+	}
+}
+
+/*!
+ * \internal
+ * \brief Put the new_type into the rx payload type mapping.
+ * \since 14.0.0
+ *
+ * \param codecs Codecs structure to put new_type into
+ * \param payload type position to replace.
+ * \param new_type RTP payload mapping object to store.
+ *
+ * \note It is assumed that codecs is write locked before calling.
+ *
+ * \return Nothing
+ */
+static void rtp_codecs_payload_replace_rx(struct ast_rtp_codecs *codecs, int payload, struct ast_rtp_payload_type *new_type)
+{
+	ao2_ref(new_type, +1);
+	if (payload < AST_VECTOR_SIZE(&codecs->payload_mapping_rx)) {
+		ao2_t_cleanup(AST_VECTOR_GET(&codecs->payload_mapping_rx, payload),
+			"cleaning up rx mapping vector element about to be replaced");
+	}
+	AST_VECTOR_REPLACE(&codecs->payload_mapping_rx, payload, new_type);
+
+	payload_mapping_rx_clear_primary(codecs, new_type);
+}
+
+/*!
+ * \internal
+ * \brief Copy the rx payload type mapping to the destination.
+ * \since 14.0.0
+ *
+ * \param src The source codecs structure
+ * \param dest The destination codecs structure that the values from src will be copied to
+ * \param instance Optionally the instance that the dst codecs structure belongs to
+ *
+ * \note It is assumed that src is at least read locked before calling.
+ * \note It is assumed that dest is write locked before calling.
+ *
+ * \return Nothing
+ */
+static void rtp_codecs_payloads_copy_rx(struct ast_rtp_codecs *src, struct ast_rtp_codecs *dest, struct ast_rtp_instance *instance)
+{
+	int idx;
+	struct ast_rtp_payload_type *type;
+
+	for (idx = 0; idx < AST_VECTOR_SIZE(&src->payload_mapping_rx); ++idx) {
+		type = AST_VECTOR_GET(&src->payload_mapping_rx, idx);
+		if (!type) {
+			continue;
+		}
+
+		ast_debug(2, "Copying rx payload mapping %d (%p) from %p to %p\n",
+			idx, type, src, dest);
+		rtp_codecs_payload_replace_rx(dest, idx, type);
+
+		if (instance && instance->engine && instance->engine->payload_set) {
+			instance->engine->payload_set(instance, idx, type->asterisk_format, type->format, type->rtp_code);
+		}
+	}
+}
+
+/*!
+ * \internal
+ * \brief Remove other matching payload mappings.
+ * \since 14.0.0
+ *
+ * \param codecs Codecs that need tx mappings removed.
+ * \param instance RTP instance to notify of any payloads removed.
+ * \param to_match Payload type object to compare against.
+ *
+ * \note It is assumed that codecs is write locked before calling.
+ *
+ * \return Nothing
+ */
+static void payload_mapping_tx_remove_other_mappings(struct ast_rtp_codecs *codecs, struct ast_rtp_instance *instance, struct ast_rtp_payload_type *to_match)
+{
+	int idx;
+	struct ast_rtp_payload_type *current;
+
+	for (idx = 0; idx < AST_VECTOR_SIZE(&codecs->payload_mapping_tx); ++idx) {
+		current = AST_VECTOR_GET(&codecs->payload_mapping_tx, idx);
+
+		if (!current || current == to_match) {
+			continue;
+		}
+		if (current->asterisk_format && to_match->asterisk_format) {
+			if (ast_format_cmp(current->format, to_match->format) == AST_FORMAT_CMP_NOT_EQUAL) {
+				continue;
+			}
+		} else if (!current->asterisk_format && !to_match->asterisk_format) {
+			if (current->rtp_code != to_match->rtp_code) {
+				continue;
+			}
+		} else {
+			continue;
+		}
+
+		/* Remove other mapping */
+		AST_VECTOR_REPLACE(&codecs->payload_mapping_tx, idx, NULL);
+		ao2_ref(current, -1);
+		if (instance && instance->engine && instance->engine->payload_set) {
+			instance->engine->payload_set(instance, idx, 0, NULL, 0);
+		}
+	}
+}
+
+/*!
+ * \internal
+ * \brief Copy the tx payload type mapping to the destination.
+ * \since 14.0.0
+ *
+ * \param src The source codecs structure
+ * \param dest The destination codecs structure that the values from src will be copied to
+ * \param instance Optionally the instance that the dst codecs structure belongs to
+ *
+ * \note It is assumed that src is at least read locked before calling.
+ * \note It is assumed that dest is write locked before calling.
+ *
+ * \return Nothing
+ */
+static void rtp_codecs_payloads_copy_tx(struct ast_rtp_codecs *src, struct ast_rtp_codecs *dest, struct ast_rtp_instance *instance)
+{
+	int idx;
+	struct ast_rtp_payload_type *type;
+
+	for (idx = 0; idx < AST_VECTOR_SIZE(&src->payload_mapping_tx); ++idx) {
+		type = AST_VECTOR_GET(&src->payload_mapping_tx, idx);
+		if (!type) {
+			continue;
+		}
+
+		ast_debug(2, "Copying tx payload mapping %d (%p) from %p to %p\n",
+			idx, type, src, dest);
+		ao2_ref(type, +1);
+		if (idx < AST_VECTOR_SIZE(&dest->payload_mapping_tx)) {
+			ao2_t_cleanup(AST_VECTOR_GET(&dest->payload_mapping_tx, idx),
+				"cleaning up tx mapping vector element about to be replaced");
+		}
+		AST_VECTOR_REPLACE(&dest->payload_mapping_tx, idx, type);
+
+		if (instance && instance->engine && instance->engine->payload_set) {
+			instance->engine->payload_set(instance, idx, type->asterisk_format, type->format, type->rtp_code);
+		}
+
+		payload_mapping_tx_remove_other_mappings(dest, instance, type);
+	}
 }
 
 void ast_rtp_codecs_payloads_copy(struct ast_rtp_codecs *src, struct ast_rtp_codecs *dest, struct ast_rtp_instance *instance)
 {
-	int i;
-
-	ast_rwlock_rdlock(&src->codecs_lock);
 	ast_rwlock_wrlock(&dest->codecs_lock);
 
-	for (i = 0; i < AST_VECTOR_SIZE(&src->payloads); i++) {
-		struct ast_rtp_payload_type *type;
+	/* Deadlock avoidance because of held write lock. */
+	while (ast_rwlock_tryrdlock(&src->codecs_lock)) {
+		ast_rwlock_unlock(&dest->codecs_lock);
+		sched_yield();
+		ast_rwlock_wrlock(&dest->codecs_lock);
+	}
 
-		type = AST_VECTOR_GET(&src->payloads, i);
+	rtp_codecs_payloads_copy_rx(src, dest, instance);
+	rtp_codecs_payloads_copy_tx(src, dest, instance);
+	dest->framing = src->framing;
+
+	ast_rwlock_unlock(&src->codecs_lock);
+	ast_rwlock_unlock(&dest->codecs_lock);
+}
+
+void ast_rtp_codecs_payloads_xover(struct ast_rtp_codecs *src, struct ast_rtp_codecs *dest, struct ast_rtp_instance *instance)
+{
+	int idx;
+	struct ast_rtp_payload_type *type;
+
+	ast_rwlock_wrlock(&dest->codecs_lock);
+	if (src != dest) {
+		/* Deadlock avoidance because of held write lock. */
+		while (ast_rwlock_tryrdlock(&src->codecs_lock)) {
+			ast_rwlock_unlock(&dest->codecs_lock);
+			sched_yield();
+			ast_rwlock_wrlock(&dest->codecs_lock);
+		}
+	}
+
+	/* Crossover copy payload type tx mapping to rx mapping. */
+	for (idx = 0; idx < AST_VECTOR_SIZE(&src->payload_mapping_tx); ++idx) {
+		type = AST_VECTOR_GET(&src->payload_mapping_tx, idx);
 		if (!type) {
 			continue;
 		}
-		if (i < AST_VECTOR_SIZE(&dest->payloads)) {
-			ao2_t_cleanup(AST_VECTOR_GET(&dest->payloads, i), "cleaning up vector element about to be replaced");
-		}
-		ast_debug(2, "Copying payload %d (%p) from %p to %p\n", i, type, src, dest);
-		ao2_bump(type);
-		AST_VECTOR_REPLACE(&dest->payloads, i, type);
+
+		/* All tx mapping elements should have the primary flag set. */
+		ast_assert(type->primary_mapping);
+
+		ast_debug(2, "Crossover copying tx to rx payload mapping %d (%p) from %p to %p\n",
+			idx, type, src, dest);
+		rtp_codecs_payload_replace_rx(dest, idx, type);
 
 		if (instance && instance->engine && instance->engine->payload_set) {
-			instance->engine->payload_set(instance, i, type->asterisk_format, type->format, type->rtp_code);
+			instance->engine->payload_set(instance, idx, type->asterisk_format, type->format, type->rtp_code);
 		}
 	}
+
 	dest->framing = src->framing;
+
+	if (src != dest) {
+		ast_rwlock_unlock(&src->codecs_lock);
+	}
 	ast_rwlock_unlock(&dest->codecs_lock);
-	ast_rwlock_unlock(&src->codecs_lock);
 }
 
 void ast_rtp_codecs_payloads_set_m_type(struct ast_rtp_codecs *codecs, struct ast_rtp_instance *instance, int payload)
 {
 	struct ast_rtp_payload_type *new_type;
 
-	new_type = ast_rtp_engine_alloc_payload_type();
-	if (!new_type) {
+	if (payload < 0 || payload >= AST_RTP_MAX_PT) {
 		return;
 	}
 
 	ast_rwlock_rdlock(&static_RTP_PT_lock);
-	if (payload < 0 || payload >= AST_RTP_MAX_PT) {
-		ast_rwlock_unlock(&static_RTP_PT_lock);
+	new_type = ao2_bump(static_RTP_PT[payload]);
+	ast_rwlock_unlock(&static_RTP_PT_lock);
+	if (!new_type) {
+		ast_debug(1, "Don't have a default tx payload type %d format for m type on %p\n",
+			payload, codecs);
 		return;
 	}
 
+	ast_debug(1, "Setting tx payload type %d based on m type on %p\n",
+		payload, codecs);
+
 	ast_rwlock_wrlock(&codecs->codecs_lock);
-	if (payload < AST_VECTOR_SIZE(&codecs->payloads)) {
-		ao2_t_cleanup(AST_VECTOR_GET(&codecs->payloads, payload), "cleaning up replaced payload type");
+
+	if (payload < AST_VECTOR_SIZE(&codecs->payload_mapping_tx)) {
+		ao2_t_cleanup(AST_VECTOR_GET(&codecs->payload_mapping_tx, payload),
+			"cleaning up replaced tx payload type");
 	}
-
-	new_type->asterisk_format = static_RTP_PT[payload].asterisk_format;
-	new_type->rtp_code = static_RTP_PT[payload].rtp_code;
-	new_type->payload = payload;
-	new_type->format = ao2_bump(static_RTP_PT[payload].format);
-
-	ast_debug(1, "Setting payload %d (%p) based on m type on %p\n", payload, new_type, codecs);
-	AST_VECTOR_REPLACE(&codecs->payloads, payload, new_type);
+	AST_VECTOR_REPLACE(&codecs->payload_mapping_tx, payload, new_type);
 
 	if (instance && instance->engine && instance->engine->payload_set) {
 		instance->engine->payload_set(instance, payload, new_type->asterisk_format, new_type->format, new_type->rtp_code);
 	}
 
+	payload_mapping_tx_remove_other_mappings(codecs, instance, new_type);
+
 	ast_rwlock_unlock(&codecs->codecs_lock);
-	ast_rwlock_unlock(&static_RTP_PT_lock);
 }
 
 int ast_rtp_codecs_payloads_set_rtpmap_type_rate(struct ast_rtp_codecs *codecs, struct ast_rtp_instance *instance, int pt,
@@ -681,18 +929,18 @@ int ast_rtp_codecs_payloads_set_rtpmap_type_rate(struct ast_rtp_codecs *codecs, 
 				 enum ast_rtp_options options,
 				 unsigned int sample_rate)
 {
-	unsigned int i;
+	unsigned int idx;
 	int found = 0;
 
-	ast_rwlock_rdlock(&mime_types_lock);
 	if (pt < 0 || pt >= AST_RTP_MAX_PT) {
-		ast_rwlock_unlock(&mime_types_lock);
 		return -1; /* bogus payload type */
 	}
 
+	ast_rwlock_rdlock(&mime_types_lock);
 	ast_rwlock_wrlock(&codecs->codecs_lock);
-	for (i = 0; i < mime_types_len; ++i) {
-		const struct ast_rtp_mime_type *t = &ast_rtp_mime_types[i];
+
+	for (idx = 0; idx < mime_types_len; ++idx) {
+		const struct ast_rtp_mime_type *t = &ast_rtp_mime_types[idx];
 		struct ast_rtp_payload_type *new_type;
 
 		if (strcasecmp(mimesubtype, t->subtype)) {
@@ -718,27 +966,32 @@ int ast_rtp_codecs_payloads_set_rtpmap_type_rate(struct ast_rtp_codecs *codecs, 
 			continue;
 		}
 
-		if (pt < AST_VECTOR_SIZE(&codecs->payloads)) {
-			ao2_t_cleanup(AST_VECTOR_GET(&codecs->payloads, pt), "cleaning up replaced payload type");
-		}
-
-		new_type->payload = pt;
 		new_type->asterisk_format = t->payload_type.asterisk_format;
 		new_type->rtp_code = t->payload_type.rtp_code;
-		if ((ast_format_cmp(t->payload_type.format, ast_format_g726) == AST_FORMAT_CMP_EQUAL) &&
-				t->payload_type.asterisk_format && (options & AST_RTP_OPT_G726_NONSTANDARD)) {
+		new_type->payload = pt;
+		new_type->primary_mapping = 1;
+		if (t->payload_type.asterisk_format
+			&& ast_format_cmp(t->payload_type.format, ast_format_g726) == AST_FORMAT_CMP_EQUAL
+			&& (options & AST_RTP_OPT_G726_NONSTANDARD)) {
 			new_type->format = ao2_bump(ast_format_g726_aal2);
 		} else {
 			new_type->format = ao2_bump(t->payload_type.format);
 		}
-		AST_VECTOR_REPLACE(&codecs->payloads, pt, new_type);
+
+		if (pt < AST_VECTOR_SIZE(&codecs->payload_mapping_tx)) {
+			ao2_t_cleanup(AST_VECTOR_GET(&codecs->payload_mapping_tx, pt),
+				"cleaning up replaced tx payload type");
+		}
+		AST_VECTOR_REPLACE(&codecs->payload_mapping_tx, pt, new_type);
 
 		if (instance && instance->engine && instance->engine->payload_set) {
 			instance->engine->payload_set(instance, pt, new_type->asterisk_format, new_type->format, new_type->rtp_code);
 		}
 
+		payload_mapping_tx_remove_other_mappings(codecs, instance, new_type);
 		break;
 	}
+
 	ast_rwlock_unlock(&codecs->codecs_lock);
 	ast_rwlock_unlock(&mime_types_lock);
 
@@ -761,10 +1014,11 @@ void ast_rtp_codecs_payloads_unset(struct ast_rtp_codecs *codecs, struct ast_rtp
 	ast_debug(2, "Unsetting payload %d on %p\n", payload, codecs);
 
 	ast_rwlock_wrlock(&codecs->codecs_lock);
-	if (payload < AST_VECTOR_SIZE(&codecs->payloads)) {
-		type = AST_VECTOR_GET(&codecs->payloads, payload);
+
+	if (payload < AST_VECTOR_SIZE(&codecs->payload_mapping_tx)) {
+		type = AST_VECTOR_GET(&codecs->payload_mapping_tx, payload);
 		ao2_cleanup(type);
-		AST_VECTOR_REPLACE(&codecs->payloads, payload, NULL);
+		AST_VECTOR_REPLACE(&codecs->payload_mapping_tx, payload, NULL);
 	}
 
 	if (instance && instance->engine && instance->engine->payload_set) {
@@ -783,22 +1037,15 @@ struct ast_rtp_payload_type *ast_rtp_codecs_get_payload(struct ast_rtp_codecs *c
 	}
 
 	ast_rwlock_rdlock(&codecs->codecs_lock);
-	if (payload < AST_VECTOR_SIZE(&codecs->payloads)) {
-		type = AST_VECTOR_GET(&codecs->payloads, payload);
+	if (payload < AST_VECTOR_SIZE(&codecs->payload_mapping_rx)) {
+		type = AST_VECTOR_GET(&codecs->payload_mapping_rx, payload);
 		ao2_bump(type);
 	}
 	ast_rwlock_unlock(&codecs->codecs_lock);
 
 	if (!type) {
-		type = ast_rtp_engine_alloc_payload_type();
-		if (!type) {
-			return NULL;
-		}
 		ast_rwlock_rdlock(&static_RTP_PT_lock);
-		type->asterisk_format = static_RTP_PT[payload].asterisk_format;
-		type->rtp_code = static_RTP_PT[payload].rtp_code;
-		type->payload = payload;
-		type->format = ao2_bump(static_RTP_PT[payload].format);
+		type = ao2_bump(static_RTP_PT[payload]);
 		ast_rwlock_unlock(&static_RTP_PT_lock);
 	}
 
@@ -809,17 +1056,26 @@ int ast_rtp_codecs_payload_replace_format(struct ast_rtp_codecs *codecs, int pay
 {
 	struct ast_rtp_payload_type *type;
 
-	if (payload < 0 || payload >= AST_RTP_MAX_PT) {
+	if (payload < 0 || payload >= AST_RTP_MAX_PT || !format) {
 		return -1;
 	}
 
-	ast_rwlock_wrlock(&codecs->codecs_lock);
-	if (payload < AST_VECTOR_SIZE(&codecs->payloads)) {
-		type = AST_VECTOR_GET(&codecs->payloads, payload);
-		if (type && type->asterisk_format) {
-			ao2_replace(type->format, format);
-		}
+	type = ast_rtp_engine_alloc_payload_type();
+	if (!type) {
+		return -1;
 	}
+	ao2_ref(format, +1);
+	type->format = format;
+	type->asterisk_format = 1;
+	type->payload = payload;
+	type->primary_mapping = 1;
+
+	ast_rwlock_wrlock(&codecs->codecs_lock);
+	if (payload < AST_VECTOR_SIZE(&codecs->payload_mapping_tx)) {
+		ao2_cleanup(AST_VECTOR_GET(&codecs->payload_mapping_tx, payload));
+	}
+	AST_VECTOR_REPLACE(&codecs->payload_mapping_tx, payload, type);
+	payload_mapping_tx_remove_other_mappings(codecs, NULL, type);
 	ast_rwlock_unlock(&codecs->codecs_lock);
 
 	return 0;
@@ -835,8 +1091,8 @@ struct ast_format *ast_rtp_codecs_get_payload_format(struct ast_rtp_codecs *code
 	}
 
 	ast_rwlock_rdlock(&codecs->codecs_lock);
-	if (payload < AST_VECTOR_SIZE(&codecs->payloads)) {
-		type = AST_VECTOR_GET(&codecs->payloads, payload);
+	if (payload < AST_VECTOR_SIZE(&codecs->payload_mapping_tx)) {
+		type = AST_VECTOR_GET(&codecs->payload_mapping_tx, payload);
 		if (type && type->asterisk_format) {
 			format = ao2_bump(type->format);
 		}
@@ -870,16 +1126,17 @@ unsigned int ast_rtp_codecs_get_framing(struct ast_rtp_codecs *codecs)
 
 void ast_rtp_codecs_payload_formats(struct ast_rtp_codecs *codecs, struct ast_format_cap *astformats, int *nonastformats)
 {
-	int i;
+	int idx;
 
 	ast_format_cap_remove_by_type(astformats, AST_MEDIA_TYPE_UNKNOWN);
 	*nonastformats = 0;
 
 	ast_rwlock_rdlock(&codecs->codecs_lock);
-	for (i = 0; i < AST_VECTOR_SIZE(&codecs->payloads); i++) {
+
+	for (idx = 0; idx < AST_VECTOR_SIZE(&codecs->payload_mapping_tx); ++idx) {
 		struct ast_rtp_payload_type *type;
 
-		type = AST_VECTOR_GET(&codecs->payloads, i);
+		type = AST_VECTOR_GET(&codecs->payload_mapping_tx, idx);
 		if (!type) {
 			continue;
 		}
@@ -890,7 +1147,6 @@ void ast_rtp_codecs_payload_formats(struct ast_rtp_codecs *codecs, struct ast_fo
 			*nonastformats |= type->rtp_code;
 		}
 	}
-
 	if (codecs->framing) {
 		ast_format_cap_set_framing(astformats, codecs->framing);
 	}
@@ -898,56 +1154,287 @@ void ast_rtp_codecs_payload_formats(struct ast_rtp_codecs *codecs, struct ast_fo
 	ast_rwlock_unlock(&codecs->codecs_lock);
 }
 
-int ast_rtp_codecs_payload_code(struct ast_rtp_codecs *codecs, int asterisk_format, const struct ast_format *format, int code)
+/*!
+ * \internal
+ * \brief Find the static payload type mapping for the format.
+ * \since 14.0.0
+ *
+ * \param asterisk_format Non-zero if the given Asterisk format is present
+ * \param format Asterisk format to look for
+ * \param code The non-Asterisk format code to look for
+ *
+ * \note It is assumed that static_RTP_PT_lock is at least read locked before calling.
+ *
+ * \retval Numerical payload type
+ * \retval -1 if not found.
+ */
+static int find_static_payload_type(int asterisk_format, const struct ast_format *format, int code)
 {
-	struct ast_rtp_payload_type *type;
-	int i;
+	int idx;
 	int payload = -1;
 
-	ast_rwlock_rdlock(&codecs->codecs_lock);
-	for (i = 0; i < AST_VECTOR_SIZE(&codecs->payloads); i++) {
-		type = AST_VECTOR_GET(&codecs->payloads, i);
-		if (!type) {
-			continue;
-		}
-
-		if ((asterisk_format && format && ast_format_cmp(format, type->format) == AST_FORMAT_CMP_EQUAL)
-			|| (!asterisk_format && type->rtp_code == code)) {
-			payload = i;
-			break;
-		}
-	}
-	ast_rwlock_unlock(&codecs->codecs_lock);
-
-	if (payload < 0) {
-		ast_rwlock_rdlock(&static_RTP_PT_lock);
-		for (i = 0; i < AST_RTP_MAX_PT; i++) {
-			if (static_RTP_PT[i].asterisk_format && asterisk_format && format &&
-				(ast_format_cmp(format, static_RTP_PT[i].format) != AST_FORMAT_CMP_NOT_EQUAL)) {
-				payload = i;
-				break;
-			} else if (!static_RTP_PT[i].asterisk_format && !asterisk_format &&
-				(static_RTP_PT[i].rtp_code == code)) {
-				payload = i;
+	if (!asterisk_format) {
+		for (idx = 0; idx < AST_RTP_MAX_PT; ++idx) {
+			if (static_RTP_PT[idx]
+				&& !static_RTP_PT[idx]->asterisk_format
+				&& static_RTP_PT[idx]->rtp_code == code) {
+				payload = idx;
 				break;
 			}
 		}
+	} else if (format) {
+		for (idx = 0; idx < AST_RTP_MAX_PT; ++idx) {
+			if (static_RTP_PT[idx]
+				&& static_RTP_PT[idx]->asterisk_format
+				&& ast_format_cmp(format, static_RTP_PT[idx]->format)
+					!= AST_FORMAT_CMP_NOT_EQUAL) {
+				payload = idx;
+				break;
+			}
+		}
+	}
+
+	return payload;
+}
+
+/*!
+ * \internal
+ * \brief Find the first unused dynamic rx payload type.
+ * \since 14.0.0
+ *
+ * \param codecs Codecs structure to look in
+ *
+ * \note It is assumed that codecs is at least read locked before calling.
+ *
+ * \retval Numerical payload type
+ * \retval -1 if not found.
+ */
+static int rtp_codecs_find_empty_dynamic_rx(struct ast_rtp_codecs *codecs)
+{
+	struct ast_rtp_payload_type *type;
+	int idx;
+	int payload = -1;
+
+	idx = AST_RTP_PT_FIRST_DYNAMIC;
+	for (; idx < AST_VECTOR_SIZE(&codecs->payload_mapping_rx); ++idx) {
+		type = AST_VECTOR_GET(&codecs->payload_mapping_rx, idx);
+		if (!type) {
+			payload = idx;
+			break;
+		}
+	}
+	return payload;
+}
+
+/*!
+ * \internal
+ * \brief Find the oldest non-primary dynamic rx payload type.
+ * \since 14.0.0
+ *
+ * \param codecs Codecs structure to look in
+ *
+ * \note It is assumed that codecs is at least read locked before calling.
+ *
+ * \retval Numerical payload type
+ * \retval -1 if not found.
+ */
+static int rtp_codecs_find_non_primary_dynamic_rx(struct ast_rtp_codecs *codecs)
+{
+	struct ast_rtp_payload_type *type;
+	struct timeval oldest;
+	int idx;
+	int payload = -1;
+
+	idx = AST_RTP_PT_FIRST_DYNAMIC;
+	for (; idx < AST_VECTOR_SIZE(&codecs->payload_mapping_rx); ++idx) {
+		type = AST_VECTOR_GET(&codecs->payload_mapping_rx, idx);
+		if (type
+			&& !type->primary_mapping
+			&& (payload == -1
+				|| ast_tvdiff_ms(type->when_retired, oldest) < 0)) {
+			oldest = type->when_retired;
+			payload = idx;
+		}
+	}
+	return payload;
+}
+
+/*!
+ * \internal
+ * \brief Assign a payload type for the rx mapping.
+ * \since 14.0.0
+ *
+ * \param codecs Codecs structure to look in
+ * \param asterisk_format Non-zero if the given Asterisk format is present
+ * \param format Asterisk format to look for
+ * \param code The format to look for
+ *
+ * \note It is assumed that static_RTP_PT_lock is at least read locked before calling.
+ *
+ * \retval Numerical payload type
+ * \retval -1 if could not assign.
+ */
+static int rtp_codecs_assign_payload_code_rx(struct ast_rtp_codecs *codecs, int asterisk_format, struct ast_format *format, int code)
+{
+	int payload;
+	struct ast_rtp_payload_type *new_type;
+
+	payload = find_static_payload_type(asterisk_format, format, code);
+	if (payload < 0) {
+		return payload;
+	}
+
+	new_type = ast_rtp_engine_alloc_payload_type();
+	if (!new_type) {
+		return -1;
+	}
+	new_type->format = ao2_bump(format);
+	new_type->asterisk_format = asterisk_format;
+	new_type->rtp_code = code;
+	new_type->payload = payload;
+	new_type->primary_mapping = 1;
+
+	ast_rwlock_wrlock(&codecs->codecs_lock);
+	if (payload < AST_RTP_PT_FIRST_DYNAMIC
+		|| AST_VECTOR_SIZE(&codecs->payload_mapping_rx) <= payload
+		|| !AST_VECTOR_GET(&codecs->payload_mapping_rx, payload)) {
+		/*
+		 * The payload type is a static assignment
+		 * or our default dynamic position is available.
+		 */
+		rtp_codecs_payload_replace_rx(codecs, payload, new_type);
+	} else if (-1 < (payload = rtp_codecs_find_empty_dynamic_rx(codecs))
+		|| -1 < (payload = rtp_codecs_find_non_primary_dynamic_rx(codecs))) {
+		/*
+		 * We found the first available empty dynamic position
+		 * or we found a mapping that should no longer be
+		 * actively used.
+		 */
+		new_type->payload = payload;
+		rtp_codecs_payload_replace_rx(codecs, payload, new_type);
+	} else {
+		/*
+		 * There are no empty or non-primary dynamic positions
+		 * left.  Sadness.
+		 *
+		 * I don't think this is really possible.
+		 */
+		ast_log(LOG_WARNING, "No dynamic RTP payload type values available!\n");
+	}
+	ast_rwlock_unlock(&codecs->codecs_lock);
+
+	ao2_ref(new_type, -1);
+
+	return payload;
+}
+
+int ast_rtp_codecs_payload_code(struct ast_rtp_codecs *codecs, int asterisk_format, struct ast_format *format, int code)
+{
+	struct ast_rtp_payload_type *type;
+	int idx;
+	int payload = -1;
+
+	ast_rwlock_rdlock(&static_RTP_PT_lock);
+	if (!asterisk_format) {
+		ast_rwlock_rdlock(&codecs->codecs_lock);
+		for (idx = 0; idx < AST_VECTOR_SIZE(&codecs->payload_mapping_rx); ++idx) {
+			type = AST_VECTOR_GET(&codecs->payload_mapping_rx, idx);
+			if (!type) {
+				continue;
+			}
+
+			if (!type->asterisk_format
+				&& type->primary_mapping
+				&& type->rtp_code == code) {
+				payload = idx;
+				break;
+			}
+		}
+		ast_rwlock_unlock(&codecs->codecs_lock);
+	} else if (format) {
+		ast_rwlock_rdlock(&codecs->codecs_lock);
+		for (idx = 0; idx < AST_VECTOR_SIZE(&codecs->payload_mapping_rx); ++idx) {
+			type = AST_VECTOR_GET(&codecs->payload_mapping_rx, idx);
+			if (!type) {
+				continue;
+			}
+
+			if (type->asterisk_format
+				&& type->primary_mapping
+				&& ast_format_cmp(format, type->format) == AST_FORMAT_CMP_EQUAL) {
+				payload = idx;
+				break;
+			}
+		}
+		ast_rwlock_unlock(&codecs->codecs_lock);
+	}
+
+	if (payload < 0) {
+		payload = rtp_codecs_assign_payload_code_rx(codecs, asterisk_format, format,
+			code);
+	}
+	ast_rwlock_unlock(&static_RTP_PT_lock);
+
+	return payload;
+}
+
+int ast_rtp_codecs_payload_code_tx(struct ast_rtp_codecs *codecs, int asterisk_format, const struct ast_format *format, int code)
+{
+	struct ast_rtp_payload_type *type;
+	int idx;
+	int payload = -1;
+
+	if (!asterisk_format) {
+		ast_rwlock_rdlock(&codecs->codecs_lock);
+		for (idx = 0; idx < AST_VECTOR_SIZE(&codecs->payload_mapping_tx); ++idx) {
+			type = AST_VECTOR_GET(&codecs->payload_mapping_tx, idx);
+			if (!type) {
+				continue;
+			}
+
+			if (!type->asterisk_format
+				&& type->rtp_code == code) {
+				payload = idx;
+				break;
+			}
+		}
+		ast_rwlock_unlock(&codecs->codecs_lock);
+	} else if (format) {
+		ast_rwlock_rdlock(&codecs->codecs_lock);
+		for (idx = 0; idx < AST_VECTOR_SIZE(&codecs->payload_mapping_tx); ++idx) {
+			type = AST_VECTOR_GET(&codecs->payload_mapping_tx, idx);
+			if (!type) {
+				continue;
+			}
+
+			if (type->asterisk_format
+				&& ast_format_cmp(format, type->format) == AST_FORMAT_CMP_EQUAL) {
+				payload = idx;
+				break;
+			}
+		}
+		ast_rwlock_unlock(&codecs->codecs_lock);
+	}
+
+	if (payload < 0) {
+		ast_rwlock_rdlock(&static_RTP_PT_lock);
+		payload = find_static_payload_type(asterisk_format, format, code);
 		ast_rwlock_unlock(&static_RTP_PT_lock);
 	}
 
 	return payload;
 }
 
-int ast_rtp_codecs_find_payload_code(struct ast_rtp_codecs *codecs, int code)
+int ast_rtp_codecs_find_payload_code(struct ast_rtp_codecs *codecs, int payload)
 {
 	struct ast_rtp_payload_type *type;
 	int res = -1;
 
 	ast_rwlock_rdlock(&codecs->codecs_lock);
-	if (code < AST_VECTOR_SIZE(&codecs->payloads)) {
-		type = AST_VECTOR_GET(&codecs->payloads, code);
+	if (payload < AST_VECTOR_SIZE(&codecs->payload_mapping_tx)) {
+		type = AST_VECTOR_GET(&codecs->payload_mapping_tx, payload);
 		if (type) {
-			res = type->payload;
+			res = payload;
 		}
 	}
 	ast_rwlock_unlock(&codecs->codecs_lock);
@@ -1189,13 +1676,13 @@ void ast_rtp_instance_early_bridge_make_compatible(struct ast_channel *c_dst, st
 		goto done;
 	}
 
-	ast_rtp_codecs_payloads_copy(&instance_src->codecs, &instance_dst->codecs, instance_dst);
+	ast_rtp_codecs_payloads_xover(&instance_src->codecs, &instance_dst->codecs, instance_dst);
 
 	if (vinstance_dst && vinstance_src) {
-		ast_rtp_codecs_payloads_copy(&vinstance_src->codecs, &vinstance_dst->codecs, vinstance_dst);
+		ast_rtp_codecs_payloads_xover(&vinstance_src->codecs, &vinstance_dst->codecs, vinstance_dst);
 	}
 	if (tinstance_dst && tinstance_src) {
-		ast_rtp_codecs_payloads_copy(&tinstance_src->codecs, &tinstance_dst->codecs, tinstance_dst);
+		ast_rtp_codecs_payloads_xover(&tinstance_src->codecs, &tinstance_dst->codecs, tinstance_dst);
 	}
 
 	if (glue_dst->update_peer(c_dst, instance_src, vinstance_src, tinstance_src, cap_src, 0)) {
@@ -1694,16 +2181,6 @@ void ast_rtp_dtls_cfg_free(struct ast_rtp_dtls_cfg *dtls_cfg)
 
 /*! \internal
  * \brief Small helper routine that cleans up entry i in
- * \c static_RTP_PT.
- */
-static void rtp_engine_static_RTP_PT_cleanup(int i)
-{
-	ao2_cleanup(static_RTP_PT[i].format);
-	memset(&static_RTP_PT[i], 0, sizeof(struct ast_rtp_payload_type));
-}
-
-/*! \internal
- * \brief Small helper routine that cleans up entry i in
  * \c ast_rtp_mime_types.
  */
 static void rtp_engine_mime_type_cleanup(int i)
@@ -1714,12 +2191,16 @@ static void rtp_engine_mime_type_cleanup(int i)
 
 static void set_next_mime_type(struct ast_format *format, int rtp_code, const char *type, const char *subtype, unsigned int sample_rate)
 {
-	int x = mime_types_len;
-	if (ARRAY_LEN(ast_rtp_mime_types) == mime_types_len) {
+	int x;
+
+	ast_rwlock_wrlock(&mime_types_lock);
+
+	x = mime_types_len;
+	if (ARRAY_LEN(ast_rtp_mime_types) <= x) {
+		ast_rwlock_unlock(&mime_types_lock);
 		return;
 	}
 
-	ast_rwlock_wrlock(&mime_types_lock);
 	/* Make sure any previous value in ast_rtp_mime_types is cleaned up */
 	memset(&ast_rtp_mime_types[x], 0, sizeof(struct ast_rtp_mime_type));	
 	if (format) {
@@ -1732,35 +2213,52 @@ static void set_next_mime_type(struct ast_format *format, int rtp_code, const ch
 	ast_copy_string(ast_rtp_mime_types[x].subtype, subtype, sizeof(ast_rtp_mime_types[x].subtype));
 	ast_rtp_mime_types[x].sample_rate = sample_rate;
 	mime_types_len++;
+
 	ast_rwlock_unlock(&mime_types_lock);
 }
 
 static void add_static_payload(int map, struct ast_format *format, int rtp_code)
 {
 	int x;
+	struct ast_rtp_payload_type *type;
+
+	ast_assert(map < ARRAY_LEN(static_RTP_PT));
+
 	ast_rwlock_wrlock(&static_RTP_PT_lock);
 	if (map < 0) {
 		/* find next available dynamic payload slot */
-		for (x = 96; x < 127; x++) {
-			if (!static_RTP_PT[x].asterisk_format && !static_RTP_PT[x].rtp_code) {
+		for (x = AST_RTP_PT_FIRST_DYNAMIC; x < AST_RTP_MAX_PT; ++x) {
+			if (!static_RTP_PT[x]) {
 				map = x;
 				break;
 			}
 		}
+		if (map < 0) {
+			if (format) {
+				ast_log(LOG_WARNING, "No Dynamic RTP mapping available for format %s\n",
+					ast_format_get_name(format));
+			} else {
+				ast_log(LOG_WARNING, "No Dynamic RTP mapping available for RTP code %d\n",
+					rtp_code);
+			}
+			ast_rwlock_unlock(&static_RTP_PT_lock);
+			return;
+		}
 	}
 
-	if (map < 0) {
-		ast_log(LOG_WARNING, "No Dynamic RTP mapping available for format %s\n",
-			ast_format_get_name(format));
-		ast_rwlock_unlock(&static_RTP_PT_lock);
-		return;
-	}
-
-	if (format) {
-		static_RTP_PT[map].asterisk_format = 1;
-		static_RTP_PT[map].format = ao2_bump(format);
-	} else {
-		static_RTP_PT[map].rtp_code = rtp_code;
+	type = ast_rtp_engine_alloc_payload_type();
+	if (type) {
+		if (format) {
+			ao2_ref(format, +1);
+			type->format = format;
+			type->asterisk_format = 1;
+		} else {
+			type->rtp_code = rtp_code;
+		}
+		type->payload = map;
+		type->primary_mapping = 1;
+		ao2_cleanup(static_RTP_PT[map]);
+		static_RTP_PT[map] = type;
 	}
 	ast_rwlock_unlock(&static_RTP_PT_lock);
 }
@@ -1789,8 +2287,10 @@ int ast_rtp_engine_unload_format(struct ast_format *format)
 	ast_rwlock_wrlock(&static_RTP_PT_lock);
 	/* remove everything pertaining to this format id from the lists */
 	for (x = 0; x < AST_RTP_MAX_PT; x++) {
-		if (ast_format_cmp(static_RTP_PT[x].format, format) == AST_FORMAT_CMP_EQUAL) {
-			rtp_engine_static_RTP_PT_cleanup(x);
+		if (static_RTP_PT[x]
+			&& ast_format_cmp(static_RTP_PT[x]->format, format) == AST_FORMAT_CMP_EQUAL) {
+			ao2_ref(static_RTP_PT[x], -1);
+			static_RTP_PT[x] = NULL;
 		}
 	}
 	ast_rwlock_unlock(&static_RTP_PT_lock);
@@ -2079,9 +2579,8 @@ static void rtp_engine_shutdown(void)
 
 	ast_rwlock_wrlock(&static_RTP_PT_lock);
 	for (x = 0; x < AST_RTP_MAX_PT; x++) {
-		if (static_RTP_PT[x].format) {
-			rtp_engine_static_RTP_PT_cleanup(x);
-		}
+		ao2_cleanup(static_RTP_PT[x]);
+		static_RTP_PT[x] = NULL;
 	}
 	ast_rwlock_unlock(&static_RTP_PT_lock);
 
@@ -2091,10 +2590,11 @@ static void rtp_engine_shutdown(void)
 			rtp_engine_mime_type_cleanup(x);
 		}
 	}
+	mime_types_len = 0;
 	ast_rwlock_unlock(&mime_types_lock);
 }
 
-int ast_rtp_engine_init()
+int ast_rtp_engine_init(void)
 {
 	ast_rwlock_init(&mime_types_lock);
 	ast_rwlock_init(&static_RTP_PT_lock);

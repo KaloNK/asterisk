@@ -38,6 +38,7 @@ ASTERISK_REGISTER_FILE()
 #include "asterisk/file.h"
 #include "asterisk/unaligned.h"
 #include "asterisk/uri.h"
+#include "asterisk/uuid.h"
 
 #define AST_API_MODULE
 #include "asterisk/http_websocket.h"
@@ -74,18 +75,19 @@ ASTERISK_REGISTER_FILE()
 
 /*! \brief Structure definition for session */
 struct ast_websocket {
-	FILE *f;                          /*!< Pointer to the file instance used for writing and reading */
-	int fd;                           /*!< File descriptor for the session, only used for polling */
-	struct ast_sockaddr address;      /*!< Address of the remote client */
-	enum ast_websocket_opcode opcode; /*!< Cached opcode for multi-frame messages */
-	size_t payload_len;               /*!< Length of the payload */
-	char *payload;                    /*!< Pointer to the payload */
-	size_t reconstruct;               /*!< Number of bytes before a reconstructed payload will be returned and a new one started */
-	int timeout;                      /*!< The timeout for operations on the socket */
-	unsigned int secure:1;            /*!< Bit to indicate that the transport is secure */
-	unsigned int closing:1;           /*!< Bit to indicate that the session is in the process of being closed */
-	unsigned int close_sent:1;        /*!< Bit to indicate that the session close opcode has been sent and no further data will be sent */
-	struct websocket_client *client;  /*!< Client object when connected as a client websocket */
+	FILE *f;                           /*!< Pointer to the file instance used for writing and reading */
+	int fd;                            /*!< File descriptor for the session, only used for polling */
+	struct ast_sockaddr address;       /*!< Address of the remote client */
+	enum ast_websocket_opcode opcode;  /*!< Cached opcode for multi-frame messages */
+	size_t payload_len;                /*!< Length of the payload */
+	char *payload;                     /*!< Pointer to the payload */
+	size_t reconstruct;                /*!< Number of bytes before a reconstructed payload will be returned and a new one started */
+	int timeout;                       /*!< The timeout for operations on the socket */
+	unsigned int secure:1;             /*!< Bit to indicate that the transport is secure */
+	unsigned int closing:1;            /*!< Bit to indicate that the session is in the process of being closed */
+	unsigned int close_sent:1;         /*!< Bit to indicate that the session close opcode has been sent and no further data will be sent */
+	struct websocket_client *client;   /*!< Client object when connected as a client websocket */
+	char session_id[AST_UUID_STR_LEN]; /*!< The identifier for the websocket session */
 };
 
 /*! \brief Hashing function for protocols */
@@ -167,9 +169,11 @@ static void session_destroy_fn(void *obj)
 
 	if (session->f) {
 		ast_websocket_close(session, 0);
-		fclose(session->f);
-		ast_verb(2, "WebSocket connection %s '%s' closed\n", session->client ? "to" : "from",
-			ast_sockaddr_stringify(&session->address));
+		if (session->f) {
+			fclose(session->f);
+			ast_verb(2, "WebSocket connection %s '%s' closed\n", session->client ? "to" : "from",
+				ast_sockaddr_stringify(&session->address));
+		}
 	}
 
 	ao2_cleanup(session->client);
@@ -205,7 +209,6 @@ int AST_OPTIONAL_API_NAME(ast_websocket_server_add_protocol)(struct ast_websocke
 
 	protocol = ast_websocket_sub_protocol_alloc(name);
 	if (!protocol) {
-		ao2_unlock(server->protocols);
 		return -1;
 	}
 	protocol->session_established = callback;
@@ -294,10 +297,39 @@ int AST_OPTIONAL_API_NAME(ast_websocket_close)(struct ast_websocket *session, ui
 
 	ao2_lock(session);
 	res = ast_careful_fwrite(session->f, session->fd, frame, 4, session->timeout);
+
+	/* If an error occurred when trying to close this connection explicitly terminate it now.
+	 * Doing so will cause the thread polling on it to wake up and terminate.
+	 */
+	if (res) {
+		fclose(session->f);
+		session->f = NULL;
+		ast_verb(2, "WebSocket connection %s '%s' forcefully closed due to fatal write error\n",
+			session->client ? "to" : "from", ast_sockaddr_stringify(&session->address));
+	}
+
 	ao2_unlock(session);
 	return res;
 }
 
+static const char *opcode_map[] = {
+	[AST_WEBSOCKET_OPCODE_CONTINUATION] = "continuation",
+	[AST_WEBSOCKET_OPCODE_TEXT] = "text",
+	[AST_WEBSOCKET_OPCODE_BINARY] = "binary",
+	[AST_WEBSOCKET_OPCODE_CLOSE] = "close",
+	[AST_WEBSOCKET_OPCODE_PING] = "ping",
+	[AST_WEBSOCKET_OPCODE_PONG] = "pong",
+};
+
+static const char *websocket_opcode2str(enum ast_websocket_opcode opcode)
+{
+	if (opcode < AST_WEBSOCKET_OPCODE_CONTINUATION ||
+			opcode > AST_WEBSOCKET_OPCODE_PONG) {
+		return "<unknown>";
+	} else {
+		return opcode_map[opcode];
+	}
+}
 
 /*! \brief Write function for websocket traffic */
 int AST_OPTIONAL_API_NAME(ast_websocket_write)(struct ast_websocket *session, enum ast_websocket_opcode opcode, char *payload, uint64_t actual_length)
@@ -305,6 +337,9 @@ int AST_OPTIONAL_API_NAME(ast_websocket_write)(struct ast_websocket *session, en
 	size_t header_size = 2; /* The minimum size of a websocket frame is 2 bytes */
 	char *frame;
 	uint64_t length;
+
+	ast_debug(3, "Writing websocket %s frame, length %" PRIu64 "\n",
+			websocket_opcode2str(opcode), actual_length);
 
 	if (actual_length < 126) {
 		length = actual_length;
@@ -328,7 +363,7 @@ int AST_OPTIONAL_API_NAME(ast_websocket_write)(struct ast_websocket *session, en
 	if (length == 126) {
 		put_unaligned_uint16(&frame[2], htons(actual_length));
 	} else if (length == 127) {
-		put_unaligned_uint64(&frame[2], htobe64(actual_length));
+		put_unaligned_uint64(&frame[2], htonll(actual_length));
 	}
 
 	ao2_lock(session);
@@ -414,6 +449,12 @@ int AST_OPTIONAL_API_NAME(ast_websocket_set_timeout)(struct ast_websocket *sessi
 	return 0;
 }
 
+const char * AST_OPTIONAL_API_NAME(ast_websocket_session_id)(struct ast_websocket *session)
+{
+	return session->session_id;
+}
+
+
 /* MAINTENANCE WARNING on ast_websocket_read()!
  *
  * We have to keep in mind during this function that the fact that session->fd seems ready
@@ -449,6 +490,13 @@ static inline int ws_safe_read(struct ast_websocket *session, char *buf, int len
 	char *rbuf = buf;
 	int sanity = 10;
 
+	ao2_lock(session);
+	if (!session->f) {
+		ao2_unlock(session);
+		errno = ECONNABORTED;
+		return -1;
+	}
+
 	for (;;) {
 		clearerr(session->f);
 		rlen = fread(rbuf, 1, xlen, session->f);
@@ -457,6 +505,7 @@ static inline int ws_safe_read(struct ast_websocket *session, char *buf, int len
 				ast_log(LOG_WARNING, "Web socket closed abruptly\n");
 				*opcode = AST_WEBSOCKET_OPCODE_CLOSE;
 				session->closing = 1;
+				ao2_unlock(session);
 				return -1;
 			}
 
@@ -464,6 +513,7 @@ static inline int ws_safe_read(struct ast_websocket *session, char *buf, int len
 				ast_log(LOG_ERROR, "Error reading from web socket: %s\n", strerror(errno));
 				*opcode = AST_WEBSOCKET_OPCODE_CLOSE;
 				session->closing = 1;
+				ao2_unlock(session);
 				return -1;
 			}
 
@@ -471,6 +521,7 @@ static inline int ws_safe_read(struct ast_websocket *session, char *buf, int len
 				ast_log(LOG_WARNING, "Websocket seems unresponsive, disconnecting ...\n");
 				*opcode = AST_WEBSOCKET_OPCODE_CLOSE;
 				session->closing = 1;
+				ao2_unlock(session);
 				return -1;
 			}
 		}
@@ -483,9 +534,12 @@ static inline int ws_safe_read(struct ast_websocket *session, char *buf, int len
 			ast_log(LOG_ERROR, "ast_wait_for_input returned err: %s\n", strerror(errno));
 			*opcode = AST_WEBSOCKET_OPCODE_CLOSE;
 			session->closing = 1;
+			ao2_unlock(session);
 			return -1;
 		}
 	}
+
+	ao2_unlock(session);
 	return 0;
 }
 
@@ -502,7 +556,7 @@ int AST_OPTIONAL_API_NAME(ast_websocket_read)(struct ast_websocket *session, cha
 	*fragmented = 0;
 
 	if (ws_safe_read(session, &buf[0], MIN_WS_HDR_SZ, opcode)) {
-		return 0;
+		return -1;
 	}
 	frame_size += MIN_WS_HDR_SZ;
 
@@ -520,7 +574,7 @@ int AST_OPTIONAL_API_NAME(ast_websocket_read)(struct ast_websocket *session, cha
 		if (options_len) {
 			/* read the rest of the header options */
 			if (ws_safe_read(session, &buf[frame_size], options_len, opcode)) {
-				return 0;
+				return -1;
 			}
 			frame_size += options_len;
 		}
@@ -549,7 +603,7 @@ int AST_OPTIONAL_API_NAME(ast_websocket_read)(struct ast_websocket *session, cha
 		}
 
 		if (ws_safe_read(session, *payload, *payload_len, opcode)) {
-			return 0;
+			return -1;
 		}
 		/* If a mask is present unmask the payload */
 		if (mask_present) {
@@ -572,7 +626,7 @@ int AST_OPTIONAL_API_NAME(ast_websocket_read)(struct ast_websocket *session, cha
 					session->payload, session->payload_len, *payload_len);
 				*payload_len = 0;
 				ast_websocket_close(session, 1009);
-				return 0;
+				return -1;
 			}
 
 			session->payload = new_payload;
@@ -609,7 +663,7 @@ int AST_OPTIONAL_API_NAME(ast_websocket_read)(struct ast_websocket *session, cha
 		/* Make the payload available so the user can look at the reason code if they so desire */
 		if ((*payload_len) && (new_payload = ast_realloc(session->payload, *payload_len))) {
 			if (ws_safe_read(session, &buf[frame_size], (*payload_len), opcode)) {
-				return 0;
+				return -1;
 			}
 			session->payload = new_payload;
 			memcpy(session->payload, &buf[frame_size], *payload_len);
@@ -764,7 +818,7 @@ int AST_OPTIONAL_API_NAME(ast_websocket_uri_cb)(struct ast_tcptls_session_instan
 			return 0;
 		}
 
-		if (!(session = ao2_alloc(sizeof(*session), session_destroy_fn))) {
+		if (!(session = ao2_alloc(sizeof(*session) + AST_UUID_STR_LEN + 1, session_destroy_fn))) {
 			ast_log(LOG_WARNING, "WebSocket connection from '%s' could not be accepted\n",
 				ast_sockaddr_stringify(&ser->remote_address));
 			websocket_bad_request(ser);
@@ -773,10 +827,20 @@ int AST_OPTIONAL_API_NAME(ast_websocket_uri_cb)(struct ast_tcptls_session_instan
 		}
 		session->timeout =  AST_DEFAULT_WEBSOCKET_WRITE_TIMEOUT;
 
+		/* Generate the session id */
+		if (!ast_uuid_generate_str(session->session_id, sizeof(session->session_id))) {
+			ast_log(LOG_WARNING, "WebSocket connection from '%s' could not be accepted - failed to generate a session id\n",
+				ast_sockaddr_stringify(&ser->remote_address));
+			ast_http_error(ser, 500, "Internal Server Error", "Allocation failed");
+			ao2_ref(protocol_handler, -1);
+			return 0;
+		}
+
 		if (protocol_handler->session_attempted
-		    && protocol_handler->session_attempted(ser, get_vars, headers)) {
+		    && protocol_handler->session_attempted(ser, get_vars, headers, session->session_id)) {
 			ast_debug(3, "WebSocket connection from '%s' rejected by protocol handler '%s'\n",
 				ast_sockaddr_stringify(&ser->remote_address), protocol_handler->name);
+			websocket_bad_request(ser);
 			ao2_ref(protocol_handler, -1);
 			return 0;
 		}
@@ -1354,8 +1418,19 @@ int AST_OPTIONAL_API_NAME(ast_websocket_read_string)
 int AST_OPTIONAL_API_NAME(ast_websocket_write_string)
 	(struct ast_websocket *ws, const char *buf)
 {
+	uint64_t len = strlen(buf);
+
+	ast_debug(3, "Writing websocket string of length %" PRIu64 "\n", len);
+
+	/* We do not pass strlen(buf) to ast_websocket_write() directly because the
+	 * size_t returned by strlen() may not require the same storage size
+	 * as the uint64_t that ast_websocket_write() uses. This normally
+	 * would not cause a problem, but since ast_websocket_write() uses
+	 * the optional API, this function call goes through a series of macros
+	 * that may cause a 32-bit to 64-bit conversion to go awry.
+	 */
 	return ast_websocket_write(ws, AST_WEBSOCKET_OPCODE_TEXT,
-				   (char *)buf, strlen(buf));
+				   (char *)buf, len);
 }
 
 static int load_module(void)

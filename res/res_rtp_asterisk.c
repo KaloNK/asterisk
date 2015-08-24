@@ -1268,6 +1268,9 @@ static int ast_rtp_dtls_set_configuration(struct ast_rtp_instance *instance, con
 {
 	struct ast_rtp *rtp = ast_rtp_instance_get_data(instance);
 	int res;
+#ifndef HAVE_OPENSSL_ECDH_AUTO
+	EC_KEY *ecdh;
+#endif
 
 	if (!dtls_cfg->enabled) {
 		return 0;
@@ -1287,6 +1290,16 @@ static int ast_rtp_dtls_set_configuration(struct ast_rtp_instance *instance, con
 	}
 
 	SSL_CTX_set_read_ahead(rtp->ssl_ctx, 1);
+
+#ifdef HAVE_OPENSSL_ECDH_AUTO
+	SSL_CTX_set_ecdh_auto(rtp->ssl_ctx, 1);
+#else
+	ecdh = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+	if (ecdh) {
+		SSL_CTX_set_tmp_ecdh(rtp->ssl_ctx, ecdh);
+		EC_KEY_free(ecdh);
+	}
+#endif
 
 	rtp->dtls_verify = dtls_cfg->verify;
 
@@ -1641,7 +1654,7 @@ static void ast_rtp_on_ice_complete(pj_ice_sess *ice, pj_status_t status)
 			update_address_with_ice_candidate(rtp, AST_RTP_ICE_COMPONENT_RTCP, &rtp->rtcp->them);
 		}
 	}
- 
+
 #ifdef HAVE_OPENSSL_SRTP
 	dtls_perform_handshake(instance, &rtp->dtls, 0);
 
@@ -2677,7 +2690,7 @@ static int ast_rtp_dtmf_begin(struct ast_rtp_instance *instance, char digit)
 	}
 
 	/* Grab the payload that they expect the RFC2833 packet to be received in */
-	payload = ast_rtp_codecs_payload_code(ast_rtp_instance_get_codecs(instance), 0, NULL, AST_RTP_DTMF);
+	payload = ast_rtp_codecs_payload_code_tx(ast_rtp_instance_get_codecs(instance), 0, NULL, AST_RTP_DTMF);
 
 	rtp->dtmfmute = ast_tvadd(ast_tvnow(), ast_tv(0, 500000));
 	rtp->send_duration = 160;
@@ -3404,10 +3417,8 @@ static int ast_rtp_write(struct ast_rtp_instance *instance, struct ast_frame *fr
 	}
 
 	/* Grab the subclass and look up the payload we are going to use */
-	codec = ast_rtp_codecs_payload_code(ast_rtp_instance_get_codecs(instance),
-	                                    1,
-	                                    frame->subclass.format,
-	                                    0);
+	codec = ast_rtp_codecs_payload_code_tx(ast_rtp_instance_get_codecs(instance),
+		1, frame->subclass.format, 0);
 	if (codec < 0) {
 		ast_log(LOG_WARNING, "Don't know how to send format %s packets with RTP\n",
 			ast_format_get_name(frame->subclass.format));
@@ -4193,7 +4204,8 @@ static int bridge_p2p_rtp_write(struct ast_rtp_instance *instance, unsigned int 
 	}
 
 	/* Otherwise adjust bridged payload to match */
-	bridged_payload = ast_rtp_codecs_payload_code(ast_rtp_instance_get_codecs(instance1), payload_type->asterisk_format, payload_type->format, payload_type->rtp_code);
+	bridged_payload = ast_rtp_codecs_payload_code_tx(ast_rtp_instance_get_codecs(instance1),
+		payload_type->asterisk_format, payload_type->format, payload_type->rtp_code);
 
 	/* If no codec could be matched between instance and instance1, then somehow things were made incompatible while we were still bridged.  Bail. */
 	if (bridged_payload < 0) {
@@ -4504,6 +4516,10 @@ static struct ast_frame *ast_rtp_read(struct ast_rtp_instance *instance, int rtc
 	}
 
 	payload = ast_rtp_codecs_get_payload(ast_rtp_instance_get_codecs(instance), payloadtype);
+	if (!payload) {
+		/* Unknown payload type. */
+		return AST_LIST_FIRST(&frames) ? AST_LIST_FIRST(&frames) : &ast_null_frame;
+	}
 
 	/* If the payload is not actually an Asterisk one but a special one pass it off to the respective handler */
 	if (!payload->asterisk_format) {
@@ -4530,10 +4546,7 @@ static struct ast_frame *ast_rtp_read(struct ast_rtp_instance *instance, int rtc
 		/* Even if no frame was returned by one of the above methods,
 		 * we may have a frame to return in our frame list
 		 */
-		if (!AST_LIST_EMPTY(&frames)) {
-			return AST_LIST_FIRST(&frames);
-		}
-		return &ast_null_frame;
+		return AST_LIST_FIRST(&frames) ? AST_LIST_FIRST(&frames) : &ast_null_frame;
 	}
 
 	ao2_replace(rtp->lastrxformat, payload->format);
@@ -4998,7 +5011,7 @@ static int ast_rtp_sendcng(struct ast_rtp_instance *instance, int level)
 		return -1;
 	}
 
-	payload = ast_rtp_codecs_payload_code(ast_rtp_instance_get_codecs(instance), 0, NULL, AST_RTP_CN);
+	payload = ast_rtp_codecs_payload_code_tx(ast_rtp_instance_get_codecs(instance), 0, NULL, AST_RTP_CN);
 
 	level = 127 - (level & 0x7f);
 

@@ -548,6 +548,9 @@
 /* Define to 1 if CRYPTO has the OpenSSL Elliptic Curve Support feature. */
 #undef HAVE_OPENSSL_EC
 
+/* Define if your system has SSL_CTX_set_ecdh_auto declared. */
+#undef HAVE_OPENSSL_ECDH_AUTO
+
 /* Define to 1 if CRYPTO has the OpenSSL SRTP Extension Support feature. */
 #undef HAVE_OPENSSL_SRTP
 
@@ -763,6 +766,9 @@
 
 /* Define to 1 if you have the `roundl' function. */
 #undef HAVE_ROUNDL
+
+/* Define to 1 if rt has the Realtime functions feature. */
+#undef HAVE_RT
 
 /* Define if your system has the RTLD_NOLOAD headers. */
 #undef HAVE_RTLD_NOLOAD
@@ -1376,4 +1382,3 @@
 #undef volatile
 
 #endif
-
