@@ -512,16 +512,15 @@ void ast_rtp_codecs_payloads_copy(struct ast_rtp_codecs *src, struct ast_rtp_cod
 		new_type = ao2_find(dest->payloads, &i, OBJ_KEY | OBJ_NOLOCK);
 		if (!new_type) {
 			new_type = ao2_alloc(sizeof(*new_type), NULL);
+			if (!new_type) {
+				ao2_ref(type, -1);
+				continue;
+			}
 			payload_alloced = 1;
-		}
-
-		if (!new_type) {
-			continue;
 		}
 
 		ast_debug(2, "Copying payload %d from %p to %p\n", i, src, dest);
 
-		new_type->payload = i;
 		*new_type = *type;
 
 		if (payload_alloced) {
@@ -560,7 +559,6 @@ void ast_rtp_codecs_payloads_set_m_type(struct ast_rtp_codecs *codecs, struct as
 
 	type->asterisk_format = static_RTP_PT[payload].asterisk_format;
 	type->rtp_code = static_RTP_PT[payload].rtp_code;
-	type->payload = payload;
 	ast_format_copy(&type->format, &static_RTP_PT[payload].format);
 
 	ast_debug(1, "Setting payload %d based on m type on %p\n", payload, codecs);
@@ -610,7 +608,7 @@ int ast_rtp_codecs_payloads_set_rtpmap_type_rate(struct ast_rtp_codecs *codecs, 
 
 		if (!(type = ao2_find(codecs->payloads, &pt, OBJ_KEY | OBJ_NOLOCK))) {
 			if (!(type = ao2_alloc(sizeof(*type), NULL))) {
-				continue;
+				break;
 			}
 			type->payload = pt;
 			ao2_link_flags(codecs->payloads, type, OBJ_NOLOCK);
@@ -1346,9 +1344,9 @@ static enum ast_bridge_result remote_bridge_loop(struct ast_channel *c0,
 				if (fr->subclass.integer == AST_CONTROL_HOLD) {
 					/* If we someone went on hold we want the other side to reinvite back to us */
 					if (who == c0) {
-						glue1->update_peer(c1, NULL, NULL, NULL, 0, 0);
+						glue1->update_peer(c1, NULL, NULL, NULL, NULL, 0);
 					} else {
-						glue0->update_peer(c0, NULL, NULL, NULL, 0, 0);
+						glue0->update_peer(c0, NULL, NULL, NULL, NULL, 0);
 					}
 				} else if (fr->subclass.integer == AST_CONTROL_UNHOLD ||
 					fr->subclass.integer == AST_CONTROL_UPDATE_RTP_PEER) {
@@ -1435,7 +1433,7 @@ static enum ast_bridge_result remote_bridge_loop(struct ast_channel *c0,
 		ast_debug(1, "Channel c0->'%s' pvt changed, in bridge with c1->'%s'\n", ast_channel_name(c0), ast_channel_name(c1));
 	} else if (glue0 != ast_rtp_instance_get_glue(ast_channel_tech(c0)->type)) {
 		ast_debug(1, "Channel c0->'%s' technology changed, in bridge with c1->'%s'\n", ast_channel_name(c0), ast_channel_name(c1));
-	} else if (glue0->update_peer(c0, NULL, NULL, NULL, 0, 0)) {
+	} else if (glue0->update_peer(c0, NULL, NULL, NULL, NULL, 0)) {
 		ast_log(LOG_WARNING, "Channel '%s' failed to break RTP bridge\n", ast_channel_name(c0));
 	}
 	if (ast_test_flag(ast_channel_flags(c1), AST_FLAG_ZOMBIE)) {
@@ -1444,7 +1442,7 @@ static enum ast_bridge_result remote_bridge_loop(struct ast_channel *c0,
 		ast_debug(1, "Channel c1->'%s' pvt changed, in bridge with c0->'%s'\n", ast_channel_name(c1), ast_channel_name(c0));
 	} else if (glue1 != ast_rtp_instance_get_glue(ast_channel_tech(c1)->type)) {
 		ast_debug(1, "Channel c1->'%s' technology changed, in bridge with c0->'%s'\n", ast_channel_name(c1), ast_channel_name(c0));
-	} else if (glue1->update_peer(c1, NULL, NULL, NULL, 0, 0)) {
+	} else if (glue1->update_peer(c1, NULL, NULL, NULL, NULL, 0)) {
 		ast_log(LOG_WARNING, "Channel '%s' failed to break RTP bridge\n", ast_channel_name(c1));
 	}
 
