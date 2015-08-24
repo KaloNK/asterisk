@@ -528,7 +528,7 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 			Count number of members answering a queue.
 		</synopsis>
 		<syntax>
-			<parameter name="queuename" required="true" />
+			<parameter name="queuename" required="false" />
 			<parameter name="option" required="true">
 				<enumlist>
 					<enum name="logged">
@@ -544,13 +544,22 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 						<para>Returns the total number of members for the specified queue.</para>
 					</enum>
 					<enum name="penalty">
-						<para>Gets or sets queue member penalty.</para>
+						<para>Gets or sets queue member penalty.  If
+						<replaceable>queuename</replaceable> is not specified
+						when setting the penalty then the penalty is set in all queues
+						the interface is a member.</para>
 					</enum>
 					<enum name="paused">
-						<para>Gets or sets queue member paused status.</para>
+						<para>Gets or sets queue member paused status.  If
+						<replaceable>queuename</replaceable> is not specified
+						when setting the paused status then the paused status is set
+						in all queues the interface is a member.</para>
 					</enum>
 					<enum name="ringinuse">
-						<para>Gets or sets queue member ringinuse.</para>
+						<para>Gets or sets queue member ringinuse.  If
+						<replaceable>queuename</replaceable> is not specified
+						when setting ringinuse then ringinuse is set
+						in all queues the interface is a member.</para>
 					</enum>
 				</enumlist>
 			</parameter>
@@ -558,10 +567,8 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 		</syntax>
 		<description>
 			<para>Allows access to queue counts [R] and member information [R/W].</para>
-			<para>
-				<replaceable>queuename</replaceable> is required for all operations
-				<replaceable>interface</replaceable> is required for all member operations.
-			</para>
+			<para><replaceable>queuename</replaceable> is required for all read operations.</para>
+			<para><replaceable>interface</replaceable> is required for all member operations.</para>
 		</description>
 		<see-also>
 			<ref type="application">Queue</ref>
@@ -6283,13 +6290,106 @@ static int add_to_queue(const char *queuename, const char *interface, const char
 	return res;
 }
 
+/*!
+ * \internal
+ * \brief Set the pause status of the specific queue member.
+ *
+ * \param q Which queue the member belongs.
+ * \param mem Queue member being paused/unpaused.
+ * \param reason Why is this happening (Can be NULL/empty for no reason given.)
+ * \param paused Set to 1 if the member is being paused or 0 to unpause.
+ *
+ * \pre The q is locked on entry.
+ *
+ * \return Nothing
+ */
+static void set_queue_member_pause(struct call_queue *q, struct member *mem, const char *reason, int paused)
+{
+	if (mem->paused == paused) {
+		ast_debug(1, "%spausing already-%spaused queue member %s:%s\n",
+			(paused ? "" : "un"), (paused ? "" : "un"), q->name, mem->interface);
+	}
+
+	if (mem->realtime) {
+		if (update_realtime_member_field(mem, q->name, "paused", paused ? "1" : "0")) {
+			ast_log(LOG_WARNING, "Failed %spause update of realtime queue member %s:%s\n",
+				(paused ? "" : "un"), q->name, mem->interface);
+		}
+	}
+
+	mem->paused = paused;
+
+	if (queue_persistent_members) {
+		dump_queue_members(q);
+	}
+
+	if (is_member_available(q, mem)) {
+		ast_devstate_changed(AST_DEVICE_NOT_INUSE, AST_DEVSTATE_CACHABLE,
+			"Queue:%s_avail", q->name);
+	} else if (!num_available_members(q)) {
+		ast_devstate_changed(AST_DEVICE_INUSE, AST_DEVSTATE_CACHABLE,
+			"Queue:%s_avail", q->name);
+	}
+
+	ast_queue_log(q->name, "NONE", mem->membername, (paused ? "PAUSE" : "UNPAUSE"),
+		"%s", S_OR(reason, ""));
+
+	if (!ast_strlen_zero(reason)) {
+		/*** DOCUMENTATION
+		<managerEventInstance>
+			<synopsis>Raised when a member is paused/unpaused in the queue with a reason.</synopsis>
+			<syntax>
+				<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='Queue'])" />
+				<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='Location'])" />
+				<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='MemberName'])" />
+				<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='Paused'])" />
+				<parameter name="Reason">
+					<para>The reason given for pausing or unpausing a queue member.</para>
+				</parameter>
+			</syntax>
+			<see-also>
+				<ref type="application">PauseQueueMember</ref>
+				<ref type="application">UnPauseQueueMember</ref>
+			</see-also>
+		</managerEventInstance>
+		***/
+		manager_event(EVENT_FLAG_AGENT, "QueueMemberPaused",
+			"Queue: %s\r\n"
+			"Location: %s\r\n"
+			"MemberName: %s\r\n"
+			"Paused: %d\r\n"
+			"Reason: %s\r\n",
+			q->name, mem->interface, mem->membername, paused, reason);
+	} else {
+		/*** DOCUMENTATION
+		<managerEventInstance>
+			<synopsis>Raised when a member is paused/unpaused in the queue without a reason.</synopsis>
+			<syntax>
+				<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='Queue'])" />
+				<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='Location'])" />
+				<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='MemberName'])" />
+				<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='Paused'])" />
+			</syntax>
+			<see-also>
+				<ref type="application">PauseQueueMember</ref>
+				<ref type="application">UnPauseQueueMember</ref>
+			</see-also>
+		</managerEventInstance>
+		***/
+		manager_event(EVENT_FLAG_AGENT, "QueueMemberPaused",
+			"Queue: %s\r\n"
+			"Location: %s\r\n"
+			"MemberName: %s\r\n"
+			"Paused: %d\r\n",
+			q->name, mem->interface, mem->membername, paused);
+	}
+}
+
 static int set_member_paused(const char *queuename, const char *interface, const char *reason, int paused)
 {
 	int found = 0;
 	struct call_queue *q;
-	struct member *mem;
 	struct ao2_iterator queue_iter;
-	int failed;
 
 	/* Special event for when all queues are paused - individual events still generated */
 	/* XXX In all other cases, we use the membername, but since this affects all queues, we cannot */
@@ -6300,95 +6400,20 @@ static int set_member_paused(const char *queuename, const char *interface, const
 	while ((q = ao2_t_iterator_next(&queue_iter, "Iterate over queues"))) {
 		ao2_lock(q);
 		if (ast_strlen_zero(queuename) || !strcasecmp(q->name, queuename)) {
+			struct member *mem;
+
 			if ((mem = interface_exists(q, interface))) {
-				if (mem->paused == paused) {
-					ast_debug(1, "%spausing already-%spaused queue member %s:%s\n", (paused ? "" : "un"), (paused ? "" : "un"), q->name, interface);
-				}
+				++found;
 
-				failed = 0;
-				if (mem->realtime) {
-					failed = update_realtime_member_field(mem, q->name, "paused", paused ? "1" : "0");
-				}
-
-				if (failed) {
-					ast_log(LOG_WARNING, "Failed %spausing realtime queue member %s:%s\n", (paused ? "" : "un"), q->name, interface);
-					ao2_ref(mem, -1);
-					ao2_unlock(q);
-					queue_t_unref(q, "Done with iterator");
-					continue;
-				}
-				found++;
-				mem->paused = paused;
-
-				if (queue_persistent_members) {
-					dump_queue_members(q);
-				}
-
-				if (is_member_available(q, mem)) {
-					ast_devstate_changed(AST_DEVICE_NOT_INUSE, AST_DEVSTATE_CACHABLE, "Queue:%s_avail", q->name);
-				} else if (!num_available_members(q)) {
-					ast_devstate_changed(AST_DEVICE_INUSE, AST_DEVSTATE_CACHABLE, "Queue:%s_avail", q->name);
-				}
-
-				ast_queue_log(q->name, "NONE", mem->membername, (paused ? "PAUSE" : "UNPAUSE"), "%s", S_OR(reason, ""));
-
-				if (!ast_strlen_zero(reason)) {
-					/*** DOCUMENTATION
-					<managerEventInstance>
-						<synopsis>Raised when a member is paused/unpaused in the queue with a reason.</synopsis>
-						<syntax>
-							<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='Queue'])" />
-							<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='Location'])" />
-							<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='MemberName'])" />
-							<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='Paused'])" />
-							<parameter name="Reason">
-								<para>The reason given for pausing or unpausing a queue member.</para>
-							</parameter>
-						</syntax>
-						<see-also>
-							<ref type="application">PauseQueueMember</ref>
-							<ref type="application">UnPauseQueueMember</ref>
-						</see-also>
-					</managerEventInstance>
-					***/
-					manager_event(EVENT_FLAG_AGENT, "QueueMemberPaused",
-						"Queue: %s\r\n"
-						"Location: %s\r\n"
-						"MemberName: %s\r\n"
-						"Paused: %d\r\n"
-						"Reason: %s\r\n",
-							q->name, mem->interface, mem->membername, paused, reason);
-				} else {
-					/*** DOCUMENTATION
-					<managerEventInstance>
-						<synopsis>Raised when a member is paused/unpaused in the queue without a reason.</synopsis>
-						<syntax>
-							<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='Queue'])" />
-							<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='Location'])" />
-							<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='MemberName'])" />
-							<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='Paused'])" />
-						</syntax>
-						<see-also>
-							<ref type="application">PauseQueueMember</ref>
-							<ref type="application">UnPauseQueueMember</ref>
-						</see-also>
-					</managerEventInstance>
-					***/
-					manager_event(EVENT_FLAG_AGENT, "QueueMemberPaused",
-						"Queue: %s\r\n"
-						"Location: %s\r\n"
-						"MemberName: %s\r\n"
-						"Paused: %d\r\n",
-							q->name, mem->interface, mem->membername, paused);
-				}
+				set_queue_member_pause(q, mem, reason, paused);
 				ao2_ref(mem, -1);
 			}
-		}
 
-		if (!ast_strlen_zero(queuename) && !strcasecmp(queuename, q->name)) {
-			ao2_unlock(q);
-			queue_t_unref(q, "Done with iterator");
-			break;
+			if (!ast_strlen_zero(queuename)) {
+				ao2_unlock(q);
+				queue_t_unref(q, "Done with iterator");
+				break;
+			}
 		}
 
 		ao2_unlock(q);
@@ -6449,45 +6474,63 @@ static int set_member_penalty_help_members(struct call_queue *q, const char *int
 	return foundinterface;
 }
 
+/*!
+ * \internal
+ * \brief Set the ringinuse value of the specific queue member.
+ *
+ * \param q Which queue the member belongs.
+ * \param mem Queue member being set.
+ * \param ringinuse Set to 1 if the member is called when inuse.
+ *
+ * \pre The q is locked on entry.
+ *
+ * \return Nothing
+ */
+static void set_queue_member_ringinuse(struct call_queue *q, struct member *mem, int ringinuse)
+{
+	if (mem->realtime) {
+		update_realtime_member_field(mem, q->name, realtime_ringinuse_field,
+			ringinuse ? "1" : "0");
+	}
+
+	mem->ringinuse = ringinuse;
+
+	ast_queue_log(q->name, "NONE", mem->interface, "RINGINUSE", "%d", ringinuse);
+
+	/*** DOCUMENTATION
+	<managerEventInstance>
+		<synopsis>Raised when a member's ringinuse setting is changed.</synopsis>
+		<syntax>
+			<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='Queue'])" />
+			<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='Location'])" />
+			<parameter name="Ringinuse">
+				<enumlist>
+					<enum name="0"/>
+					<enum name="1"/>
+				</enumlist>
+			</parameter>
+		</syntax>
+		<see-also>
+			<ref type="function">QUEUE_MEMBER</ref>
+		</see-also>
+	</managerEventInstance>
+	***/
+	manager_event(EVENT_FLAG_AGENT, "QueueMemberRinginuse",
+		"Queue: %s\r\n"
+		"Location: %s\r\n"
+		"Ringinuse: %d\r\n",
+		q->name, mem->interface, ringinuse);
+}
+
 static int set_member_ringinuse_help_members(struct call_queue *q, const char *interface, int ringinuse)
 {
 	struct member *mem;
 	int foundinterface = 0;
-	char rtringinuse[80];
 
 	ao2_lock(q);
 	if ((mem = interface_exists(q, interface))) {
 		foundinterface++;
-		if (!mem->realtime) {
-			mem->ringinuse = ringinuse;
-		} else {
-			sprintf(rtringinuse, "%i", ringinuse);
-			update_realtime_member_field(mem, q->name, realtime_ringinuse_field, rtringinuse);
-		}
-		ast_queue_log(q->name, "NONE", interface, "RINGINUSE", "%d", ringinuse);
-		/*** DOCUMENTATION
-		<managerEventInstance>
-			<synopsis>Raised when a member's ringinuse setting is changed.</synopsis>
-			<syntax>
-				<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='Queue'])" />
-				<xi:include xpointer="xpointer(/docs/managerEvent[@name='QueueMemberStatus']/managerEventInstance/syntax/parameter[@name='Location'])" />
-				<parameter name="Ringinuse">
-					<enumlist>
-						<enum name="0"/>
-						<enum name="1"/>
-					</enumlist>
-				</parameter>
-			</syntax>
-			<see-also>
-				<ref type="function">QUEUE_MEMBER</ref>
-			</see-also>
-		</managerEventInstance>
-		***/
-		manager_event(EVENT_FLAG_AGENT, "QueueMemberRinginuse",
-			"Queue: %s\r\n"
-			"Location: %s\r\n"
-			"Ringinuse: %d\r\n",
-			q->name, mem->interface, ringinuse);
+		set_queue_member_ringinuse(q, mem, ringinuse);
 		ao2_ref(mem, -1);
 	}
 	ao2_unlock(q);
@@ -7388,12 +7431,29 @@ static int queue_function_exists(struct ast_channel *chan, const char *cmd, char
 	return 0;
 }
 
+static struct member *get_interface_helper(struct call_queue *q, const char *interface)
+{
+	struct member *m;
+
+	if (ast_strlen_zero(interface)) {
+		ast_log(LOG_ERROR, "QUEUE_MEMBER: Missing required interface argument.\n");
+		return NULL;
+	}
+
+	m = interface_exists(q, interface);
+	if (!m) {
+		ast_log(LOG_ERROR, "Queue member interface '%s' not in queue '%s'.\n",
+			interface, q->name);
+	}
+	return m;
+}
+
 /*!
  * \brief Get number either busy / free / ready or total members of a specific queue
  * \brief Get or set member properties penalty / paused / ringinuse
  * \retval number of members (busy / free / ready / total) or member info (penalty / paused / ringinuse)
  * \retval -1 on error
-*/
+ */
 static int queue_function_mem_read(struct ast_channel *chan, const char *cmd, char *data, char *buf, size_t len)
 {
 	int count = 0;
@@ -7410,14 +7470,18 @@ static int queue_function_mem_read(struct ast_channel *chan, const char *cmd, ch
 	buf[0] = '\0';
 
 	if (ast_strlen_zero(data)) {
-		ast_log(LOG_ERROR, "Missing required argument. %s(<queuename>,<option>[<interface>])\n", cmd);
+		ast_log(LOG_ERROR,
+			"Missing required argument. %s(<queuename>,<option>[,<interface>])\n",
+			cmd);
 		return -1;
 	}
 
 	AST_STANDARD_APP_ARGS(args, data);
 
-	if (args.argc < 2) {
-		ast_log(LOG_ERROR, "Missing required argument. %s(<queuename>,<option>[<interface>])\n", cmd);
+	if (ast_strlen_zero(args.queuename) || ast_strlen_zero(args.option)) {
+		ast_log(LOG_ERROR,
+			"Missing required argument. %s(<queuename>,<option>[,<interface>])\n",
+			cmd);
 		return -1;
 	}
 
@@ -7456,27 +7520,29 @@ static int queue_function_mem_read(struct ast_channel *chan, const char *cmd, ch
 				ao2_ref(m, -1);
 			}
 			ao2_iterator_destroy(&mem_iter);
-		} else if (!strcasecmp(args.option, "count") || ast_strlen_zero(args.option)) {
+		} else if (!strcasecmp(args.option, "count")) {
 			count = ao2_container_count(q->members);
-		} else if (!strcasecmp(args.option, "penalty") && !ast_strlen_zero(args.interface) &&
-			   ((m = interface_exists(q, args.interface)))) {
-			count = m->penalty;
-			ao2_ref(m, -1);
-		} else if (!strcasecmp(args.option, "paused") && !ast_strlen_zero(args.interface) &&
-			   ((m = interface_exists(q, args.interface)))) {
-			count = m->paused;
-			ao2_ref(m, -1);
-		} else if ( (!strcasecmp(args.option, "ignorebusy") || !strcasecmp(args.option, "ringinuse")) &&
-			   !ast_strlen_zero(args.interface) &&
-			   ((m = interface_exists(q, args.interface)))) {
-			count = m->ringinuse;
-			ao2_ref(m, -1);
-		} else if (!ast_strlen_zero(args.interface)) {
-			ast_log(LOG_ERROR, "Queue member interface %s not in queue %s\n",
-				args.interface, args.queuename);
+		} else if (!strcasecmp(args.option, "penalty")) {
+			m = get_interface_helper(q, args.interface);
+			if (m) {
+				count = m->penalty;
+				ao2_ref(m, -1);
+			}
+		} else if (!strcasecmp(args.option, "paused")) {
+			m = get_interface_helper(q, args.interface);
+			if (m) {
+				count = m->paused;
+				ao2_ref(m, -1);
+			}
+		} else if ((!strcasecmp(args.option, "ignorebusy") /* ignorebusy is legacy */
+			|| !strcasecmp(args.option, "ringinuse"))) {
+			m = get_interface_helper(q, args.interface);
+			if (m) {
+				count = m->ringinuse;
+				ao2_ref(m, -1);
+			}
 		} else {
-			ast_log(LOG_ERROR, "Unknown option %s provided to %s, valid values are: "
-				"logged, free, ready, count, penalty, paused, ringinuse\n", args.option, cmd);
+			ast_log(LOG_ERROR, "%s: Invalid option '%s' provided.\n", cmd, args.option);
 		}
 		ao2_unlock(q);
 		queue_t_unref(q, "Done with temporary reference in QUEUE_MEMBER()");
@@ -7493,9 +7559,6 @@ static int queue_function_mem_read(struct ast_channel *chan, const char *cmd, ch
 static int queue_function_mem_write(struct ast_channel *chan, const char *cmd, char *data, const char *value)
 {
 	int memvalue;
-	struct call_queue *q;
-	struct member *m;
-	char rtvalue[80];
 
 	AST_DECLARE_APP_ARGS(args,
 		AST_APP_ARG(queuename);
@@ -7504,63 +7567,48 @@ static int queue_function_mem_write(struct ast_channel *chan, const char *cmd, c
 	);
 
 	if (ast_strlen_zero(data)) {
-		ast_log(LOG_ERROR, "Missing argument. QUEUE_MEMBER(<queuename>,<option>,<interface>)\n");
+		ast_log(LOG_ERROR,
+			"Missing required argument. %s([<queuename>],<option>,<interface>)\n",
+			cmd);
 		return -1;
 	}
 
 	AST_STANDARD_APP_ARGS(args, data);
 
-	if (args.argc < 3) {
-		ast_log(LOG_ERROR, "Missing argument. QUEUE_MEMBER_PENALTY(<queuename>,<interface>)\n");
+	if (ast_strlen_zero(args.option)
+		|| ast_strlen_zero(args.interface)) {
+		ast_log(LOG_ERROR,
+			"Missing required argument. %s([<queuename>],<option>,<interface>)\n",
+			cmd);
 		return -1;
 	}
 
-	if (ast_strlen_zero(args.interface) && ast_strlen_zero(args.option)) {
-		ast_log (LOG_ERROR, "<interface> and <option> parameter's can't be null\n");
-		return -1;
-	}
+	/*
+	 * If queuename is empty then the option will be
+	 * set for the interface in all queues.
+	 */
 
 	memvalue = atoi(value);
 	if (!strcasecmp(args.option, "penalty")) {
-		/* if queuename = NULL then penalty will be set for interface in all the queues.*/
 		if (set_member_value(args.queuename, args.interface, MEMBER_PENALTY, memvalue)) {
-			ast_log(LOG_ERROR, "Invalid interface, queue or penalty\n");
+			ast_log(LOG_ERROR, "Invalid interface, queue, or penalty\n");
 			return -1;
 		}
-	} else if ((q = find_load_queue_rt_friendly(args.queuename))) {
-		ao2_lock(q);
-		if ((m = interface_exists(q, args.interface))) {
-			sprintf(rtvalue, "%s",(memvalue <= 0) ? "0" : "1");
-			if (!strcasecmp(args.option, "paused")) {
-				if (m->realtime) {
-					update_realtime_member_field(m, q->name, args.option, rtvalue);
-				} else {
-					m->paused = (memvalue <= 0) ? 0 : 1;
-				}
-			} else if ((!strcasecmp(args.option, "ignorebusy")) || (!strcasecmp(args.option, "ringinuse"))) {
-				if (m->realtime) {
-					update_realtime_member_field(m, q->name, args.option, rtvalue);
-				} else {
-					m->ringinuse = (memvalue <= 0) ? 0 : 1;
-				}
-			} else {
-				ast_log(LOG_ERROR, "Invalid option, only penalty , paused or ringinuse/ignorebusy are valid\n");
-				ao2_ref(m, -1);
-				ao2_unlock(q);
-				ao2_ref(q, -1);
-				return -1;
-			}
-			ao2_ref(m, -1);
-		} else {
-			ao2_unlock(q);
-			ao2_ref(q, -1);
-			ast_log(LOG_ERROR, "Invalid interface for queue\n");
+	} else if (!strcasecmp(args.option, "paused")) {
+		memvalue = (memvalue <= 0) ? 0 : 1;
+		if (set_member_paused(args.queuename, args.interface, NULL, memvalue)) {
+			ast_log(LOG_ERROR, "Invalid interface or queue\n");
 			return -1;
 		}
-		ao2_unlock(q);
-		ao2_ref(q, -1);
-        } else {
-		ast_log(LOG_ERROR, "Invalid queue\n");
+	} else if (!strcasecmp(args.option, "ignorebusy") /* ignorebusy is legacy */
+		|| !strcasecmp(args.option, "ringinuse")) {
+		memvalue = (memvalue <= 0) ? 0 : 1;
+		if (set_member_value(args.queuename, args.interface, MEMBER_RINGINUSE, memvalue)) {
+			ast_log(LOG_ERROR, "Invalid interface or queue\n");
+			return -1;
+		}
+	} else {
+		ast_log(LOG_ERROR, "%s: Invalid option '%s' provided.\n", cmd, args.option);
 		return -1;
 	}
 	return 0;

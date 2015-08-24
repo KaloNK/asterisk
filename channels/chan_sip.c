@@ -7286,7 +7286,7 @@ static int sip_fixup(struct ast_channel *oldchan, struct ast_channel *newchan)
 		   redirect of both channels). Note that a channel can not be masqueraded *into*
 		   a native bridge. So there is no danger that this breaks a native bridge that
 		   should stay up. */
-		sip_set_rtp_peer(newchan, NULL, NULL, 0, 0, 0);
+		sip_set_rtp_peer(newchan, NULL, NULL, NULL, NULL, 0);
 		ret = 0;
 	}
 	ast_debug(3, "SIP Fixup: New owner for dialogue %s: %s (Old parent: %s)\n", p->callid, ast_channel_name(p->owner), ast_channel_name(oldchan));
@@ -12663,6 +12663,12 @@ static void add_codec_to_sdp(const struct sip_pvt *p,
 	struct ast_format_list fmt;
 	const char *mime;
 	unsigned int rate;
+	struct ast_codec_pref *pref;
+
+	if (!p->rtp) {
+		/* I don't see how you couldn't have p->rtp, but good to check for and error out if not there like earlier code */
+		return;
+	}
 
 	if (debug)
 		ast_verbose("Adding codec %u (%s) to SDP\n", format->id, ast_getformatname(format));
@@ -12673,11 +12679,9 @@ static void add_codec_to_sdp(const struct sip_pvt *p,
 		return;
 	}
 
-	if (p->rtp) {
-		struct ast_codec_pref *pref = &ast_rtp_instance_get_codecs(p->rtp)->pref;
-		fmt = ast_codec_pref_getsize(pref, format);
-	} else /* I don't see how you couldn't have p->rtp, but good to check for and error out if not there like earlier code */
-		return;
+	pref = &ast_rtp_instance_get_codecs(p->rtp)->pref;
+	fmt = ast_codec_pref_getsize(pref, format);
+
 	ast_str_append(m_buf, 0, " %d", rtp_code);
 	ast_str_append(a_buf, 0, "a=rtpmap:%d %s/%u\r\n", rtp_code, mime, rate);
 
@@ -28544,7 +28548,7 @@ static int handle_incoming(struct sip_pvt *p, struct sip_request *req, struct as
 		res = handle_request_invite(p, req, addr, seqno, recount, e, nounlock);
 
 		if (res < 9) {
-			sip_report_security_event(p, req, res);
+			sip_report_security_event(NULL, &p->recv, p, req, res);
 		}
 
 		switch (res) {
@@ -28583,7 +28587,7 @@ static int handle_incoming(struct sip_pvt *p, struct sip_request *req, struct as
 		break;
 	case SIP_REGISTER:
 		res = handle_request_register(p, req, addr, e);
-		sip_report_security_event(p, req, res);
+		sip_report_security_event(p->exten, NULL, p, req, res);
 		break;
 	case SIP_INFO:
 		if (req->debug)
