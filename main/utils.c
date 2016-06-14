@@ -1242,8 +1242,8 @@ int ast_pthread_create_stack(pthread_t *thread, pthread_attr_t *attr, void *(*st
 		pthread_attr_init(attr);
 	}
 
-#ifdef __linux__
-	/* On Linux, pthread_attr_init() defaults to PTHREAD_EXPLICIT_SCHED,
+#if defined(__linux__) || defined(__FreeBSD__)
+	/* On Linux and FreeBSD , pthread_attr_init() defaults to PTHREAD_EXPLICIT_SCHED,
 	   which is kind of useless. Change this here to
 	   PTHREAD_INHERIT_SCHED; that way the -p option to set realtime
 	   priority will propagate down to new threads by default.
@@ -1390,7 +1390,13 @@ int ast_carefulwrite(int fd, char *s, int len, int timeoutms)
 
 		if (res < 0 && errno != EAGAIN && errno != EINTR) {
 			/* fatal error from write() */
-			ast_log(LOG_ERROR, "write() returned error: %s\n", strerror(errno));
+			if (errno == EPIPE) {
+#ifndef STANDALONE
+				ast_debug(1, "write() failed due to reading end being closed: %s\n", strerror(errno));
+#endif
+			} else {
+				ast_log(LOG_ERROR, "write() returned error: %s\n", strerror(errno));
+			}
 			return -1;
 		}
 

@@ -83,12 +83,12 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 				</argument>
 				<argument name="Technology2/Resource2" required="false" multiple="true">
 					<para>Optional extra devices to dial in parallel</para>
-					<para>If you need more then one enter them as
-					Technology2/Resource2&amp;Technology3/Resourse3&amp;.....</para>
+					<para>If you need more than one enter them as
+					Technology2/Resource2&amp;Technology3/Resource3&amp;.....</para>
 				</argument>
 			</parameter>
 			<parameter name="timeout" required="false">
-				<para>Specifies the number of seconds we attempt to dial the specified devices</para>
+				<para>Specifies the number of seconds we attempt to dial the specified devices.</para>
 				<para>If not specified, this defaults to 136 years.</para>
 			</parameter>
 			<parameter name="options" required="false">
@@ -330,7 +330,7 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 						<para>With <replaceable>delete</replaceable> set to <literal>1</literal>, the introduction will
 						always be deleted.</para>
 					</argument>
-					<para>This option is a modifier for the call screening/privacy mode. (See the 
+					<para>This option is a modifier for the call screening/privacy mode. (See the
 					<literal>p</literal> and <literal>P</literal> options.) It specifies
 					that no introductions are to be saved in the <directory>priv-callerintros</directory>
 					directory.</para>
@@ -485,7 +485,7 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 
 			<para>Unless there is a timeout specified, the Dial application will wait
 			indefinitely until one of the called channels answers, the user hangs up, or
-			if all of the called channels are busy or unavailable. Dialplan executing will
+			if all of the called channels are busy or unavailable. Dialplan execution will
 			continue if no requested channels can be called, or if the timeout expires.
 			This application will report normal termination if the originating channel
 			hangs up, or if the call is bridged and either of the parties in the bridge
@@ -2124,6 +2124,24 @@ static int dial_exec_full(struct ast_channel *chan, const char *data, struct ast
 	if (ast_strlen_zero(data)) {
 		ast_log(LOG_WARNING, "Dial requires an argument (technology/resource)\n");
 		pbx_builtin_setvar_helper(chan, "DIALSTATUS", pa.status);
+		return -1;
+	}
+
+	if (ast_check_hangup_locked(chan)) {
+		/*
+		 * Caller hung up before we could dial.  If dial is executed
+		 * within an AGI then the AGI has likely eaten all queued
+		 * frames before executing the dial in DeadAGI mode.  With
+		 * the caller hung up and no pending frames from the caller's
+		 * read queue, dial would not know that the call has hung up
+		 * until a called channel answers.  It is rather annoying to
+		 * whoever just answered the non-existent call.
+		 *
+		 * Dial should not continue execution in DeadAGI mode, hangup
+		 * handlers, or the h exten.
+		 */
+		ast_verb(3, "Caller hung up before dial.\n");
+		pbx_builtin_setvar_helper(chan, "DIALSTATUS", "CANCEL");
 		return -1;
 	}
 

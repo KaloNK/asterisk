@@ -63,6 +63,30 @@
 		<member name="MALLOC_DEBUG" displayname="Keep Track of Memory Allocations">
 			<support_level>core</support_level>
 		</member>
+		<member name="ADDRESS_SANITIZER" displayname="Address Sanitizer">
+			<depend>HAVE_ADDRESS_SANITIZER</depend>
+			<support_level>extended</support_level>
+			<conflict>THREAD_SANITIZER</conflict>
+			<conflict>LEAK_SANITIZER</conflict>
+			<conflict>MALLOC_DEBUG</conflict>
+		</member>
+		<member name="THREAD_SANITIZER" displayname="Thread Sanitizer">
+			<depend>HAVE_THREAD_SANITIZER</depend>
+			<support_level>extended</support_level>
+			<conflict>ADDRESS_SANITIZER</conflict>
+			<conflict>LEAK_SANITIZER</conflict>
+		</member>
+		<member name="LEAK_SANITIZER" displayname="Leak Sanitizer">
+			<depend>HAVE_LEAK_SANITIZER</depend>
+			<support_level>extended</support_level>
+			<conflict>ADDRESS_SANITIZER</conflict>
+			<conflict>THREAD_SANITIZER</conflict>
+			<conflict>MALLOC_DEBUG</conflict>
+		</member>
+		<member name="UNDEFINED_SANITIZER" displayname="Undefined Behavior Sanitizer">
+			<depend>HAVE_UNDEFINED_SANITIZER</depend>
+			<support_level>extended</support_level>
+		</member>
 		<member name="BUSYDETECT_TONEONLY" displayname="Enable additional comparision of only the tone duration not the silence part">
 			<conflict>BUSYDETECT_COMPARE_TONE_AND_SILENCE</conflict>
 			<defaultenabled>no</defaultenabled>
