@@ -409,7 +409,7 @@ static int init_logger_chain(int locked, const char *altconf)
 
 	/* If no config file, we're fine, set default options. */
 	if (!cfg) {
-		if (!(chan = ast_calloc(1, sizeof(*chan)))) {
+		if (!(chan = ast_calloc(1, sizeof(*chan) + 1))) {
 			fprintf(stderr, "Failed to initialize default logging\n");
 			return -1;
 		}
@@ -1019,7 +1019,7 @@ static struct sigaction handle_SIGXFSZ = {
 	.sa_flags = SA_RESTART,
 };
 
-static void ast_log_vsyslog(struct logmsg *msg)
+static void ast_log_vsyslog(struct logmsg *msg, int facility)
 {
 	char buf[BUFSIZ];
 	int syslog_level = ast_syslog_priority_from_loglevel(msg->level);
@@ -1036,6 +1036,9 @@ static void ast_log_vsyslog(struct logmsg *msg)
 		fprintf(stderr, "ast_log_vsyslog called with bogus level: %d\n", msg->level);
 		return;
 	}
+
+	/* Don't use LOG_MAKEPRI because it's broken in glibc<2.17 */
+	syslog_level = facility | syslog_level; /* LOG_MAKEPRI(facility, syslog_level); */
 
 	snprintf(buf, sizeof(buf), "%s[%d]%s: %s:%d in %s: %s",
 		 levels[msg->level], msg->lwp, call_identifier_str, msg->file, msg->line, msg->function, msg->message);
@@ -1122,7 +1125,7 @@ static void logger_print_normal(struct logmsg *logmsg)
 
 			/* Check syslog channels */
 			if (chan->type == LOGTYPE_SYSLOG && (chan->logmask & (1 << logmsg->level))) {
-				ast_log_vsyslog(logmsg);
+				ast_log_vsyslog(logmsg, chan->facility);
 			/* Console channels */
 			} else if (chan->type == LOGTYPE_CONSOLE && (chan->logmask & (1 << logmsg->level))) {
 				char linestr[128];

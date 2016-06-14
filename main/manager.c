@@ -499,6 +499,8 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 				<parameter name="Channel"/>
 				<parameter name="Context"/>
 				<parameter name="Exten"/>
+				<parameter name="Application"/>
+				<parameter name="Data"/>
 				<parameter name="Reason"/>
 				<parameter name="Uniqueid"/>
 				<parameter name="CallerIDNum"/>
@@ -2871,7 +2873,7 @@ static int action_getconfigjson(struct mansession *s, const struct message *m)
 
 		astman_append(s, "%s\"", comma1 ? "," : "");
 		astman_append_json(s, category);
-		astman_append(s, "\":[");
+		astman_append(s, "\":{");
 		comma1 = 1;
 		for (v = ast_variable_browse(cfg, category); v; v = v->next) {
 			astman_append(s, "%s\"", comma2 ? "," : "");
@@ -2881,7 +2883,7 @@ static int action_getconfigjson(struct mansession *s, const struct message *m)
 			astman_append(s, "\"");
 			comma2 = 1;
 		}
-		astman_append(s, "]");
+		astman_append(s, "}");
 	}
 	astman_append(s, "}\r\n\r\n");
 
@@ -4146,22 +4148,43 @@ static void *fast_originate(void *data)
 	}
 	/* Tell the manager what happened with the channel */
 	chans[0] = chan;
-	ast_manager_event_multichan(EVENT_FLAG_CALL, "OriginateResponse", chan ? 1 : 0, chans,
-		"%s"
-		"Response: %s\r\n"
-		"Channel: %s\r\n"
-		"Context: %s\r\n"
-		"Exten: %s\r\n"
-		"Reason: %d\r\n"
-		"Uniqueid: %s\r\n"
-		"CallerIDNum: %s\r\n"
-		"CallerIDName: %s\r\n",
-		in->idtext, res ? "Failure" : "Success",
-		chan ? ast_channel_name(chan) : requested_channel, in->context, in->exten, reason,
-		chan ? ast_channel_uniqueid(chan) : "<null>",
-		S_OR(in->cid_num, "<unknown>"),
-		S_OR(in->cid_name, "<unknown>")
-		);
+	if (!ast_strlen_zero(in->app)) {
+		ast_manager_event_multichan(EVENT_FLAG_CALL, "OriginateResponse", chan ? 1 : 0, chans,
+				"%s"
+				"Response: %s\r\n"
+				"Channel: %s\r\n"
+				"Application: %s\r\n"
+				"Data: %s\r\n"
+				"Reason: %d\r\n"
+				"Uniqueid: %s\r\n"
+				"CallerIDNum: %s\r\n"
+				"CallerIDName: %s\r\n",
+				in->idtext, res ? "Failure" : "Success",
+				chan ? ast_channel_name(chan) : requested_channel,
+				in->app, in->appdata, reason,
+				chan ? ast_channel_uniqueid(chan) : "<null>",
+				S_OR(in->cid_num, "<unknown>"),
+				S_OR(in->cid_name, "<unknown>")
+				);
+	} else {
+		ast_manager_event_multichan(EVENT_FLAG_CALL, "OriginateResponse", chan ? 1 : 0, chans,
+				"%s"
+				"Response: %s\r\n"
+				"Channel: %s\r\n"
+				"Context: %s\r\n"
+				"Exten: %s\r\n"
+				"Reason: %d\r\n"
+				"Uniqueid: %s\r\n"
+				"CallerIDNum: %s\r\n"
+				"CallerIDName: %s\r\n",
+				in->idtext, res ? "Failure" : "Success",
+				chan ? ast_channel_name(chan) : requested_channel,
+				in->context, in->exten, reason,
+				chan ? ast_channel_uniqueid(chan) : "<null>",
+				S_OR(in->cid_num, "<unknown>"),
+				S_OR(in->cid_name, "<unknown>")
+				);
+	}
 
 	/* Locked by ast_pbx_outgoing_exten or ast_pbx_outgoing_app */
 	if (chan) {
@@ -7577,6 +7600,8 @@ static void manager_shutdown(void)
 	while ((user = AST_LIST_REMOVE_HEAD(&users, list))) {
 		manager_free_user(user);
 	}
+
+	ast_free(manager_channelvars);
 }
 
 static void manager_set_defaults(void)
