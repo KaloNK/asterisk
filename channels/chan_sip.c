@@ -4420,7 +4420,6 @@ static int __sip_scheddestroy(const void *data)
 
 	if (pvt->do_history) {
 		append_history(pvt, "SchedDestroy", "%d ms", ms);
-<<<<<<< HEAD
 	}
 
 	dialog_ref(pvt, "Schedule autokillid");
@@ -4430,17 +4429,6 @@ static int __sip_scheddestroy(const void *data)
 		dialog_unref(pvt, "Failed to schedule autokillid");
 	}
 
-=======
-	}
-
-	dialog_ref(pvt, "Schedule autokillid");
-	pvt->autokillid = ast_sched_add(sched, ms, __sip_autodestruct, pvt);
-	if (pvt->autokillid < 0) {
-		/* Uh Oh.  Expect bad behavior. */
-		dialog_unref(pvt, "Failed to schedule autokillid");
-	}
-
->>>>>>> upstream/master
 	if (pvt->stimer) {
 		stop_session_timer(pvt);
 	}
@@ -4471,7 +4459,6 @@ static int sip_scheddestroy_full(struct sip_pvt *p, int ms)
 	if (!sched_data) {
 		/* Uh Oh.  Expect bad behavior. */
 		return -1;
-<<<<<<< HEAD
 	}
 	sched_data->pvt = p;
 	sched_data->ms = ms;
@@ -4482,18 +4469,6 @@ static int sip_scheddestroy_full(struct sip_pvt *p, int ms)
 		ast_free(sched_data);
 		return -1;
 	}
-=======
-	}
-	sched_data->pvt = p;
-	sched_data->ms = ms;
-	dialog_ref(p, "Destroy action");
-	if (ast_sched_add(sched, 0, __sip_scheddestroy, sched_data) < 0) {
-		/* Uh Oh.  Expect bad behavior. */
-		dialog_unref(p, "Failed to schedule destroy action");
-		ast_free(sched_data);
-		return -1;
-	}
->>>>>>> upstream/master
 	return 0;
 }
 
@@ -4724,7 +4699,6 @@ static void update_provisional_keepalive(struct sip_pvt *pvt, int with_sdp)
 static int __stop_provisional_keepalive(const void *data)
 {
 	struct sip_pvt *pvt = (void *) data;
-<<<<<<< HEAD
 
 	AST_SCHED_DEL_UNREF(sched, pvt->provisional_keepalive_sched_id,
 		dialog_unref(pvt, "Stop scheduled provisional keepalive"));
@@ -4732,15 +4706,6 @@ static int __stop_provisional_keepalive(const void *data)
 	return 0;
 }
 
-=======
-
-	AST_SCHED_DEL_UNREF(sched, pvt->provisional_keepalive_sched_id,
-		dialog_unref(pvt, "Stop scheduled provisional keepalive"));
-	dialog_unref(pvt, "Stop provisional keepalive action");
-	return 0;
-}
-
->>>>>>> upstream/master
 static void stop_provisional_keepalive(struct sip_pvt *pvt)
 {
 	dialog_ref(pvt, "Stop provisional keepalive action");
