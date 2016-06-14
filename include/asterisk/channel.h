@@ -158,7 +158,7 @@ extern "C" {
  */
 #define AST_MAX_UNIQUEID        (AST_MAX_PUBLIC_UNIQUEID + 2 + 1)
 
-#define AST_MAX_ACCOUNT_CODE    20  /*!< Max length of an account code */
+#define AST_MAX_ACCOUNT_CODE    80  /*!< Max length of an account code */
 #define AST_CHANNEL_NAME        80  /*!< Max length of an ast_channel name */
 #define MAX_LANGUAGE            40  /*!< Max length of the language setting */
 #define MAX_MUSICCLASS          80  /*!< Max length of the music class setting */
@@ -1597,6 +1597,42 @@ void ast_channel_set_unbridged(struct ast_channel *chan, int value);
  *  \param value What the unbridge value is being set to
  */
 void ast_channel_set_unbridged_nolock(struct ast_channel *chan, int value);
+
+/*!
+ * \brief This function will check if T.38 is active on the channel.
+ *
+ * \param chan Channel on which to check the unbridge_eval flag
+ *
+ * \return Returns 0 if the flag is down or 1 if the flag is up.
+ */
+int ast_channel_is_t38_active(struct ast_channel *chan);
+
+/*!
+ * \brief ast_channel_is_t38_active variant. Use this if the channel
+ *         is already locked prior to calling.
+ *
+ * \param chan Channel on which to check the is_t38_active flag
+ *
+ * \return Returns 0 if the flag is down or 1 if the flag is up.
+ */
+int ast_channel_is_t38_active_nolock(struct ast_channel *chan);
+
+/*!
+ * \brief Sets the is_t38_active flag
+ *
+ * \param chan Which channel is having its is_t38_active value set
+ * \param is_t38_active Non-zero if T.38 is active
+ */
+void ast_channel_set_is_t38_active(struct ast_channel *chan, int is_t38_active);
+
+/*!
+ * \brief Variant of ast_channel_set_is_t38_active. Use this if the channel
+ *         is already locked prior to calling.
+ *
+ * \param chan Which channel is having its is_t38_active value set
+ * \param is_t38_active Non-zero if T.38 is active
+ */
+void ast_channel_set_is_t38_active_nolock(struct ast_channel *chan, int is_t38_active);
 
 /*!
  * \brief Lock the given channel, then request softhangup on the channel with the given causecode

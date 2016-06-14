@@ -46,7 +46,7 @@ static void *mwi_allocate_body(void *data)
 	if (!mwi_str) {
 		return NULL;
 	}
-	*mwi_str = ast_str_create(64);
+	*mwi_str = ast_str_create(128);
 	if (!*mwi_str) {
 		ast_free(mwi_str);
 		return NULL;
@@ -61,6 +61,9 @@ static int mwi_generate_body_content(void *body, void *data)
 
 	ast_str_append(mwi, 0, "Messages-Waiting: %s\r\n",
 			counter->new_msgs ? "yes" : "no");
+	if (!ast_strlen_zero(counter->message_account))  {
+		ast_str_append(mwi, 0, "Message-Account: %s\r\n", counter->message_account);
+	}
 	ast_str_append(mwi, 0, "Voice-Message: %d/%d (0/0)\r\n",
 			counter->new_msgs, counter->old_msgs);
 

@@ -357,6 +357,11 @@ int ast_app_exec_macro(struct ast_channel *autoservice_chan, struct ast_channel 
 	if (autoservice_chan) {
 		ast_autoservice_stop(autoservice_chan);
 	}
+
+	if (ast_check_hangup_locked(macro_chan)) {
+		ast_queue_hangup(macro_chan);
+	}
+
 	return res;
 }
 
@@ -433,6 +438,11 @@ int ast_app_exec_sub(struct ast_channel *autoservice_chan, struct ast_channel *s
 	if (autoservice_chan) {
 		ast_autoservice_stop(autoservice_chan);
 	}
+
+	if (!ignore_hangup && ast_check_hangup_locked(sub_chan)) {
+		ast_queue_hangup(sub_chan);
+	}
+
 	return res;
 }
 
@@ -494,7 +504,7 @@ int __ast_vm_register(const struct ast_vm_functions *vm_table, struct ast_module
 	if (table) {
 		ast_log(LOG_WARNING, "Voicemail provider already registered by %s.\n",
 			table->module_name);
-		return -1;
+		return AST_MODULE_LOAD_DECLINE;
 	}
 
 	table = ao2_alloc_options(sizeof(*table), NULL, AO2_ALLOC_OPT_LOCK_NOLOCK);
@@ -605,7 +615,7 @@ int __ast_vm_greeter_register(const struct ast_vm_greeter_functions *vm_table, s
 	if (table) {
 		ast_log(LOG_WARNING, "Voicemail greeter provider already registered by %s.\n",
 			table->module_name);
-		return -1;
+		return AST_MODULE_LOAD_DECLINE;
 	}
 
 	table = ao2_alloc_options(sizeof(*table), NULL, AO2_ALLOC_OPT_LOCK_NOLOCK);
@@ -1102,6 +1112,8 @@ static int control_streamfile(struct ast_channel *chan,
 		if (!strcasecmp(end, ":end")) {
 			*end = '\0';
 			end++;
+		} else {
+			end = NULL;
 		}
 	}
 
@@ -2098,9 +2110,6 @@ int ast_app_group_list_unlock(void)
 	return AST_RWLIST_UNLOCK(&groups);
 }
 
-#undef ast_app_separate_args
-unsigned int ast_app_separate_args(char *buf, char delim, char **array, int arraylen);
-
 unsigned int __ast_app_separate_args(char *buf, char delim, int remove_chars, char **array, int arraylen)
 {
 	int argc;
@@ -2163,12 +2172,6 @@ unsigned int __ast_app_separate_args(char *buf, char delim, int remove_chars, ch
 	}
 
 	return argc;
-}
-
-/* ABI compatible function */
-unsigned int ast_app_separate_args(char *buf, char delim, char **array, int arraylen)
-{
-	return __ast_app_separate_args(buf, delim, 1, array, arraylen);
 }
 
 static enum AST_LOCK_RESULT ast_lock_path_lockfile(const char *path)

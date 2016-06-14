@@ -100,7 +100,10 @@ export LDCONFIG
 export LDCONFIG_FLAGS
 export PYTHON
 
--include makeopts
+# makeopts is required unless the goal is clean or distclean
+ifeq ($(findstring clean,$(MAKECMDGOALS)),)
+include makeopts
+endif
 
 # start the primary CFLAGS and LDFLAGS with any that were provided
 # to the configure script
@@ -124,7 +127,7 @@ empty:=
 space:=$(empty) $(empty)
 ASTTOPDIR:=$(subst $(space),\$(space),$(CURDIR))
 
-# Overwite config files on "make samples"
+# Overwite config files on "make samples" or other config installation targets
 OVERWRITE=y
 
 # Include debug and macro symbols in the executables (-g) and profiling info (-pg)
@@ -246,7 +249,7 @@ endif
 
 _ASTCFLAGS+=$(OPTIONS)
 
-MOD_SUBDIRS:=channels pbx apps codecs formats cdr cel bridges funcs tests main res addons $(LOCAL_MOD_SUBDIRS)
+MOD_SUBDIRS:=third-party channels pbx apps codecs formats cdr cel bridges funcs tests main res addons $(LOCAL_MOD_SUBDIRS)
 OTHER_SUBDIRS:=utils agi contrib
 SUBDIRS:=$(OTHER_SUBDIRS) $(MOD_SUBDIRS)
 SUBDIRS_INSTALL:=$(SUBDIRS:%=%-install)
@@ -374,8 +377,10 @@ ifeq ($(findstring $(OSARCH), mingw32 cygwin ),)
     # directories containing them must be completed before the main Asterisk
     # binary can be built.
     # If MENUSELECT_EMBED is empty, we don't need this and allow 'main' to be
-    # be built without building all dependencies first.
+    # be built with only third_party first.
 main: $(filter-out main,$(MOD_SUBDIRS))
+  else
+main: third-party
   endif
 else
     # Windows: we need to build main (i.e. the asterisk dll) first,
@@ -399,7 +404,7 @@ defaults.h: makeopts .lastclean build_tools/make_defaults_h
 	@cmp -s $@.tmp $@ || mv $@.tmp $@
 	@rm -f $@.tmp
 
-main/version.c: FORCE .lastclean
+main/version.c: FORCE menuselect.makeopts .lastclean
 	@build_tools/make_version_c > $@.tmp
 	@cmp -s $@.tmp $@ || mv $@.tmp $@
 	@rm -f $@.tmp
@@ -565,7 +570,8 @@ INSTALLDIRS="$(ASTLIBDIR)" "$(ASTMODDIR)" "$(ASTSBINDIR)" "$(ASTETCDIR)" "$(ASTV
 	"$(ASTDATADIR)/documentation/thirdparty" "$(ASTDATADIR)/firmware" \
 	"$(ASTDATADIR)/firmware/iax" "$(ASTDATADIR)/images" "$(ASTDATADIR)/keys" \
 	"$(ASTDATADIR)/phoneprov" "$(ASTDATADIR)/rest-api" "$(ASTDATADIR)/static-http" \
-	"$(ASTDATADIR)/sounds" "$(ASTDATADIR)/moh" "$(ASTMANDIR)/man8" "$(AGI_DIR)" "$(ASTDBDIR)"
+	"$(ASTDATADIR)/sounds" "$(ASTDATADIR)/moh" "$(ASTMANDIR)/man8" "$(AGI_DIR)" "$(ASTDBDIR)" \
+	"$(ASTDATADIR)/third-party"
 
 installdirs:
 	@for i in $(INSTALLDIRS); do \
@@ -578,6 +584,7 @@ main-bininstall:
 	+@DESTDIR="$(DESTDIR)" ASTSBINDIR="$(ASTSBINDIR)" ASTLIBDIR="$(ASTLIBDIR)" $(SUBMAKE) -C main bininstall
 
 bininstall: _all installdirs $(SUBDIRS_INSTALL) main-bininstall
+	$(INSTALL) -m 755 contrib/scripts/astversion "$(DESTDIR)$(ASTSBINDIR)/"
 	$(INSTALL) -m 755 contrib/scripts/astgenkey "$(DESTDIR)$(ASTSBINDIR)/"
 	$(INSTALL) -m 755 contrib/scripts/autosupport "$(DESTDIR)$(ASTSBINDIR)/"
 	if [ ! -f /sbin/launchd ]; then \
@@ -607,7 +614,7 @@ ifeq ($(HAVE_DAHDI),1)
 endif
 
 $(SUBDIRS_INSTALL):
-	+@DESTDIR="$(DESTDIR)" ASTSBINDIR="$(ASTSBINDIR)" $(SUBMAKE) -C $(@:-install=) install
+	+@DESTDIR="$(DESTDIR)" ASTSBINDIR="$(ASTSBINDIR)" ASTDATADIR="$(ASTDATADIR)" $(SUBMAKE) -C $(@:-install=) install
 
 NEWMODS:=$(foreach d,$(MOD_SUBDIRS),$(notdir $(wildcard $(d)/*.so)))
 OLDMODS=$(filter-out $(NEWMODS) $(notdir $(DESTDIR)$(ASTMODDIR)),$(notdir $(wildcard $(DESTDIR)$(ASTMODDIR)/*.so)))
@@ -650,7 +657,12 @@ install: badshell bininstall datafiles
 	@echo " + configuration files (overwriting any      +"
 	@echo " + existing config files), run:              +"
 	@echo " +                                           +"
-	@echo " +               $(mK) samples               +"
+	@echo " + For generic reference documentation:      +"
+	@echo " +   $(mK) samples                           +"
+	@echo " +                                           +"
+	@echo " + For a sample basic PBX:                   +"
+	@echo " +   $(mK) basic-pbx                         +"
+	@echo " +                                           +"
 	@echo " +                                           +"
 	@echo " +-----------------  or ---------------------+"
 	@echo " +                                           +"
@@ -668,24 +680,14 @@ isntall: install
 
 upgrade: bininstall
 
-# XXX why *.adsi is installed first ?
-adsi:
-	@echo Installing adsi config files...
-	$(INSTALL) -d "$(DESTDIR)$(ASTETCDIR)"
-	@for x in configs/samples/*.adsi; do \
-		dst="$(DESTDIR)$(ASTETCDIR)/`$(BASENAME) $$x`" ; \
-		if [ -f "$${dst}" ] ; then \
-			echo "Overwriting $$x" ; \
-		else \
-			echo "Installing $$x" ; \
-		fi ; \
-		$(INSTALL) -m 644 "$$x" "$(DESTDIR)$(ASTETCDIR)/`$(BASENAME) $$x`" ; \
-	done
 
-samples: adsi
-	@echo Installing other config files...
-	@for x in configs/samples/*.sample; do \
-		dst="$(DESTDIR)$(ASTETCDIR)/`$(BASENAME) $$x .sample`" ;	\
+# Install configuration files from the specified directory
+# Parameters:
+#  (1) the configuration directory to install from
+#  (2) the extension to strip off
+define INSTALL_CONFIGS
+	@for x in configs/$(1)/*$(2); do \
+		dst="$(DESTDIR)$(ASTETCDIR)/`$(BASENAME) $$x $(2)`"; \
 		if [ -f "$${dst}" ]; then \
 			if [ "$(OVERWRITE)" = "y" ]; then \
 				if cmp -s "$${dst}" "$$x" ; then \
@@ -700,7 +702,7 @@ samples: adsi
 		fi ; \
 		echo "Installing file $$x"; \
 		$(INSTALL) -m 644 "$$x" "$${dst}" ;\
-	done
+	done ; \
 	if [ "$(OVERWRITE)" = "y" ]; then \
 		echo "Updating asterisk.conf" ; \
 		sed -e 's|^astetcdir.*$$|astetcdir => $(ASTETCDIR)|' \
@@ -717,10 +719,28 @@ samples: adsi
 			"$(DESTDIR)$(ASTCONFPATH)" > "$(DESTDIR)$(ASTCONFPATH).tmp" ; \
 		$(INSTALL) -m 644 "$(DESTDIR)$(ASTCONFPATH).tmp" "$(DESTDIR)$(ASTCONFPATH)" ; \
 		rm -f "$(DESTDIR)$(ASTCONFPATH).tmp" ; \
-	fi ; \
+	fi
+endef
+
+# XXX why *.adsi is installed first ?
+adsi:
+	@echo Installing adsi config files...
+	$(INSTALL) -d "$(DESTDIR)$(ASTETCDIR)"
+	@for x in configs/samples/*.adsi; do \
+		dst="$(DESTDIR)$(ASTETCDIR)/`$(BASENAME) $$x`" ; \
+		if [ -f "$${dst}" ] ; then \
+			echo "Overwriting $$x" ; \
+		else \
+			echo "Installing $$x" ; \
+		fi ; \
+		$(INSTALL) -m 644 "$$x" "$(DESTDIR)$(ASTETCDIR)/`$(BASENAME) $$x`" ; \
+	done
+
+samples: adsi
+	@echo Installing other config files...
+	$(call INSTALL_CONFIGS,samples,.sample)
 	$(INSTALL) -d "$(DESTDIR)$(ASTSPOOLDIR)/voicemail/default/1234/INBOX"
 	build_tools/make_sample_voicemail "$(DESTDIR)/$(ASTDATADIR)" "$(DESTDIR)/$(ASTSPOOLDIR)"
-
 	@for x in phoneprov/*; do \
 		dst="$(DESTDIR)$(ASTDATADIR)/$$x" ;	\
 		if [ -f "$${dst}" ]; then \
@@ -738,6 +758,10 @@ samples: adsi
 		echo "Installing file $$x"; \
 		$(INSTALL) -m 644 "$$x" "$${dst}" ;\
 	done
+
+basic-pbx:
+	@echo Installing basic-pbx config files...
+	$(call INSTALL_CONFIGS,basic-pbx)
 
 webvmail:
 	@[ -d "$(DESTDIR)$(HTTP_DOCSDIR)/" ] || ( printf "http docs directory not found.\nUpdate assignment of variable HTTP_DOCSDIR in Makefile!\n" && exit 1 )
@@ -800,60 +824,56 @@ install-logrotate:
 	rm -f contrib/scripts/asterisk.logrotate.tmp
 
 config:
-	@if [ "${OSARCH}" = "linux-gnu" -o "${OSARCH}" = "kfreebsd-gnu" ]; then \
-		if [ -f /etc/redhat-release -o -f /etc/fedora-release ]; then \
-			./build_tools/install_subst contrib/init.d/rc.redhat.asterisk  "$(DESTDIR)/etc/rc.d/init.d/asterisk"; \
-			if [ ! -f "$(DESTDIR)/etc/sysconfig/asterisk" ] ; then \
-				$(INSTALL) -m 644 contrib/init.d/etc_default_asterisk "$(DESTDIR)/etc/sysconfig/asterisk" ; \
-			fi ; \
-			if [ -z "$(DESTDIR)" ] ; then \
-				/sbin/chkconfig --add asterisk ; \
-			fi ; \
-		elif [ -f /etc/debian_version ] ; then \
-			./build_tools/install_subst contrib/init.d/rc.debian.asterisk  "$(DESTDIR)/etc/init.d/asterisk"; \
-			if [ ! -f "$(DESTDIR)/etc/default/asterisk" ] ; then \
-				$(INSTALL) -m 644 contrib/init.d/etc_default_asterisk "$(DESTDIR)/etc/default/asterisk" ; \
-			fi ; \
-			if [ -z "$(DESTDIR)" ] ; then \
-				/usr/sbin/update-rc.d asterisk defaults 50 91 ; \
-			fi ; \
-		elif [ -f /etc/gentoo-release ] ; then \
-			./build_tools/install_subst contrib/init.d/rc.gentoo.asterisk  "$(DESTDIR)/etc/init.d/asterisk"; \
-			if [ -z "$(DESTDIR)" ] ; then \
-				/sbin/rc-update add asterisk default ; \
-			fi ; \
-		elif [ -f /etc/mandrake-release -o -f /etc/mandriva-release ] ; then \
-			./build_tools/install_subst contrib/init.d/rc.mandriva.asterisk  "$(DESTDIR)/etc/rc.d/init.d/asterisk"; \
-			if [ ! -f /etc/sysconfig/asterisk ] ; then \
-				$(INSTALL) -m 644 contrib/init.d/etc_default_asterisk "$(DESTDIR)/etc/sysconfig/asterisk" ; \
-			fi ; \
-			if [ -z "$(DESTDIR)" ] ; then \
-				/sbin/chkconfig --add asterisk ; \
-			fi ; \
-		elif [ -f /etc/SuSE-release -o -f /etc/novell-release ] ; then \
-			./build_tools/install_subst contrib/init.d/rc.suse.asterisk  "$(DESTDIR)/etc/init.d/asterisk"; \
-			if [ ! -f /etc/sysconfig/asterisk ] ; then \
-				$(INSTALL) -m 644 contrib/init.d/etc_default_asterisk "$(DESTDIR)/etc/sysconfig/asterisk" ; \
-			fi ; \
-			if [ -z "$(DESTDIR)" ] ; then \
-				/sbin/chkconfig --add asterisk ; \
-			fi ; \
-		elif [ -f /etc/arch-release -o -f /etc/arch-release ] ; then \
-			./build_tools/install_subst contrib/init.d/rc.archlinux.asterisk  "$(DESTDIR)/etc/init.d/asterisk"; \
-		elif [ -d "$(DESTDIR)/Library/LaunchDaemons" ]; then \
-			if [ ! -f "$(DESTDIR)/Library/LaunchDaemons/org.asterisk.asterisk.plist" ]; then \
-				./build_tools/install_subst contrib/init.d/org.asterisk.asterisk.plist "$(DESTDIR)/Library/LaunchDaemons/org.asterisk.asterisk.plist"; \
-			fi; \
-			if [ ! -f "$(DESTDIR)/Library/LaunchDaemons/org.asterisk.muted.plist" ]; then \
-				./build_tools/install_subst contrib/init.d/org.asterisk.muted.plist "$(DESTDIR)/Library/LaunchDaemons/org.asterisk.muted.plist"; \
-			fi; \
-		elif [ -f /etc/slackware-version ]; then \
-			echo "Slackware is not currently supported, although an init script does exist for it."; \
-		else \
-			echo "We could not install init scripts for your distribution." ; \
-		fi \
+	if [ -f /etc/redhat-release -o -f /etc/fedora-release ]; then \
+		./build_tools/install_subst contrib/init.d/rc.redhat.asterisk  "$(DESTDIR)/etc/rc.d/init.d/asterisk"; \
+		if [ ! -f "$(DESTDIR)/etc/sysconfig/asterisk" ] ; then \
+			$(INSTALL) -m 644 contrib/init.d/etc_default_asterisk "$(DESTDIR)/etc/sysconfig/asterisk" ; \
+		fi ; \
+		if [ -z "$(DESTDIR)" ] ; then \
+			/sbin/chkconfig --add asterisk ; \
+		fi ; \
+	elif [ -f /etc/debian_version ] ; then \
+		./build_tools/install_subst contrib/init.d/rc.debian.asterisk  "$(DESTDIR)/etc/init.d/asterisk"; \
+		if [ ! -f "$(DESTDIR)/etc/default/asterisk" ] ; then \
+			$(INSTALL) -m 644 contrib/init.d/etc_default_asterisk "$(DESTDIR)/etc/default/asterisk" ; \
+		fi ; \
+		if [ -z "$(DESTDIR)" ] ; then \
+			/usr/sbin/update-rc.d asterisk defaults 50 91 ; \
+		fi ; \
+	elif [ -f /etc/gentoo-release ] ; then \
+		./build_tools/install_subst contrib/init.d/rc.gentoo.asterisk  "$(DESTDIR)/etc/init.d/asterisk"; \
+		if [ -z "$(DESTDIR)" ] ; then \
+			/sbin/rc-update add asterisk default ; \
+		fi ; \
+	elif [ -f /etc/mandrake-release -o -f /etc/mandriva-release ] ; then \
+		./build_tools/install_subst contrib/init.d/rc.mandriva.asterisk  "$(DESTDIR)/etc/rc.d/init.d/asterisk"; \
+		if [ ! -f /etc/sysconfig/asterisk ] ; then \
+			$(INSTALL) -m 644 contrib/init.d/etc_default_asterisk "$(DESTDIR)/etc/sysconfig/asterisk" ; \
+		fi ; \
+		if [ -z "$(DESTDIR)" ] ; then \
+			/sbin/chkconfig --add asterisk ; \
+		fi ; \
+	elif [ -f /etc/SuSE-release -o -f /etc/novell-release ] ; then \
+		./build_tools/install_subst contrib/init.d/rc.suse.asterisk  "$(DESTDIR)/etc/init.d/asterisk"; \
+		if [ ! -f /etc/sysconfig/asterisk ] ; then \
+			$(INSTALL) -m 644 contrib/init.d/etc_default_asterisk "$(DESTDIR)/etc/sysconfig/asterisk" ; \
+		fi ; \
+		if [ -z "$(DESTDIR)" ] ; then \
+			/sbin/chkconfig --add asterisk ; \
+		fi ; \
+	elif [ -f /etc/arch-release -o -f /etc/arch-release ] ; then \
+		./build_tools/install_subst contrib/init.d/rc.archlinux.asterisk  "$(DESTDIR)/etc/init.d/asterisk"; \
+	elif [ -d "$(DESTDIR)/Library/LaunchDaemons" ]; then \
+		if [ ! -f "$(DESTDIR)/Library/LaunchDaemons/org.asterisk.asterisk.plist" ]; then \
+			./build_tools/install_subst contrib/init.d/org.asterisk.asterisk.plist "$(DESTDIR)/Library/LaunchDaemons/org.asterisk.asterisk.plist"; \
+		fi; \
+		if [ ! -f "$(DESTDIR)/Library/LaunchDaemons/org.asterisk.muted.plist" ]; then \
+			./build_tools/install_subst contrib/init.d/org.asterisk.muted.plist "$(DESTDIR)/Library/LaunchDaemons/org.asterisk.muted.plist"; \
+		fi; \
+	elif [ -f /etc/slackware-version ]; then \
+		echo "Slackware is not currently supported, although an init script does exist for it."; \
 	else \
-		echo "We could not install init scripts for your operating system." ; \
+		echo "We could not install init scripts for your distribution." ; \
 	fi
 
 sounds:
@@ -868,7 +888,7 @@ sounds:
 	@[ -f "$(DESTDIR)$(ASTDBDIR)/astdb.sqlite3" ] || [ ! -f "$(DESTDIR)$(ASTDBDIR)/astdb" ] || [ ! -f menuselect.makeopts ] || grep -q MENUSELECT_UTILS=.*astdb2sqlite3 menuselect.makeopts || (sed -i.orig -e's/MENUSELECT_UTILS=\(.*\)/MENUSELECT_UTILS=\1 astdb2sqlite3/' menuselect.makeopts && echo "Updating menuselect.makeopts to include astdb2sqlite3" && echo "Original version backed up to menuselect.makeopts.orig")
 
 $(SUBDIRS_UNINSTALL):
-	+@$(SUBMAKE) -C $(@:-uninstall=) uninstall
+	+@DESTDIR="$(DESTDIR)" ASTSBINDIR="$(ASTSBINDIR)" ASTDATADIR="$(ASTDATADIR)" $(SUBMAKE) -C $(@:-uninstall=) uninstall
 
 main-binuninstall:
 	+@DESTDIR="$(DESTDIR)" ASTSBINDIR="$(ASTSBINDIR)" ASTLIBDIR="$(ASTLIBDIR)" $(SUBMAKE) -C main binuninstall
@@ -991,6 +1011,10 @@ else
 		rest-api/resources.json .
 endif
 
+check-alembic: makeopts
+	@find contrib/ast-db-manage/ -name '*.pyc' -delete
+	@ALEMBIC=$(ALEMBIC) build_tools/make_check_alembic config cdr voicemail >&2
+
 .PHONY: menuselect
 .PHONY: main
 .PHONY: sounds
@@ -1011,6 +1035,8 @@ endif
 .PHONY: validate-docs
 .PHONY: _clean
 .PHONY: ari-stubs
+.PHONY: basic-pbx
+.PHONY: check-alembic
 .PHONY: $(SUBDIRS_INSTALL)
 .PHONY: $(SUBDIRS_DIST_CLEAN)
 .PHONY: $(SUBDIRS_CLEAN)

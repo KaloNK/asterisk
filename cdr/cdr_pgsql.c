@@ -101,34 +101,25 @@ struct columns {
 
 static AST_RWLIST_HEAD_STATIC(psql_columns, columns);
 
-#define LENGTHEN_BUF1(size)                                               \
-			do {                                                          \
-				/* Lengthen buffer, if necessary */                       \
-				if (ast_str_strlen(sql) + size + 1 > ast_str_size(sql)) { \
-					if (ast_str_make_space(&sql, ((ast_str_size(sql) + size + 3) / 512 + 1) * 512) != 0) {	\
-						ast_log(LOG_ERROR, "Unable to allocate sufficient memory.  Insert CDR failed.\n"); \
-						ast_free(sql);                                    \
-						ast_free(sql2);                                   \
-						AST_RWLIST_UNLOCK(&psql_columns);                 \
-						ast_mutex_unlock(&pgsql_lock);                    \
-						return -1;                                        \
-					}                                                     \
-				}                                                         \
+#define LENGTHEN_BUF(size, var_sql) \
+			do { \
+				/* Lengthen buffer, if necessary */ \
+				if (ast_str_strlen(var_sql) + size + 1 > ast_str_size(var_sql)) { \
+					if (ast_str_make_space(&var_sql, ((ast_str_size(var_sql) + size + 3) / 512 + 1) * 512) != 0) { \
+						ast_log(LOG_ERROR, "Unable to allocate sufficient memory. Insert CDR '%s:%s' failed.\n", pghostname, table); \
+						ast_free(sql); \
+						ast_free(sql2); \
+						AST_RWLIST_UNLOCK(&psql_columns); \
+						ast_mutex_unlock(&pgsql_lock); \
+						return -1; \
+					} \
+				} \
 			} while (0)
 
-#define LENGTHEN_BUF2(size)                               \
-			do {                                          \
-				if (ast_str_strlen(sql2) + size + 1 > ast_str_size(sql2)) {  \
-					if (ast_str_make_space(&sql2, ((ast_str_size(sql2) + size + 3) / 512 + 1) * 512) != 0) {	\
-						ast_log(LOG_ERROR, "Unable to allocate sufficient memory.  Insert CDR failed.\n");	\
-						ast_free(sql);                    \
-						ast_free(sql2);                   \
-						AST_RWLIST_UNLOCK(&psql_columns); \
-						ast_mutex_unlock(&pgsql_lock);    \
-						return -1;                        \
-					}                                     \
-				}                                         \
-			} while (0)
+#define LENGTHEN_BUF1(size) \
+	LENGTHEN_BUF(size, sql);
+#define LENGTHEN_BUF2(size) \
+	LENGTHEN_BUF(size, sql2);
 
 /*! \brief Handle the CLI command cdr show pgsql status */
 static char *handle_cdr_pgsql_status(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a)
@@ -148,7 +139,9 @@ static char *handle_cdr_pgsql_status(struct ast_cli_entry *e, int cmd, struct as
 		return CLI_SHOWUSAGE;
 
 	if (connected) {
-		char status[256], status2[100] = "";
+		char status[256];
+		char status2[100] = "";
+		char buf[362]; /* 256+100+" for "+NULL */
 		int ctime = time(NULL) - connect_time;
 
 		if (pgdbport) {
@@ -163,17 +156,10 @@ static char *handle_cdr_pgsql_status(struct ast_cli_entry *e, int cmd, struct as
 		if (table && *table) {
 			snprintf(status2, 99, " using table %s", table);
 		}
-		if (ctime > 31536000) {
-			ast_cli(a->fd, "%s%s for %d years, %d days, %d hours, %d minutes, %d seconds.\n", status, status2, ctime / 31536000, (ctime % 31536000) / 86400, (ctime % 86400) / 3600, (ctime % 3600) / 60, ctime % 60);
-		} else if (ctime > 86400) {
-			ast_cli(a->fd, "%s%s for %d days, %d hours, %d minutes, %d seconds.\n", status, status2, ctime / 86400, (ctime % 86400) / 3600, (ctime % 3600) / 60, ctime % 60);
-		} else if (ctime > 3600) {
-			ast_cli(a->fd, "%s%s for %d hours, %d minutes, %d seconds.\n", status, status2, ctime / 3600, (ctime % 3600) / 60, ctime % 60);
-		} else if (ctime > 60) {
-			ast_cli(a->fd, "%s%s for %d minutes, %d seconds.\n", status, status2, ctime / 60, ctime % 60);
-		} else {
-			ast_cli(a->fd, "%s%s for %d seconds.\n", status, status2, ctime);
-		}
+
+		snprintf(buf, sizeof(buf), "%s%s for ", status, status2);
+		ast_cli_print_timestr_fromseconds(a->fd, ctime, buf);
+
 		if (records == totalrecords) {
 			ast_cli(a->fd, "  Wrote %d records since last restart.\n", totalrecords);
 		} else {

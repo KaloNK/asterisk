@@ -51,7 +51,7 @@ ASTERISK_REGISTER_FILE()
 #include <netdb.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <sys/signal.h>
+#include <signal.h>
 #include <iksemel.h>
 #include <pthread.h>
 
@@ -320,7 +320,6 @@ struct jingle_session {
 	ast_callid callid;                    /*!< Bound session call-id */
 };
 
-static const char desc[] = "Motif Jingle Channel";
 static const char channel_type[] = "Motif";
 
 struct jingle_config {
@@ -1702,7 +1701,7 @@ static int jingle_write(struct ast_channel *ast, struct ast_frame *frame)
 	switch (frame->frametype) {
 	case AST_FRAME_VOICE:
 		if (ast_format_cap_iscompatible_format(ast_channel_nativeformats(ast), frame->subclass.format) == AST_FORMAT_CMP_NOT_EQUAL) {
-			struct ast_str *codec_buf = ast_str_alloca(64);
+			struct ast_str *codec_buf = ast_str_alloca(AST_FORMAT_CAP_NAMES_LEN);
 
 			ast_log(LOG_WARNING,
 				"Asked to transmit frame type %s, while native formats is %s (read/write = %s/%s)\n",

@@ -24,6 +24,9 @@
 ;        SIP/devicename/extension
 ;        SIP/devicename/extension/IPorHost
 ;        SIP/username@domain//IPorHost
+; And to alter the To: or the From: header, you can additionally append
+; the following to any of the above strings:
+;        [![touser[@todomain]][![fromuser][@fromdomain]]]
 ;
 ;
 ; Devicename
@@ -56,6 +59,14 @@
 ; exclamation mark after the dial string, like
 ;
 ;         SIP/sales@mysipproxy!sales@edvina.net
+;
+; (Specifying only @todomain without touser will create an invalid SIP
+; request.)
+;
+; Similarly, you can specify the From header as well, after a second
+; exclamation mark:
+;
+;         SIP/customer@mysipproxy!!customersupport@wearespindle.com
 ;
 ; A new feature for 1.8 allows one to specify a host or IP address to use
 ; when routing the call. This is typically used in tandem with func_srv if
@@ -231,6 +242,10 @@ tcpbindaddr=0.0.0.0             ; IP address for TCP server to bind to (0.0.0.0 
 ;tcpauthlimit = 100             ; tcpauthlimit specifies the maximum number of
 				; unauthenticated sessions that will be allowed
                                 ; to connect at any given time. (default: 100)
+
+;websocket_enabled = true       ; Set to false to prevent chan_sip from listening to websockets.  This
+                                ; is neeeded when using chan_sip and res_pjsip_transport_websockets on
+                                ; the same system.
 
 ;websocket_write_timeout = 100  ; Default write timeout to set on websocket transports.
                                 ; This value may need to be adjusted for connections where
@@ -690,8 +705,12 @@ srvlookup=yes                   ; Enable DNS SRV lookups on outbound calls
 ;subscribecontext = default     ; Set a specific context for SUBSCRIBE requests
                                 ; Useful to limit subscriptions to local extensions
                                 ; Settable per peer/user also
-;notifyringing = no             ; Control whether subscriptions already INUSE get sent
-                                ; RINGING when another call is sent (default: yes)
+;notifyringing = no             ; Control when subscriptions get notified of ringing state.
+                                ; Specify 'no' to not send any ringing notifications.
+                                ; Specify 'yes' to always send ringing notifications (default).
+                                ; Specify 'notinuse' to only send ringing notifications for
+                                ; extensions that are not currently in use. This is useful as a
+                                ; visual indication of who is available to pick up an incoming call
 ;notifyhold = yes               ; Notify subscriptions on HOLD state (default: no)
                                 ; Turning on notifyringing and notifyhold will add a lot
                                 ; more database transactions if you are using realtime.
@@ -767,7 +786,7 @@ srvlookup=yes                   ; Enable DNS SRV lookups on outbound calls
 ; A similar effect can be achieved by adding a "callbackextension" option in a peer section.
 ; this is equivalent to having the following line in the general section:
 ;
-;        register => username:secret@host/callbackextension
+;        register => fromuser:secret:username@host/callbackextension
 ;
 ; and more readable because you don't have to write the parameters in two places
 ; (note that the "port" is ignored - this is a bug that should be fixed).
@@ -1490,7 +1509,6 @@ srvlookup=yes                   ; Enable DNS SRV lookups on outbound calls
 ;allow=ulaw
 ;allow=alaw
 ;mailbox=1234@default,1233@default ; Subscribe to status of multiple mailboxes
-;registertrying=yes              ; Send a 100 Trying when the device registers.
 
 ;[snom]
 ;type=friend                     ; Friends place calls and receive calls

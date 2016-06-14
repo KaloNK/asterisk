@@ -142,6 +142,33 @@ ASTERISK_REGISTER_FILE()
 			</see-also>
 		</managerEventInstance>
 	</managerEvent>
+	<managerEvent language="en_US" name="DialState">
+		<managerEventInstance class="EVENT_FLAG_CALL">
+			<synopsis>Raised when dial status has changed.</synopsis>
+			<syntax>
+				<channel_snapshot/>
+				<channel_snapshot prefix="Dest"/>
+				<parameter name="DialStatus">
+					<para> The new state of the outbound dial attempt.</para>
+					<enumlist>
+						<enum name="RINGING">
+							<para>The outbound channel is ringing.</para>
+						</enum>
+						<enum name="PROCEEDING">
+							<para>The call to the outbound channel is proceeding.</para>
+						</enum>
+						<enum name="PROGRESS">
+							<para>Progress has been received on the outbound channel.</para>
+						</enum>
+					</enumlist>
+				</parameter>
+				<parameter name="Forward" required="false">
+					<para>If the call was forwarded, where the call was
+					forwarded to.</para>
+				</parameter>
+			</syntax>
+		</managerEventInstance>
+	</managerEvent>
 	<managerEvent language="en_US" name="DialEnd">
 		<managerEventInstance class="EVENT_FLAG_CALL">
 			<synopsis>Raised when a dial action has completed.</synopsis>
@@ -697,11 +724,16 @@ static void channel_hangup_request_cb(void *data,
 	struct stasis_message *message)
 {
 	struct ast_channel_blob *obj = stasis_message_data(message);
-	RAII_VAR(struct ast_str *, extra, NULL, ast_free);
-	RAII_VAR(struct ast_str *, channel_event_string, NULL, ast_free);
+	struct ast_str *extra;
+	struct ast_str *channel_event_string;
 	struct ast_json *cause;
 	int is_soft;
 	char *manager_event = "HangupRequest";
+
+	if (!obj->snapshot) {
+		/* No snapshot?  Likely an earlier allocation failure creating it. */
+		return;
+	}
 
 	extra = ast_str_create(20);
 	if (!extra) {
@@ -709,16 +741,16 @@ static void channel_hangup_request_cb(void *data,
 	}
 
 	channel_event_string = ast_manager_build_channel_state_string(obj->snapshot);
-
 	if (!channel_event_string) {
+		ast_free(extra);
 		return;
 	}
 
 	cause = ast_json_object_get(obj->blob, "cause");
 	if (cause) {
 		ast_str_append(&extra, 0,
-			       "Cause: %jd\r\n",
-			       ast_json_integer_get(cause));
+			"Cause: %jd\r\n",
+			ast_json_integer_get(cause));
 	}
 
 	is_soft = ast_json_is_true(ast_json_object_get(obj->blob, "soft"));
@@ -727,9 +759,12 @@ static void channel_hangup_request_cb(void *data,
 	}
 
 	manager_event(EVENT_FLAG_CALL, manager_event,
-		      "%s%s",
-		      ast_str_buffer(channel_event_string),
-		      ast_str_buffer(extra));
+		"%s%s",
+		ast_str_buffer(channel_event_string),
+		ast_str_buffer(extra));
+
+	ast_free(channel_event_string);
+	ast_free(extra);
 }
 
 static void channel_chanspy_stop_cb(void *data, struct stasis_subscription *sub,
@@ -1026,6 +1061,13 @@ static void channel_monitor_stop_cb(void *data, struct stasis_subscription *sub,
 	publish_basic_channel_event("MonitorStop", EVENT_FLAG_CALL, payload->snapshot);
 }
 
+static int dial_status_end(const char *dialstatus)
+{
+	return (strcmp(dialstatus, "RINGING") &&
+			strcmp(dialstatus, "PROCEEDING") &&
+			strcmp(dialstatus, "PROGRESS"));
+}
+
 /*!
  * \brief Callback processing messages for channel dialing
  */
@@ -1069,7 +1111,7 @@ static void channel_dial_cb(void *data, struct stasis_subscription *sub,
 	} else {
 		int forwarded = !ast_strlen_zero(forward);
 
-		manager_event(EVENT_FLAG_CALL, "DialEnd",
+		manager_event(EVENT_FLAG_CALL, dial_status_end(dialstatus) ? "DialEnd" : "DialState",
 				"%s"
 				"%s"
 				"%s%s%s"

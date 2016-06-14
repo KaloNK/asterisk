@@ -188,6 +188,8 @@ struct ast_rtp_instance {
 	struct ast_rtp_glue *glue;
 	/*! SRTP info associated with the instance */
 	struct ast_srtp *srtp;
+	/*! SRTP info dedicated for RTCP associated with the instance */
+	struct ast_srtp *rtcp_srtp;
 	/*! Channel unique ID */
 	char channel_uniqueid[AST_MAX_UNIQUEID];
 	/*! Time of last packet sent */
@@ -362,6 +364,10 @@ static void instance_destructor(void *obj)
 
 	if (instance->srtp) {
 		res_srtp->destroy(instance->srtp);
+	}
+
+	if (instance->rtcp_srtp) {
+		res_srtp->destroy(instance->rtcp_srtp);
 	}
 
 	ast_rtp_codecs_payloads_destroy(&instance->codecs);
@@ -973,9 +979,13 @@ int ast_rtp_codecs_payloads_set_rtpmap_type_rate(struct ast_rtp_codecs *codecs, 
 		if (t->payload_type.asterisk_format
 			&& ast_format_cmp(t->payload_type.format, ast_format_g726) == AST_FORMAT_CMP_EQUAL
 			&& (options & AST_RTP_OPT_G726_NONSTANDARD)) {
-			new_type->format = ao2_bump(ast_format_g726_aal2);
+			new_type->format = ast_format_g726_aal2;
 		} else {
-			new_type->format = ao2_bump(t->payload_type.format);
+			new_type->format = t->payload_type.format;
+		}
+		if (new_type->format) {
+			/* SDP parsing automatically increases the reference count */
+			new_type->format = ast_format_parse_sdp_fmtp(new_type->format, "");
 		}
 
 		if (pt < AST_VECTOR_SIZE(&codecs->payload_mapping_tx)) {
@@ -2048,29 +2058,38 @@ int ast_rtp_engine_srtp_is_registered(void)
 	return res_srtp && res_srtp_policy;
 }
 
-int ast_rtp_instance_add_srtp_policy(struct ast_rtp_instance *instance, struct ast_srtp_policy *remote_policy, struct ast_srtp_policy *local_policy)
+int ast_rtp_instance_add_srtp_policy(struct ast_rtp_instance *instance, struct ast_srtp_policy *remote_policy, struct ast_srtp_policy *local_policy, int rtcp)
 {
 	int res = 0;
+	struct ast_srtp **srtp;
 
 	if (!res_srtp) {
 		return -1;
 	}
 
-	if (!instance->srtp) {
-		res = res_srtp->create(&instance->srtp, instance, remote_policy);
+
+	srtp = rtcp ? &instance->rtcp_srtp : &instance->srtp;
+
+	if (!*srtp) {
+		res = res_srtp->create(srtp, instance, remote_policy);
 	} else {
-		res = res_srtp->replace(&instance->srtp, instance, remote_policy);
+		res = res_srtp->replace(srtp, instance, remote_policy);
 	}
 	if (!res) {
-		res = res_srtp->add_stream(instance->srtp, local_policy);
+		res = res_srtp->add_stream(*srtp, local_policy);
 	}
 
 	return res;
 }
 
-struct ast_srtp *ast_rtp_instance_get_srtp(struct ast_rtp_instance *instance)
+struct ast_srtp *ast_rtp_instance_get_srtp(struct ast_rtp_instance *instance, int rtcp)
 {
-	return instance->srtp;
+	if (rtcp && instance->rtcp_srtp) {
+		return instance->rtcp_srtp;
+	}
+	else {
+		return instance->srtp;
+	}
 }
 
 int ast_rtp_instance_sendcng(struct ast_rtp_instance *instance, int level)
@@ -2114,18 +2133,34 @@ int ast_rtp_dtls_cfg_parse(struct ast_rtp_dtls_cfg *dtls_cfg, const char *name, 
 		}
 	} else if (!strcasecmp(name, "dtlscertfile")) {
 		ast_free(dtls_cfg->certfile);
+		if (!ast_strlen_zero(value) && !ast_file_is_readable(value)) {
+			ast_log(LOG_ERROR, "%s file %s does not exist or is not readable\n", name, value);
+			return -1;
+		}
 		dtls_cfg->certfile = ast_strdup(value);
 	} else if (!strcasecmp(name, "dtlsprivatekey")) {
 		ast_free(dtls_cfg->pvtfile);
+		if (!ast_strlen_zero(value) && !ast_file_is_readable(value)) {
+			ast_log(LOG_ERROR, "%s file %s does not exist or is not readable\n", name, value);
+			return -1;
+		}
 		dtls_cfg->pvtfile = ast_strdup(value);
 	} else if (!strcasecmp(name, "dtlscipher")) {
 		ast_free(dtls_cfg->cipher);
 		dtls_cfg->cipher = ast_strdup(value);
 	} else if (!strcasecmp(name, "dtlscafile")) {
 		ast_free(dtls_cfg->cafile);
+		if (!ast_strlen_zero(value) && !ast_file_is_readable(value)) {
+			ast_log(LOG_ERROR, "%s file %s does not exist or is not readable\n", name, value);
+			return -1;
+		}
 		dtls_cfg->cafile = ast_strdup(value);
 	} else if (!strcasecmp(name, "dtlscapath") || !strcasecmp(name, "dtlscadir")) {
 		ast_free(dtls_cfg->capath);
+		if (!ast_strlen_zero(value) && !ast_file_is_readable(value)) {
+			ast_log(LOG_ERROR, "%s file %s does not exist or is not readable\n", name, value);
+			return -1;
+		}
 		dtls_cfg->capath = ast_strdup(value);
 	} else if (!strcasecmp(name, "dtlssetup")) {
 		if (!strcasecmp(value, "active")) {
@@ -2473,12 +2508,12 @@ static struct ast_json *rtcp_report_to_json(struct stasis_message *msg,
 		}
 	}
 
-	json_rtcp_report = ast_json_pack("{s: i, s: i, s: i, s: O, s: O}",
+	json_rtcp_report = ast_json_pack("{s: i, s: i, s: i, s: o, s: o}",
 			"ssrc", payload->report->ssrc,
 			"type", payload->report->type,
 			"report_count", payload->report->reception_report_count,
-			"sender_information", json_rtcp_sender_info ? json_rtcp_sender_info : ast_json_null(),
-			"report_blocks", json_rtcp_report_blocks);
+			"sender_information", json_rtcp_sender_info ? ast_json_ref(json_rtcp_sender_info) : ast_json_ref(ast_json_null()),
+			"report_blocks", ast_json_ref(json_rtcp_report_blocks));
 	if (!json_rtcp_report) {
 		return NULL;
 	}
@@ -2490,10 +2525,10 @@ static struct ast_json *rtcp_report_to_json(struct stasis_message *msg,
 		}
 	}
 
-	return ast_json_pack("{s: O, s: O, s: O}",
-		"channel", payload->snapshot ? json_channel : ast_json_null(),
-		"rtcp_report", json_rtcp_report,
-		"blob", payload->blob);
+	return ast_json_pack("{s: o, s: o, s: o}",
+		"channel", payload->snapshot ? ast_json_ref(json_channel) : ast_json_ref(ast_json_null()),
+		"rtcp_report", ast_json_ref(json_rtcp_report),
+		"blob", ast_json_deep_copy(payload->blob));
 }
 
 static void rtp_rtcp_report_dtor(void *obj)

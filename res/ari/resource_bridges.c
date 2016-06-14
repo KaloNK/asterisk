@@ -296,10 +296,11 @@ static void *bridge_channel_control_thread(void *data)
 	thread_data = NULL;
 
 	stasis_app_control_execute_until_exhausted(bridge_channel, control);
+	stasis_app_control_flush_queue(control);
 
-	ast_hangup(bridge_channel);
-	ao2_cleanup(control);
 	stasis_forward_cancel(forward);
+	ao2_cleanup(control);
+	ast_hangup(bridge_channel);
 	return NULL;
 }
 
@@ -331,7 +332,8 @@ static struct ast_channel *prepare_bridge_media_channel(const char *type)
  * \brief Performs common setup for a bridge playback operation
  * with both new controls and when existing controls are  found.
  *
- * \param args_media media string split from arguments
+ * \param args_media medias to play
+ * \param args_media_count number of media items in \c media
  * \param args_lang language string split from arguments
  * \param args_offset_ms milliseconds offset split from arguments
  * \param args_playback_id string to use for playback split from
@@ -345,7 +347,8 @@ static struct ast_channel *prepare_bridge_media_channel(const char *type)
  * \retval -1 operation failed
  * \retval operation was successful
  */
-static int ari_bridges_play_helper(const char *args_media,
+static int ari_bridges_play_helper(const char **args_media,
+	size_t args_media_count,
 	const char *args_lang,
 	int args_offset_ms,
 	int args_skipms,
@@ -370,8 +373,8 @@ static int ari_bridges_play_helper(const char *args_media,
 
 	language = S_OR(args_lang, snapshot->language);
 
-	playback = stasis_app_control_play_uri(control, args_media, language,
-		bridge->uniqueid, STASIS_PLAYBACK_TARGET_BRIDGE, args_skipms,
+	playback = stasis_app_control_play_uri(control, args_media, args_media_count,
+		language, bridge->uniqueid, STASIS_PLAYBACK_TARGET_BRIDGE, args_skipms,
 		args_offset_ms, args_playback_id);
 
 	if (!playback) {
@@ -379,7 +382,7 @@ static int ari_bridges_play_helper(const char *args_media,
 		return -1;
 	}
 
-	if (ast_asprintf(playback_url, "/playback/%s",
+	if (ast_asprintf(playback_url, "/playbacks/%s",
 			stasis_app_playback_get_id(playback)) == -1) {
 		playback_url = NULL;
 		ast_ari_response_alloc_failed(response);
@@ -395,7 +398,8 @@ static int ari_bridges_play_helper(const char *args_media,
 	return 0;
 }
 
-static void ari_bridges_play_new(const char *args_media,
+static void ari_bridges_play_new(const char **args_media,
+	size_t args_media_count,
 	const char *args_lang,
 	int args_offset_ms,
 	int args_skipms,
@@ -448,9 +452,9 @@ static void ari_bridges_play_new(const char *args_media,
 	}
 
 	ao2_lock(control);
-	if (ari_bridges_play_helper(args_media, args_lang, args_offset_ms,
-			args_skipms, args_playback_id, response, bridge, control,
-			&json, &playback_url)) {
+	if (ari_bridges_play_helper(args_media, args_media_count, args_lang,
+			args_offset_ms, args_skipms, args_playback_id, response, bridge,
+			control, &json, &playback_url)) {
 		ao2_unlock(control);
 		return;
 	}
@@ -496,7 +500,8 @@ enum play_found_result {
  * \brief Performs common setup for a bridge playback operation
  * with both new controls and when existing controls are  found.
  *
- * \param args_media media string split from arguments
+ * \param args_media medias to play
+ * \param args_media_count number of media items in \c media
  * \param args_lang language string split from arguments
  * \param args_offset_ms milliseconds offset split from arguments
  * \param args_playback_id string to use for playback split from
@@ -510,7 +515,8 @@ enum play_found_result {
  * \retval PLAY_FOUND_CHANNEL_UNAVAILABLE The operation failed because
  * the channel requested to playback with is breaking down.
  */
-static enum play_found_result ari_bridges_play_found(const char *args_media,
+static enum play_found_result ari_bridges_play_found(const char **args_media,
+	size_t args_media_count,
 	const char *args_lang,
 	int args_offset_ms,
 	int args_skipms,
@@ -526,9 +532,7 @@ static enum play_found_result ari_bridges_play_found(const char *args_media,
 
 	control = stasis_app_control_find_by_channel(play_channel);
 	if (!control) {
-		ast_ari_response_error(
-			response, 500, "Internal Error", "Failed to get control snapshot");
-		return PLAY_FOUND_FAILURE;
+		return PLAY_FOUND_CHANNEL_UNAVAILABLE;
 	}
 
 	ao2_lock(control);
@@ -538,9 +542,9 @@ static enum play_found_result ari_bridges_play_found(const char *args_media,
 		return PLAY_FOUND_CHANNEL_UNAVAILABLE;
 	}
 
-	if (ari_bridges_play_helper(args_media, args_lang, args_offset_ms,
-			args_skipms, args_playback_id, response, bridge, control,
-			&json, &playback_url)) {
+	if (ari_bridges_play_helper(args_media, args_media_count,
+			args_lang, args_offset_ms, args_skipms, args_playback_id,
+			response, bridge, control, &json, &playback_url)) {
 		ao2_unlock(control);
 		return PLAY_FOUND_FAILURE;
 	}
@@ -552,7 +556,8 @@ static enum play_found_result ari_bridges_play_found(const char *args_media,
 
 static void ari_bridges_handle_play(
 	const char *args_bridge_id,
-	const char *args_media,
+	const char **args_media,
+	size_t args_media_count,
 	const char *args_lang,
 	int args_offset_ms,
 	int args_skipms,
@@ -575,15 +580,15 @@ static void ari_bridges_handle_play(
 		 * that will work or else there isn't a channel for this bridge anymore,
 		 * in which case we'll revert to ari_bridges_play_new.
 		 */
-		if (ari_bridges_play_found(args_media, args_lang, args_offset_ms,
-				args_skipms, args_playback_id, response,bridge,
+		if (ari_bridges_play_found(args_media, args_media_count, args_lang,
+				args_offset_ms, args_skipms, args_playback_id, response,bridge,
 				play_channel) == PLAY_FOUND_CHANNEL_UNAVAILABLE) {
 			continue;
 		}
 		return;
 	}
 
-	ari_bridges_play_new(args_media, args_lang, args_offset_ms,
+	ari_bridges_play_new(args_media, args_media_count, args_lang, args_offset_ms,
 		args_skipms, args_playback_id, response, bridge);
 }
 
@@ -594,6 +599,7 @@ void ast_ari_bridges_play(struct ast_variable *headers,
 {
 	ari_bridges_handle_play(args->bridge_id,
 	args->media,
+	args->media_count,
 	args->lang,
 	args->offsetms,
 	args->skipms,
@@ -607,6 +613,7 @@ void ast_ari_bridges_play_with_id(struct ast_variable *headers,
 {
 	ari_bridges_handle_play(args->bridge_id,
 	args->media,
+	args->media_count,
 	args->lang,
 	args->offsetms,
 	args->skipms,

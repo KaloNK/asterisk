@@ -58,10 +58,8 @@ ASTERISK_REGISTER_FILE()
 
 #if defined(__NetBSD__) || defined(__FreeBSD__)
 #include <pthread.h>
-#include <signal.h>
-#else
-#include <sys/signal.h>
 #endif
+#include <signal.h>
 #include <sys/stat.h>
 #include <math.h>
 
@@ -4704,7 +4702,7 @@ static int drc_sample(int sample, float drc)
 	neg = (sample < 0 ? -1 : 1);
 	steep = drc*sample;
 	shallow = neg*(max-max/drc)+(float)sample/drc;
-	if (abs(steep) < abs(shallow)) {
+	if (fabsf(steep) < fabsf(shallow)) {
 		sample = steep;
 	}
 	else {
@@ -18830,6 +18828,11 @@ static int process_dahdi(struct dahdi_chan_conf *confp, const char *cat, struct 
 				if (element_count % 2 == 1) {
 					ast_log(LOG_ERROR, "Must be a silence duration for each ring duration: %s at line %d.\n", original_args, v->lineno);
 					cadence_is_ok = 0;
+				}
+
+				/* This check is only needed to satisfy the compiler that element_count can't cause an out of bounds */
+				if (element_count >= ARRAY_LEN(c)) {
+					element_count = ARRAY_LEN(c) - 1;
 				}
 
 				/* Ring cadences cannot be negative */

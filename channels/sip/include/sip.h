@@ -211,7 +211,7 @@
 #define DEFAULT_ALLOW_EXT_DOM  TRUE    /*!< Allow external domains */
 #define DEFAULT_REALM          "asterisk" /*!< Realm for HTTP digest authentication */
 #define DEFAULT_DOMAINSASREALM FALSE    /*!< Use the domain option to guess the realm for registration and invite requests */
-#define DEFAULT_NOTIFYRINGING  TRUE     /*!< Notify devicestate system on ringing state */
+#define DEFAULT_NOTIFYRINGING  NOTIFYRINGING_ENABLED /*!< Notify devicestate system on ringing state */
 #define DEFAULT_NOTIFYCID      DISABLED	/*!< Include CID with ringing notifications */
 #define DEFAULT_PEDANTIC       TRUE     /*!< Follow SIP standards for dialog matching */
 #define DEFAULT_AUTOCREATEPEER AUTOPEERS_DISABLED    /*!< Don't create peers automagically */
@@ -547,8 +547,7 @@ enum sipregistrystate {
 		 * recover (not sure how correctly).
 		 */
 
-	REG_STATE_TIMEOUT,	/*!< Registration timed out
-		* \note XXX unused */
+	REG_STATE_TIMEOUT,	/*!< Registration about to expire, renewing registration */
 
 	REG_STATE_NOAUTH,	/*!< We have no accepted credentials
 		 * \note fatal - no chance to proceed */
@@ -620,6 +619,13 @@ enum sipmethod {
 	SIP_CANCEL,     /*!< Cancel an INVITE */
 	SIP_PUBLISH,    /*!< Not supported in Asterisk */
 	SIP_PING,       /*!< Not supported at all, no standard but still implemented out there */
+};
+
+/*! \brief Setting for the 'notifyringing' option, see sip.conf.sample for details. */
+enum notifyringing_setting {
+	NOTIFYRINGING_DISABLED = 0,
+	NOTIFYRINGING_ENABLED = 1,
+	NOTIFYRINGING_NOTINUSE = 2,
 };
 
 /*! \brief Settings for the 'notifycid' option, see sip.conf.sample for details. */
@@ -774,6 +780,7 @@ struct sip_settings {
 	int tcp_enabled;
 	int default_max_forwards;    /*!< Default max forwards (SIP Anti-loop) */
 	int websocket_write_timeout; /*!< Socket write timeout for websocket transports, in ms */
+	int websocket_enabled;       /*!< Are websockets enabled? */
 };
 
 struct ast_websocket;
@@ -951,7 +958,6 @@ struct sip_st_dlg {
 	int st_cached_max_se;              /*!< Session-Timers cached Session-Expires */
 	enum st_mode st_cached_mode;       /*!< Session-Timers cached M.O. */
 	enum st_refresher st_cached_ref;   /*!< Session-Timers session refresher */
-	unsigned char quit_flag:1;         /*!< Stop trying to lock; just quit */
 };
 
 

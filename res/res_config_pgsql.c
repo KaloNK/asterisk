@@ -1,7 +1,7 @@
 /*
  * Asterisk -- An open source telephony toolkit.
  *
- * Copyright (C) 1999-2010, Digium, Inc.
+ * Copyright (C) 1999 - 2016, Digium, Inc.
  *
  * Manuel Guesdon <mguesdon@oxymium.net> - PostgreSQL RealTime Driver Author/Adaptor
  * Mark Spencer <markster@digium.com>  - Asterisk Author
@@ -303,7 +303,9 @@ static struct tables *find_table(const char *database, const char *orig_tablenam
 		ast_str_set(&sql, 0, "SELECT a.attname, t.typname, a.attlen, a.attnotnull, d.adsrc, a.atttypmod FROM pg_class c, pg_type t, pg_attribute a LEFT OUTER JOIN pg_attrdef d ON a.atthasdef AND d.adrelid = a.attrelid AND d.adnum = a.attnum WHERE c.oid = a.attrelid AND a.atttypid = t.oid AND (a.attnum > 0) AND c.relname = '%s' ORDER BY c.relname, attnum", tablename);
 	}
 
+	ast_mutex_lock(&pgsql_lock);
 	exec_result = pgsql_exec(database, orig_tablename, ast_str_buffer(sql), &result);
+	ast_mutex_unlock(&pgsql_lock);
 	ast_debug(1, "Query of table structure complete.  Now retrieving results.\n");
 	if (exec_result != 0) {
 		ast_log(LOG_ERROR, "Failed to query database columns for table %s\n", orig_tablename);
@@ -1321,15 +1323,15 @@ static int unload_module(void)
 	ast_cli_unregister_multiple(cli_realtime, ARRAY_LEN(cli_realtime));
 	ast_config_engine_deregister(&pgsql_engine);
 
+	/* Unlock so something else can destroy the lock. */
+	ast_mutex_unlock(&pgsql_lock);
+
 	/* Destroy cached table info */
 	AST_LIST_LOCK(&psql_tables);
 	while ((table = AST_LIST_REMOVE_HEAD(&psql_tables, list))) {
 		destroy_table(table);
 	}
 	AST_LIST_UNLOCK(&psql_tables);
-
-	/* Unlock so something else can destroy the lock. */
-	ast_mutex_unlock(&pgsql_lock);
 
 	return 0;
 }
@@ -1349,6 +1351,9 @@ static int parse_config(int is_reload)
 
 	config = ast_config_load(RES_CONFIG_PGSQL_CONF, config_flags);
 	if (config == CONFIG_STATUS_FILEUNCHANGED) {
+		if (is_reload && pgsqlConn && PQstatus(pgsqlConn) != CONNECTION_OK) {
+			ast_log(LOG_WARNING,  "PostgreSQL RealTime: Not connected\n");
+		}
 		return 0;
 	}
 
@@ -1569,7 +1574,9 @@ static char *handle_cli_realtime_pgsql_cache(struct ast_cli_entry *e, int cmd, s
 
 static char *handle_cli_realtime_pgsql_status(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a)
 {
-	char status[256], credentials[100] = "";
+	char connection_info[256];
+	char credentials[100] = "";
+	char buf[376]; /* 256+100+"Connected to "+" for "+NULL */
 	int ctimesec = time(NULL) - connect_time;
 
 	switch (cmd) {
@@ -1586,36 +1593,23 @@ static char *handle_cli_realtime_pgsql_status(struct ast_cli_entry *e, int cmd, 
 	if (a->argc != 4)
 		return CLI_SHOWUSAGE;
 
+	if (!ast_strlen_zero(dbhost))
+		snprintf(connection_info, sizeof(connection_info), "%s@%s, port %d", dbname, dbhost, dbport);
+	else if (!ast_strlen_zero(dbsock))
+		snprintf(connection_info, sizeof(connection_info), "%s on socket file %s", dbname, dbsock);
+	else
+		snprintf(connection_info, sizeof(connection_info), "%s@%s", dbname, dbhost);
+
+	if (!ast_strlen_zero(dbuser))
+		snprintf(credentials, sizeof(credentials), " with username %s", dbuser);
+
+
 	if (pgsqlConn && PQstatus(pgsqlConn) == CONNECTION_OK) {
-		if (!ast_strlen_zero(dbhost))
-			snprintf(status, sizeof(status), "Connected to %s@%s, port %d", dbname, dbhost, dbport);
-		else if (!ast_strlen_zero(dbsock))
-			snprintf(status, sizeof(status), "Connected to %s on socket file %s", dbname, dbsock);
-		else
-			snprintf(status, sizeof(status), "Connected to %s@%s", dbname, dbhost);
-
-		if (!ast_strlen_zero(dbuser))
-			snprintf(credentials, sizeof(credentials), " with username %s", dbuser);
-
-		if (ctimesec > 31536000)
-			ast_cli(a->fd, "%s%s for %d years, %d days, %d hours, %d minutes, %d seconds.\n",
-					status, credentials, ctimesec / 31536000, (ctimesec % 31536000) / 86400,
-					(ctimesec % 86400) / 3600, (ctimesec % 3600) / 60, ctimesec % 60);
-		else if (ctimesec > 86400)
-			ast_cli(a->fd, "%s%s for %d days, %d hours, %d minutes, %d seconds.\n", status,
-					credentials, ctimesec / 86400, (ctimesec % 86400) / 3600, (ctimesec % 3600) / 60,
-					ctimesec % 60);
-		else if (ctimesec > 3600)
-			ast_cli(a->fd, "%s%s for %d hours, %d minutes, %d seconds.\n", status, credentials,
-					ctimesec / 3600, (ctimesec % 3600) / 60, ctimesec % 60);
-		else if (ctimesec > 60)
-			ast_cli(a->fd, "%s%s for %d minutes, %d seconds.\n", status, credentials, ctimesec / 60,
-					ctimesec % 60);
-		else
-			ast_cli(a->fd, "%s%s for %d seconds.\n", status, credentials, ctimesec);
-
+		snprintf(buf, sizeof(buf), "Connected to %s%s for ", connection_info, credentials);
+		ast_cli_print_timestr_fromseconds(a->fd, ctimesec, buf);
 		return CLI_SUCCESS;
 	} else {
+		ast_cli(a->fd, "Unable to connect %s%s\n", connection_info, credentials);
 		return CLI_FAILURE;
 	}
 }

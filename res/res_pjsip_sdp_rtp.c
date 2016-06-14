@@ -175,8 +175,15 @@ static int rtp_check_timeout(const void *data)
 static int create_rtp(struct ast_sip_session *session, struct ast_sip_session_media *session_media, unsigned int ipv6)
 {
 	struct ast_rtp_engine_ice *ice;
+	struct ast_sockaddr temp_media_address;
+	struct ast_sockaddr *media_address =  ipv6 ? &address_ipv6 : &address_ipv4;
 
-	if (!(session_media->rtp = ast_rtp_instance_new(session->endpoint->media.rtp.engine, sched, ipv6 ? &address_ipv6 : &address_ipv4, NULL))) {
+	if (session->endpoint->media.bind_rtp_to_media_address && !ast_strlen_zero(session->endpoint->media.address)) {
+		ast_sockaddr_parse(&temp_media_address, session->endpoint->media.address, 0);
+		media_address = &temp_media_address;
+	}
+
+	if (!(session_media->rtp = ast_rtp_instance_new(session->endpoint->media.rtp.engine, sched, media_address, NULL))) {
 		ast_log(LOG_ERROR, "Unable to create RTP instance using RTP engine '%s'\n", session->endpoint->media.rtp.engine);
 		return -1;
 	}
@@ -323,8 +330,8 @@ static int set_caps(struct ast_sip_session *session,
 	/* get the joint capabilities between peer and endpoint */
 	ast_format_cap_get_compatible(caps, peer, joint);
 	if (!ast_format_cap_count(joint)) {
-		struct ast_str *usbuf = ast_str_alloca(256);
-		struct ast_str *thembuf = ast_str_alloca(256);
+		struct ast_str *usbuf = ast_str_alloca(AST_FORMAT_CAP_NAMES_LEN);
+		struct ast_str *thembuf = ast_str_alloca(AST_FORMAT_CAP_NAMES_LEN);
 
 		ast_rtp_codecs_payloads_destroy(&codecs);
 		ast_log(LOG_NOTICE, "No joint capabilities for '%s' media stream between our configuration(%s) and incoming SDP(%s)\n",
@@ -396,8 +403,11 @@ static pjmedia_sdp_attr* generate_rtpmap_attr(struct ast_sip_session *session, p
 	rtpmap.pt = media->desc.fmt[media->desc.fmt_count - 1];
 	rtpmap.clock_rate = ast_rtp_lookup_sample_rate2(asterisk_format, format, code);
 	pj_strdup2(pool, &rtpmap.enc_name, ast_rtp_lookup_mime_subtype2(asterisk_format, format, code, options));
-	rtpmap.param.slen = 0;
-	rtpmap.param.ptr = NULL;
+	if (!pj_stricmp2(&rtpmap.enc_name, "opus")) {
+		pj_cstr(&rtpmap.param, "2");
+	} else {
+		pj_cstr(&rtpmap.param, NULL);
+	}
 
 	pjmedia_sdp_rtpmap_to_attr(pool, &rtpmap, &attr);
 
@@ -611,6 +621,9 @@ static enum ast_sip_session_media_encryption get_media_encryption_type(pj_str_t 
 
 	*optimistic = 0;
 
+	if (!transport_str) {
+		return AST_SIP_MEDIA_TRANSPORT_INVALID;
+	}
 	if (strstr(transport_str, "UDP/TLS")) {
 		return AST_SIP_MEDIA_ENCRYPT_DTLS;
 	} else if (strstr(transport_str, "SAVP")) {
@@ -1033,7 +1046,7 @@ static int create_outgoing_sdp_stream(struct ast_sip_session *session, struct as
 	static const pj_str_t STR_SENDRECV = { "sendrecv", 8 };
 	static const pj_str_t STR_SENDONLY = { "sendonly", 8 };
 	pjmedia_sdp_media *media;
-	char hostip[PJ_INET6_ADDRSTRLEN+2];
+	const char *hostip = NULL;
 	struct ast_sockaddr addr;
 	char tmp[512];
 	pj_str_t stmp;
@@ -1081,16 +1094,16 @@ static int create_outgoing_sdp_stream(struct ast_sip_session *session, struct as
 
 	/* Add connection level details */
 	if (direct_media_enabled) {
-		ast_copy_string(hostip, ast_sockaddr_stringify_fmt(&session_media->direct_media_addr, AST_SOCKADDR_STR_ADDR), sizeof(hostip));
+		hostip = ast_sockaddr_stringify_fmt(&session_media->direct_media_addr, AST_SOCKADDR_STR_ADDR);
 	} else if (ast_strlen_zero(session->endpoint->media.address)) {
-		pj_sockaddr localaddr;
-
-		if (pj_gethostip(session->endpoint->media.rtp.ipv6 ? pj_AF_INET6() : pj_AF_INET(), &localaddr)) {
-			return -1;
-		}
-		pj_sockaddr_print(&localaddr, hostip, sizeof(hostip), 2);
+		hostip = ast_sip_get_host_ip_string(session->endpoint->media.rtp.ipv6 ? pj_AF_INET6() : pj_AF_INET());
 	} else {
-		ast_copy_string(hostip, session->endpoint->media.address, sizeof(hostip));
+		hostip = session->endpoint->media.address;
+	}
+
+	if (ast_strlen_zero(hostip)) {
+		ast_log(LOG_ERROR, "No local host IP available for stream %s\n", session_media->stream_type);
+		return -1;
 	}
 
 	media->conn->net_type = STR_IN;
@@ -1314,6 +1327,7 @@ static int apply_negotiated_sdp_stream(struct ast_sip_session *session, struct a
 		 * a NAT. This way there won't be an awkward delay before media starts flowing in some
 		 * scenarios.
 		 */
+		AST_SCHED_DEL(sched, session_media->keepalive_sched_id);
 		session_media->keepalive_sched_id = ast_sched_add_variable(sched, 500, send_keepalive,
 			session_media, 1);
 	}
@@ -1346,11 +1360,12 @@ static int apply_negotiated_sdp_stream(struct ast_sip_session *session, struct a
 /*! \brief Function which updates the media stream with external media address, if applicable */
 static void change_outgoing_sdp_stream_media_address(pjsip_tx_data *tdata, struct pjmedia_sdp_media *stream, struct ast_sip_transport *transport)
 {
+	RAII_VAR(struct ast_sip_transport_state *, transport_state, ast_sip_get_transport_state(ast_sorcery_object_get_id(transport)), ao2_cleanup);
 	char host[NI_MAXHOST];
 	struct ast_sockaddr addr = { { 0, } };
 
 	/* If the stream has been rejected there will be no connection line */
-	if (!stream->conn) {
+	if (!stream->conn || !transport_state) {
 		return;
 	}
 
@@ -1358,20 +1373,30 @@ static void change_outgoing_sdp_stream_media_address(pjsip_tx_data *tdata, struc
 	ast_sockaddr_parse(&addr, host, PARSE_PORT_FORBID);
 
 	/* Is the address within the SDP inside the same network? */
-	if (ast_apply_ha(transport->localnet, &addr) == AST_SENSE_ALLOW) {
+	if (ast_apply_ha(transport_state->localnet, &addr) == AST_SENSE_ALLOW) {
 		return;
 	}
 
 	pj_strdup2(tdata->pool, &stream->conn->addr, transport->external_media_address);
 }
 
+/*! \brief Function which stops the RTP instance */
+static void stream_stop(struct ast_sip_session_media *session_media)
+{
+	if (!session_media->rtp) {
+		return;
+	}
+
+	AST_SCHED_DEL(sched, session_media->keepalive_sched_id);
+	AST_SCHED_DEL(sched, session_media->timeout_sched_id);
+	ast_rtp_instance_stop(session_media->rtp);
+}
+
 /*! \brief Function which destroys the RTP instance when session ends */
 static void stream_destroy(struct ast_sip_session_media *session_media)
 {
 	if (session_media->rtp) {
-		AST_SCHED_DEL(sched, session_media->keepalive_sched_id);
-		AST_SCHED_DEL(sched, session_media->timeout_sched_id);
-		ast_rtp_instance_stop(session_media->rtp);
+		stream_stop(session_media);
 		ast_rtp_instance_destroy(session_media->rtp);
 	}
 	session_media->rtp = NULL;
@@ -1384,6 +1409,7 @@ static struct ast_sip_session_sdp_handler audio_sdp_handler = {
 	.create_outgoing_sdp_stream = create_outgoing_sdp_stream,
 	.apply_negotiated_sdp_stream = apply_negotiated_sdp_stream,
 	.change_outgoing_sdp_stream_media_address = change_outgoing_sdp_stream_media_address,
+	.stream_stop = stream_stop,
 	.stream_destroy = stream_destroy,
 };
 
@@ -1394,6 +1420,7 @@ static struct ast_sip_session_sdp_handler video_sdp_handler = {
 	.create_outgoing_sdp_stream = create_outgoing_sdp_stream,
 	.apply_negotiated_sdp_stream = apply_negotiated_sdp_stream,
 	.change_outgoing_sdp_stream_media_address = change_outgoing_sdp_stream_media_address,
+	.stream_stop = stream_stop,
 	.stream_destroy = stream_destroy,
 };
 

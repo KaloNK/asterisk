@@ -695,6 +695,20 @@ int __ast_sorcery_object_register(struct ast_sorcery *sorcery, const char *type,
 	__ast_sorcery_object_register((sorcery), (type), 1, 1, (alloc), (transform), (apply))
 
 /*!
+ * \brief Set the high and low alert water marks of the sorcery object type.
+ * \since 13.10.0
+ *
+ * \param sorcery Pointer to a sorcery structure
+ * \param type Type of object
+ * \param low_water New queue low water mark. (-1 to set as 90% of high_water)
+ * \param high_water New queue high water mark.
+ *
+ * \retval 0 on success.
+ * \retval -1 on error (water marks not changed).
+ */
+int ast_sorcery_object_set_congestion_levels(struct ast_sorcery *sorcery, const char *type, long low_water, long high_water);
+
+/*!
  * \brief Set the copy handler for an object type
  *
  * \param sorcery Pointer to a sorcery structure
@@ -1151,6 +1165,7 @@ void *ast_sorcery_retrieve_by_id(const struct ast_sorcery *sorcery, const char *
 
 /*!
  * \brief Retrieve an object or multiple objects using specific fields
+ * \since 13.9.0
  *
  * \param sorcery Pointer to a sorcery structure
  * \param type Type of object to retrieve
@@ -1165,6 +1180,29 @@ void *ast_sorcery_retrieve_by_id(const struct ast_sorcery *sorcery, const char *
  *
  * \note If the AST_RETRIEVE_FLAG_ALL flag is used you may omit fields to retrieve all objects
  *       of the given type.
+ *
+ * \note The fields parameter can contain realtime-style expressions in variable->name.
+ *       All operators defined for ast_strings_match can be used except for regex as
+ *       there's no common support for regex in the realtime backends at this time.
+ *       If multiple variables are in the fields list, all must match for an object to
+ *       be returned.  See ast_strings_match for more information.
+ *
+ * Example:
+ *
+ * The following code can be significantly faster when a realtime backend is in use
+ * because the expression "qualify_frequency > 0" is passed to the database to limit
+ * the number of rows returned.
+ *
+ *  struct ast_variable *var = ast_variable_new("qualify_frequency >", "0", "");
+ *  struct ao2_container *aors;
+ *
+ *  if (!var) {
+ *  	return;
+ *  }
+ *
+ *  aors = ast_sorcery_retrieve_by_fields(ast_sip_get_sorcery(),
+ *      "aor", AST_RETRIEVE_FLAG_MULTIPLE, var);
+ *
  */
 void *ast_sorcery_retrieve_by_fields(const struct ast_sorcery *sorcery, const char *type, unsigned int flags, struct ast_variable *fields);
 

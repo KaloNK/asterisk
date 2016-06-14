@@ -93,14 +93,27 @@ static void format_cap_destroy(void *obj)
 	AST_VECTOR_FREE(&cap->preference_order);
 }
 
-static inline void format_cap_init(struct ast_format_cap *cap, enum ast_format_cap_flags flags)
+/*
+ * \brief Initialize values on an ast_format_cap
+ *
+ * \param cap ast_format_cap to initialize
+ * \param flags Unused.
+ * \retval 0 Success
+ * \retval -1 Failure
+ */
+static inline int format_cap_init(struct ast_format_cap *cap, enum ast_format_cap_flags flags)
 {
-	AST_VECTOR_INIT(&cap->formats, 0);
+	if (AST_VECTOR_INIT(&cap->formats, 0)) {
+		return -1;
+	}
 
 	/* TODO: Look at common usage of this and determine a good starting point */
-	AST_VECTOR_INIT(&cap->preference_order, 5);
+	if (AST_VECTOR_INIT(&cap->preference_order, 5)) {
+		return -1;
+	}
 
 	cap->framing = UINT_MAX;
+	return 0;
 }
 
 struct ast_format_cap *__ast_format_cap_alloc(enum ast_format_cap_flags flags,
@@ -114,7 +127,10 @@ struct ast_format_cap *__ast_format_cap_alloc(enum ast_format_cap_flags flags,
 		return NULL;
 	}
 
-	format_cap_init(cap, flags);
+	if (format_cap_init(cap, flags)) {
+		ao2_ref(cap, -1);
+		return NULL;
+	}
 
 	return cap;
 }
@@ -202,6 +218,7 @@ int ast_format_cap_append_by_type(struct ast_format_cap *cap, enum ast_media_typ
 
 	for (id = 1; id < ast_codec_get_max(); ++id) {
 		struct ast_codec *codec = ast_codec_get_by_id(id);
+		struct ast_codec *codec2 = NULL;
 		struct ast_format *format;
 		int res;
 
@@ -214,7 +231,22 @@ int ast_format_cap_append_by_type(struct ast_format_cap *cap, enum ast_media_typ
 			continue;
 		}
 
-		format = ast_format_create(codec);
+		format = ast_format_cache_get(codec->name);
+
+		if (format == ast_format_none) {
+			ao2_ref(format, -1);
+			ao2_ref(codec, -1);
+			continue;
+		}
+
+		if (format) {
+			codec2 = ast_format_get_codec(format);
+		}
+		if (codec != codec2) {
+			ao2_cleanup(format);
+			format = ast_format_create(codec);
+		}
+		ao2_cleanup(codec2);
 		ao2_ref(codec, -1);
 
 		if (!format) {
@@ -310,7 +342,7 @@ int ast_format_cap_update_by_allow_disallow(struct ast_format_cap *cap, const ch
 	}
 
 
-	while ((this = strsep(&parse, ",|"))) {
+	while ((this = ast_strip(strsep(&parse, ",|")))) {
 		int framems = 0;
 		struct ast_format *format = NULL;
 

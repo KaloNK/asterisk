@@ -254,12 +254,10 @@ static int dns_search_res(const char *dname, int rr_class, int rr_type,
 {
 
 	int ret = AST_DNS_SEARCH_FAILURE;
-	struct __res_state dns_state;
 
 	ast_mutex_lock(&res_lock);
 	res_init();
-	ret = res_search(&dns_state,
-	                 dname,
+	ret = res_search(dname,
 	                 rr_class,
 	                 rr_type,
 	                 dns_response,
@@ -475,14 +473,14 @@ static int dns_parse_answer_ex(void *context, int rr_class, int rr_type, unsigne
 		/* Skip over the records that do not have the same resource record class and type we care about */
 		if (ntohs(ans->class) == rr_class && ntohs(ans->rtype) == rr_type) {
 			/* Invoke the record handler callback to deliver the discovered record */
-			record_handler(context, answer, ntohs(ans->size), ans->ttl);
+			record_handler(context, answer, ntohs(ans->size), ntohl(ans->ttl));
 			/*At least one record was found */
 			ret = AST_DNS_SEARCH_SUCCESS;
 		}
 
 		/* Try and update the field to the next record, but ignore any errors that come
 		 * back because this may be the end of the line. */
-		pos = dns_advance_field(&answer, pos, res + ntohs(ans->size));
+		pos = dns_advance_field(&answer, pos, ntohs(ans->size));
 	}
 
 	return ret;
@@ -558,7 +556,7 @@ enum ast_dns_search_result ast_search_dns_ex(void *context, const char *dname, i
 	                                  sizeof(dns_response));
 
 	if (dns_response_len < 0) {
-		ast_log(LOG_ERROR, "DNS search failed for %s\n", dname);
+		ast_debug(1, "DNS search failed for %s\n", dname);
 		response_handler(context, (unsigned char *)"", 0, ns_r_nxdomain);
 		return AST_DNS_SEARCH_FAILURE;
 	}

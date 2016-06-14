@@ -289,6 +289,10 @@ void ast_bridge_channel_leave_bridge_nolock(struct ast_bridge_channel *bridge_ch
 
 	channel_set_cause(bridge_channel->chan, cause);
 
+	ast_channel_lock(bridge_channel->chan);
+	ast_bridge_vars_set(bridge_channel->chan, NULL, NULL);
+	ast_channel_unlock(bridge_channel->chan);
+
 	/* Change the state on the bridge channel */
 	bridge_channel->state = new_state;
 
@@ -633,6 +637,8 @@ void ast_bridge_channel_kick(struct ast_bridge_channel *bridge_channel, int caus
  */
 static int bridge_channel_write_frame(struct ast_bridge_channel *bridge_channel, struct ast_frame *frame)
 {
+	const struct ast_control_t38_parameters *t38_parameters;
+
 	ast_assert(frame->frametype != AST_FRAME_BRIDGE_ACTION_SYNC);
 
 	ast_bridge_channel_lock_bridge(bridge_channel);
@@ -659,6 +665,27 @@ static int bridge_channel_write_frame(struct ast_bridge_channel *bridge_channel,
 		 * We explicitly will not remember HOLD/UNHOLD frames because
 		 * things like attended transfers will handle them.
 		 */
+		switch (frame->subclass.integer) {
+		case AST_CONTROL_T38_PARAMETERS:
+			t38_parameters = frame->data.ptr;
+			switch (t38_parameters->request_response) {
+			case AST_T38_REQUEST_NEGOTIATE:
+			case AST_T38_NEGOTIATED:
+				bridge_channel->owed.t38_terminate = 1;
+				break;
+			case AST_T38_REQUEST_TERMINATE:
+			case AST_T38_TERMINATED:
+			case AST_T38_REFUSED:
+				bridge_channel->owed.t38_terminate = 0;
+				break;
+			default:
+				break;
+			}
+			break;
+		default:
+			break;
+		}
+		break;
 	default:
 		break;
 	}
@@ -669,6 +696,23 @@ static int bridge_channel_write_frame(struct ast_bridge_channel *bridge_channel,
 	 * support is added, claim successfully deferred.
 	 */
 	return 0;
+}
+
+/*!
+ * \internal
+ * \brief Cancel owed events by the channel to the bridge.
+ * \since 13.8.0
+ *
+ * \param bridge_channel Channel that owes events to the bridge.
+ *
+ * \note On entry, the bridge_channel->bridge is already locked.
+ *
+ * \return Nothing
+ */
+static void bridge_channel_cancel_owed_events(struct ast_bridge_channel *bridge_channel)
+{
+	bridge_channel->owed.dtmf_digit = '\0';
+	bridge_channel->owed.t38_terminate = 0;
 }
 
 void bridge_channel_settle_owed_events(struct ast_bridge *orig_bridge, struct ast_bridge_channel *bridge_channel)
@@ -688,6 +732,23 @@ void bridge_channel_settle_owed_events(struct ast_bridge *orig_bridge, struct as
 			bridge_channel->owed.dtmf_digit, orig_bridge->uniqueid,
 			ast_channel_name(bridge_channel->chan), frame.len);
 		bridge_channel->owed.dtmf_digit = '\0';
+		orig_bridge->technology->write(orig_bridge, NULL, &frame);
+	}
+	if (bridge_channel->owed.t38_terminate) {
+		struct ast_control_t38_parameters t38_parameters = {
+			.request_response = AST_T38_TERMINATED,
+		};
+		struct ast_frame frame = {
+			.frametype = AST_FRAME_CONTROL,
+			.subclass.integer = AST_CONTROL_T38_PARAMETERS,
+			.data.ptr = &t38_parameters,
+			.datalen = sizeof(t38_parameters),
+			.src = "Bridge channel owed T.38 terminate",
+		};
+
+		ast_debug(1, "T.38 terminate simulated to bridge %s because %s left.\n",
+			orig_bridge->uniqueid, ast_channel_name(bridge_channel->chan));
+		bridge_channel->owed.t38_terminate = 0;
 		orig_bridge->technology->write(orig_bridge, NULL, &frame);
 	}
 }
@@ -1914,6 +1975,13 @@ static void bridge_channel_handle_action(struct ast_bridge_channel *bridge_chann
 	default:
 		break;
 	}
+
+	/* While invoking an action it is possible for the channel to be hung up. So
+	 * that the bridge respects this we check here and if hung up kick it out.
+	 */
+	if (bridge_channel->chan && ast_check_hangup_locked(bridge_channel->chan)) {
+		ast_bridge_channel_kick(bridge_channel, 0);
+	}
 }
 
 /*!
@@ -2026,7 +2094,7 @@ void bridge_channel_internal_pull(struct ast_bridge_channel *bridge_channel)
 	ast_bridge_publish_leave(bridge, bridge_channel->chan);
 }
 
-int bridge_channel_internal_push(struct ast_bridge_channel *bridge_channel)
+int bridge_channel_internal_push_full(struct ast_bridge_channel *bridge_channel, int optimized)
 {
 	struct ast_bridge *bridge = bridge_channel->bridge;
 	struct ast_bridge_channel *swap;
@@ -2049,12 +2117,13 @@ int bridge_channel_internal_push(struct ast_bridge_channel *bridge_channel)
 	if (bridge->dissolved
 		|| bridge_channel->state != BRIDGE_CHANNEL_STATE_WAIT
 		|| (swap && swap->state != BRIDGE_CHANNEL_STATE_WAIT)
-		|| bridge->v_table->push(bridge, bridge_channel, swap)
-		|| ast_bridge_channel_establish_roles(bridge_channel)) {
+		|| bridge->v_table->push(bridge, bridge_channel, swap)) {
 		ast_debug(1, "Bridge %s: pushing %p(%s) into bridge failed\n",
 			bridge->uniqueid, bridge_channel, ast_channel_name(bridge_channel->chan));
 		return -1;
 	}
+
+	ast_bridge_channel_establish_roles(bridge_channel);
 
 	if (swap) {
 		int dissolve = ast_test_flag(&bridge->feature_flags, AST_BRIDGE_FLAG_DISSOLVE_EMPTY);
@@ -2062,6 +2131,9 @@ int bridge_channel_internal_push(struct ast_bridge_channel *bridge_channel)
 		/* This flag is cleared so the act of this channel leaving does not cause it to dissolve if need be */
 		ast_clear_flag(&bridge->feature_flags, AST_BRIDGE_FLAG_DISSOLVE_EMPTY);
 
+		if (optimized) {
+			bridge_channel_cancel_owed_events(swap);
+		}
 		ast_bridge_channel_leave_bridge(swap, BRIDGE_CHANNEL_STATE_END_NO_DISSOLVE, 0);
 		bridge_channel_internal_pull(swap);
 
@@ -2090,15 +2162,21 @@ int bridge_channel_internal_push(struct ast_bridge_channel *bridge_channel)
 
 	ast_bridge_publish_enter(bridge, bridge_channel->chan, swap ? swap->chan : NULL);
 
-	/* Clear any BLINDTRANSFER and ATTENDEDTRANSFER since the transfer has completed. */
+	/* Clear any BLINDTRANSFER,ATTENDEDTRANSFER and FORWARDERNAME since the transfer has completed. */
 	pbx_builtin_setvar_helper(bridge_channel->chan, "BLINDTRANSFER", NULL);
 	pbx_builtin_setvar_helper(bridge_channel->chan, "ATTENDEDTRANSFER", NULL);
+	pbx_builtin_setvar_helper(bridge_channel->chan, "FORWARDERNAME", NULL);
 
 	/* Wake up the bridge channel thread to reevaluate any interval timers. */
 	ast_queue_frame(bridge_channel->chan, &ast_null_frame);
 
 	bridge->reconfigured = 1;
 	return 0;
+}
+
+int bridge_channel_internal_push(struct ast_bridge_channel *bridge_channel)
+{
+	return bridge_channel_internal_push_full(bridge_channel, 0);
 }
 
 /*!
@@ -2316,6 +2394,14 @@ static struct ast_frame *bridge_handle_dtmf(struct ast_bridge_channel *bridge_ch
 	return frame;
 }
 
+static const char *controls[] = {
+	[AST_CONTROL_RINGING] = "RINGING",
+	[AST_CONTROL_PROCEEDING] = "PROCEEDING",
+	[AST_CONTROL_PROGRESS] = "PROGRESS",
+	[AST_CONTROL_BUSY] = "BUSY",
+	[AST_CONTROL_CONGESTION] = "CONGESTION",
+	[AST_CONTROL_ANSWER] = "ANSWER",
+};
 
 /*!
  * \internal
@@ -2326,6 +2412,17 @@ static struct ast_frame *bridge_handle_dtmf(struct ast_bridge_channel *bridge_ch
 static void bridge_handle_trip(struct ast_bridge_channel *bridge_channel)
 {
 	struct ast_frame *frame;
+
+	if (!ast_strlen_zero(ast_channel_call_forward(bridge_channel->chan))) {
+		/* TODO If early bridging is ever used by anything other than ARI,
+		 * it's important that we actually attempt to handle the call forward
+		 * attempt, as well as expand features on a bridge channel to allow/disallow
+		 * call forwarding. For now, all we do is raise an event, showing that
+		 * a call forward is being attempted.
+		 */
+		ast_channel_publish_dial_forward(NULL, bridge_channel->chan, NULL, NULL, "CANCEL",
+			ast_channel_call_forward(bridge_channel->chan));
+	}
 
 	if (bridge_channel->features->mute) {
 		frame = ast_read_noaudio(bridge_channel->chan);
@@ -2340,10 +2437,20 @@ static void bridge_handle_trip(struct ast_bridge_channel *bridge_channel)
 	switch (frame->frametype) {
 	case AST_FRAME_CONTROL:
 		switch (frame->subclass.integer) {
+		case AST_CONTROL_CONGESTION:
+		case AST_CONTROL_BUSY:
+			ast_channel_publish_dial(NULL, bridge_channel->chan, NULL, controls[frame->subclass.integer]);
+			break;
 		case AST_CONTROL_HANGUP:
 			ast_bridge_channel_kick(bridge_channel, 0);
 			bridge_frame_free(frame);
 			return;
+		case AST_CONTROL_RINGING:
+		case AST_CONTROL_PROGRESS:
+		case AST_CONTROL_PROCEEDING:
+		case AST_CONTROL_ANSWER:
+			ast_channel_publish_dial(NULL, bridge_channel->chan, NULL, controls[frame->subclass.integer]);
+			break;
 		default:
 			break;
 		}
@@ -2560,27 +2667,7 @@ static void bridge_channel_event_join_leave(struct ast_bridge_channel *bridge_ch
 	ao2_iterator_destroy(&iter);
 }
 
-void bridge_channel_internal_wait(struct bridge_channel_internal_cond *cond)
-{
-	ast_mutex_lock(&cond->lock);
-	while (!cond->done) {
-		ast_cond_wait(&cond->cond, &cond->lock);
-	}
-	ast_mutex_unlock(&cond->lock);
-}
-
-void bridge_channel_internal_signal(struct bridge_channel_internal_cond *cond)
-{
-	if (cond) {
-		ast_mutex_lock(&cond->lock);
-		cond->done = 1;
-		ast_cond_signal(&cond->cond);
-		ast_mutex_unlock(&cond->lock);
-	}
-}
-
-int bridge_channel_internal_join(struct ast_bridge_channel *bridge_channel,
-				 struct bridge_channel_internal_cond *cond)
+int bridge_channel_internal_join(struct ast_bridge_channel *bridge_channel)
 {
 	int res = 0;
 	struct ast_bridge_features *channel_features;
@@ -2610,7 +2697,6 @@ int bridge_channel_internal_join(struct ast_bridge_channel *bridge_channel,
 			bridge_channel->bridge->uniqueid,
 			bridge_channel,
 			ast_channel_name(bridge_channel->chan));
-		bridge_channel_internal_signal(cond);
 		return -1;
 	}
 	ast_channel_internal_bridge_set(bridge_channel->chan, bridge_channel->bridge);
@@ -2645,8 +2731,6 @@ int bridge_channel_internal_join(struct ast_bridge_channel *bridge_channel,
 	}
 	bridge_reconfigured(bridge_channel->bridge, !bridge_channel->inhibit_colp);
 
-	bridge_channel_internal_signal(cond);
-
 	if (bridge_channel->state == BRIDGE_CHANNEL_STATE_WAIT) {
 		/*
 		 * Indicate a source change since this channel is entering the
@@ -2658,6 +2742,7 @@ int bridge_channel_internal_join(struct ast_bridge_channel *bridge_channel,
 			ast_indicate(bridge_channel->chan, AST_CONTROL_SRCCHANGE);
 		}
 
+		bridge_channel_impart_signal(bridge_channel->chan);
 		ast_bridge_unlock(bridge_channel->bridge);
 
 		/* Must release any swap ref after unlocking the bridge. */
@@ -2699,6 +2784,18 @@ int bridge_channel_internal_join(struct ast_bridge_channel *bridge_channel,
 		ast_channel_end_dtmf(bridge_channel->chan,
 			ast_channel_sending_dtmf_digit(bridge_channel->chan),
 			ast_channel_sending_dtmf_tv(bridge_channel->chan), "bridge end");
+	}
+
+	/* Complete any T.38 session before exiting the bridge. */
+	if (ast_channel_is_t38_active(bridge_channel->chan)) {
+		struct ast_control_t38_parameters t38_parameters = {
+			.request_response = AST_T38_TERMINATED,
+		};
+
+		ast_debug(1, "Channel %s simulating T.38 terminate for bridge end.\n",
+			ast_channel_name(bridge_channel->chan));
+		ast_indicate_data(bridge_channel->chan, AST_CONTROL_T38_PARAMETERS,
+			&t38_parameters, sizeof(t38_parameters));
 	}
 
 	/* Indicate a source change since this channel is leaving the bridge system. */

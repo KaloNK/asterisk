@@ -109,6 +109,11 @@ struct ao2_container *app_bridges_moh;
 
 struct ao2_container *app_bridges_playback;
 
+/*!
+ * \internal \brief List of registered event sources.
+ */
+AST_RWLIST_HEAD_STATIC(event_sources, stasis_app_event_source);
+
 static struct ast_json *stasis_end_to_json(struct stasis_message *message,
 		const struct stasis_message_sanitizer *sanitize)
 {
@@ -145,10 +150,10 @@ static struct ast_json *stasis_start_to_json(struct stasis_message *message,
 		return NULL;
 	}
 
-	msg = ast_json_pack("{s: s, s: O, s: O, s: o}",
+	msg = ast_json_pack("{s: s, s: o, s: o, s: o}",
 		"type", "StasisStart",
-		"timestamp", ast_json_object_get(payload->blob, "timestamp"),
-		"args", ast_json_object_get(payload->blob, "args"),
+		"timestamp", ast_json_copy(ast_json_object_get(payload->blob, "timestamp")),
+		"args", ast_json_deep_copy(ast_json_object_get(payload->blob, "args")),
 		"channel", ast_channel_snapshot_to_json(payload->channel, NULL));
 	if (!msg) {
 		ast_log(LOG_ERROR, "Failed to pack JSON for StasisStart message\n");
@@ -744,7 +749,7 @@ static void control_unlink(struct stasis_app_control *control)
 	ao2_cleanup(control);
 }
 
-struct ast_bridge *stasis_app_bridge_create(const char *type, const char *name, const char *id)
+static struct ast_bridge *bridge_create_common(const char *type, const char *name, const char *id, int invisible)
 {
 	struct ast_bridge *bridge;
 	char *requested_type, *requested_types = ast_strdupa(S_OR(type, "mixing"));
@@ -752,6 +757,10 @@ struct ast_bridge *stasis_app_bridge_create(const char *type, const char *name, 
 	int flags = AST_BRIDGE_FLAG_MERGE_INHIBIT_FROM | AST_BRIDGE_FLAG_MERGE_INHIBIT_TO
 		| AST_BRIDGE_FLAG_SWAP_INHIBIT_FROM | AST_BRIDGE_FLAG_SWAP_INHIBIT_TO
 		| AST_BRIDGE_FLAG_TRANSFER_BRIDGE_ONLY;
+
+	if (invisible) {
+		flags |= AST_BRIDGE_FLAG_INVISIBLE;
+	}
 
 	while ((requested_type = strsep(&requested_types, ","))) {
 		requested_type = ast_strip(requested_type);
@@ -782,6 +791,16 @@ struct ast_bridge *stasis_app_bridge_create(const char *type, const char *name, 
 		}
 	}
 	return bridge;
+}
+
+struct ast_bridge *stasis_app_bridge_create(const char *type, const char *name, const char *id)
+{
+	return bridge_create_common(type, name, id, 0);
+}
+
+struct ast_bridge *stasis_app_bridge_create_invisible(const char *type, const char *name, const char *id)
+{
+	return bridge_create_common(type, name, id, 1);
 }
 
 void stasis_app_bridge_destroy(const char *bridge_id)
@@ -1174,6 +1193,11 @@ int stasis_app_control_is_done(struct stasis_app_control *control)
 	return control_is_done(control);
 }
 
+void stasis_app_control_flush_queue(struct stasis_app_control *control)
+{
+	control_flush_queue(control);
+}
+
 struct ast_datastore_info set_end_published_info = {
 	.type = "stasis_end_published",
 };
@@ -1183,10 +1207,11 @@ void stasis_app_channel_set_stasis_end_published(struct ast_channel *chan)
 	struct ast_datastore *datastore;
 
 	datastore = ast_datastore_alloc(&set_end_published_info, NULL);
-
-	ast_channel_lock(chan);
-	ast_channel_datastore_add(chan, datastore);
-	ast_channel_unlock(chan);
+	if (datastore) {
+		ast_channel_lock(chan);
+		ast_channel_datastore_add(chan, datastore);
+		ast_channel_unlock(chan);
+	}
 }
 
 int stasis_app_channel_is_stasis_end_published(struct ast_channel *chan)
@@ -1206,12 +1231,11 @@ static void remove_stasis_end_published(struct ast_channel *chan)
 
 	ast_channel_lock(chan);
 	datastore = ast_channel_datastore_find(chan, &set_end_published_info, NULL);
-	ast_channel_unlock(chan);
-
 	if (datastore) {
 		ast_channel_datastore_remove(chan, datastore);
 		ast_datastore_free(datastore);
 	}
+	ast_channel_unlock(chan);
 }
 
 /*! /brief Stasis dialplan application callback */
@@ -1289,11 +1313,13 @@ int stasis_app_exec(struct ast_channel *chan, const char *app_name, int argc,
 
 		if (bridge != last_bridge) {
 			app_unsubscribe_bridge(app, last_bridge);
-			app_subscribe_bridge(app, bridge);
+			if (bridge) {
+				app_subscribe_bridge(app, bridge);
+			}
 		}
 
 		if (bridge) {
-			/* Bridge is handling channel frames */
+			/* Bridge/dial is handling channel frames */
 			control_wait(control);
 			control_dispatch_all(control, chan);
 			continue;
@@ -1363,6 +1389,11 @@ int stasis_app_exec(struct ast_channel *chan, const char *app_name, int argc,
 	} else {
 		remove_stasis_end_published(chan);
 	}
+
+	control_flush_queue(control);
+
+	/* Stop any lingering silence generator */
+	control_silence_stop_now(control);
 
 	/* There's an off chance that app is ready for cleanup. Go ahead
 	 * and clean up, just in case
@@ -1469,7 +1500,7 @@ struct ao2_container *stasis_app_get_all(void)
 	return ao2_bump(apps);
 }
 
-int stasis_app_register(const char *app_name, stasis_app_cb handler, void *data)
+static int __stasis_app_register(const char *app_name, stasis_app_cb handler, void *data, int all_events)
 {
 	RAII_VAR(struct stasis_app *, app, NULL, ao2_cleanup);
 
@@ -1482,8 +1513,20 @@ int stasis_app_register(const char *app_name, stasis_app_cb handler, void *data)
 	if (app) {
 		app_update(app, handler, data);
 	} else {
-		app = app_create(app_name, handler, data);
+		app = app_create(app_name, handler, data, all_events ? STASIS_APP_SUBSCRIBE_ALL : STASIS_APP_SUBSCRIBE_MANUAL);
 		if (app) {
+			if (all_events) {
+				struct stasis_app_event_source *source;
+				SCOPED_LOCK(lock, &event_sources, AST_RWLIST_RDLOCK, AST_RWLIST_UNLOCK);
+
+				AST_LIST_TRAVERSE(&event_sources, source, next) {
+					if (!source->subscribe) {
+						continue;
+					}
+
+					source->subscribe(app, NULL);
+				}
+			}
 			ao2_link_flags(apps_registry, app, OBJ_NOLOCK);
 		} else {
 			ao2_unlock(apps_registry);
@@ -1497,6 +1540,16 @@ int stasis_app_register(const char *app_name, stasis_app_cb handler, void *data)
 	cleanup();
 	ao2_unlock(apps_registry);
 	return 0;
+}
+
+int stasis_app_register(const char *app_name, stasis_app_cb handler, void *data)
+{
+	return __stasis_app_register(app_name, handler, data, 0);
+}
+
+int stasis_app_register_all(const char *app_name, stasis_app_cb handler, void *data)
+{
+	return __stasis_app_register(app_name, handler, data, 1);
 }
 
 void stasis_app_unregister(const char *app_name)
@@ -1525,11 +1578,6 @@ void stasis_app_unregister(const char *app_name)
 	 */
 	cleanup();
 }
-
-/*!
- * \internal \brief List of registered event sources.
- */
-AST_RWLIST_HEAD_STATIC(event_sources, stasis_app_event_source);
 
 void stasis_app_register_event_source(struct stasis_app_event_source *obj)
 {
@@ -1727,8 +1775,8 @@ static enum stasis_app_subscribe_res app_subscribe(
 
 	ast_debug(3, "%s: Checking %s\n", app_name, uri);
 
-	if (!event_source->find ||
-	    (!(obj = event_source->find(app, uri + strlen(event_source->scheme))))) {
+	if (!ast_strlen_zero(uri + strlen(event_source->scheme)) &&
+	    (!event_source->find || (!(obj = event_source->find(app, uri + strlen(event_source->scheme)))))) {
 		ast_log(LOG_WARNING, "Event source not found: %s\n", uri);
 		return STASIS_ASR_EVENT_SOURCE_NOT_FOUND;
 	}
@@ -1915,6 +1963,8 @@ static int unload_module(void)
 	ao2_cleanup(app_bridges_playback);
 	app_bridges_playback = NULL;
 
+	stasis_app_control_shutdown();
+
 	STASIS_MESSAGE_TYPE_CLEANUP(end_message_type);
 	STASIS_MESSAGE_TYPE_CLEANUP(start_message_type);
 
@@ -2062,6 +2112,7 @@ static int load_module(void)
 }
 
 AST_MODULE_INFO(ASTERISK_GPL_KEY, AST_MODFLAG_GLOBAL_SYMBOLS, "Stasis application support",
+	.load_pri = AST_MODPRI_APP_DEPEND,
 	.support_level = AST_MODULE_SUPPORT_CORE,
 	.load = load_module,
 	.unload = unload_module,
