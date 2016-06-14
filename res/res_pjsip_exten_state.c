@@ -115,7 +115,7 @@ static void exten_state_subscription_destructor(void *obj)
 	struct exten_state_subscription *sub = obj;
 
 	ast_free(sub->user_agent);
-	ao2_cleanup(sub->sip_sub);
+	ast_sip_subscription_destroy(sub->sip_sub);
 	ast_taskprocessor_unreference(sub->serializer);
 }
 
@@ -160,7 +160,7 @@ static struct exten_state_subscription *exten_state_subscription_alloc(
 		return NULL;
 	}
 
-	exten_state_sub->sip_sub = ao2_bump(sip_sub);
+	exten_state_sub->sip_sub = sip_sub;
 
 	/* We keep our own reference to the serializer as there is no guarantee in state_changed
 	 * that the subscription tree is still valid when it is called. This can occur when
@@ -517,8 +517,8 @@ static int unload_module(void)
 }
 
 AST_MODULE_INFO(ASTERISK_GPL_KEY, AST_MODFLAG_LOAD_ORDER, "PJSIP Extension State Notifications",
-		.support_level = AST_MODULE_SUPPORT_CORE,
-		.load = load_module,
-		.unload = unload_module,
-		.load_pri = AST_MODPRI_CHANNEL_DEPEND,
+	.support_level = AST_MODULE_SUPPORT_CORE,
+	.load = load_module,
+	.unload = unload_module,
+	.load_pri = AST_MODPRI_CHANNEL_DEPEND + 5,
 );

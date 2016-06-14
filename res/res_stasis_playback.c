@@ -105,9 +105,9 @@ static struct ast_json *playback_to_json(struct stasis_message *message,
 		return NULL;
 	}
 
-	return ast_json_pack("{s: s, s: O}",
+	return ast_json_pack("{s: s, s: o}",
 		"type", type,
-		"playback", blob);
+		"playback", ast_json_deep_copy(blob));
 }
 
 STASIS_MESSAGE_TYPE_DEFN(stasis_app_playback_snapshot_type,
@@ -118,6 +118,7 @@ static void playback_dtor(void *obj)
 {
 	struct stasis_app_playback *playback = obj;
 
+	ao2_cleanup(playback->control);
 	ast_string_field_free_memory(playback);
 }
 
@@ -143,6 +144,7 @@ static struct stasis_app_playback *playback_create(
 		ast_string_field_set(playback, id, uuid);
 	}
 
+	ao2_ref(control, +1);
 	playback->control = control;
 
 	ao2_ref(playback, +1);

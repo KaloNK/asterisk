@@ -318,6 +318,9 @@
 				<literal>type</literal> parameter must be provided. It specifies
 				which signalling parameter to read.</para>
 				<enumlist>
+					<enum name="call-id">
+						<para>The SIP call-id.</para>
+					</enum>
 					<enum name="secure">
 						<para>Whether or not the signalling uses a secure transport.</para>
 						<enumlist>
@@ -594,6 +597,8 @@ static int channel_read_pjsip(struct ast_channel *chan, const char *type, const 
 	if (ast_strlen_zero(type)) {
 		ast_log(LOG_WARNING, "You must supply a type field for 'pjsip' information\n");
 		return -1;
+	} else if (!strcmp(type, "call-id")) {
+		snprintf(buf, buflen, "%.*s", (int) pj_strlen(&dlg->call_id->id), pj_strbuf(&dlg->call_id->id));
 	} else if (!strcmp(type, "secure")) {
 #ifdef HAVE_PJSIP_GET_DEST_INFO
 		pjsip_host_info dest;
@@ -814,7 +819,7 @@ int pjsip_acf_dial_contacts_read(struct ast_channel *chan, const char *cmd, char
 		return -1;
 	}
 
-	while ((aor_name = strsep(&rest, ","))) {
+	while ((aor_name = ast_strip(strsep(&rest, ",")))) {
 		RAII_VAR(struct ast_sip_aor *, aor, ast_sip_location_retrieve_aor(aor_name), ao2_cleanup);
 		RAII_VAR(struct ao2_container *, contacts, NULL, ao2_cleanup);
 		struct ao2_iterator it_contacts;

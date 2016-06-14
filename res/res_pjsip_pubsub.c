@@ -355,7 +355,7 @@ struct ast_sip_publication {
 struct subscription_persistence {
 	/*! Sorcery object details */
 	SORCERY_OBJECT(details);
-	/*! The name of the endpoint involved in the subscrption */
+	/*! The name of the endpoint involved in the subscription */
 	char *endpoint;
 	/*! SIP message that creates the subscription */
 	char packet[PJSIP_MAX_PKT_LEN];
@@ -411,6 +411,8 @@ struct sip_subscription_tree {
 	int is_list;
 	/*! Next item in the list */
 	AST_LIST_ENTRY(sip_subscription_tree) next;
+	/*! Indicates that a NOTIFY is currently being sent on the SIP subscription */
+	int last_notify;
 };
 
 /*!
@@ -561,8 +563,19 @@ static void subscription_persistence_update(struct sip_subscription_tree *sub_tr
 		expires = expires_hdr ? expires_hdr->ivalue : DEFAULT_PUBLISH_EXPIRES;
 		sub_tree->persistence->expires = ast_tvadd(ast_tvnow(), ast_samp2tv(expires, 1));
 
-		pjsip_msg_print(rdata->msg_info.msg, sub_tree->persistence->packet,
-				sizeof(sub_tree->persistence->packet));
+		/* When receiving a packet on an streaming transport, it's possible to receive more than one SIP
+		 * message at a time into the rdata->pkt_info.packet buffer. However, the rdata->msg_info.msg_buf
+		 * will always point to the proper SIP message that is to be processed. When updating subscription
+		 * persistence that is pulled from persistent storage, though, the rdata->pkt_info.packet will
+		 * only ever have a single SIP message on it, and so we base persistence on that.
+		 */
+		if (rdata->msg_info.msg_buf) {
+			ast_copy_string(sub_tree->persistence->packet, rdata->msg_info.msg_buf,
+					MIN(sizeof(sub_tree->persistence->packet), rdata->msg_info.len));
+		} else {
+			ast_copy_string(sub_tree->persistence->packet, rdata->pkt_info.packet,
+					sizeof(sub_tree->persistence->packet));
+		}
 		ast_copy_string(sub_tree->persistence->src_name, rdata->pkt_info.src_name,
 				sizeof(sub_tree->persistence->src_name));
 		sub_tree->persistence->src_port = rdata->pkt_info.src_port;
@@ -585,6 +598,7 @@ static void subscription_persistence_remove(struct sip_subscription_tree *sub_tr
 
 	ast_sorcery_delete(ast_sip_get_sorcery(), sub_tree->persistence);
 	ao2_ref(sub_tree->persistence, -1);
+	sub_tree->persistence = NULL;
 }
 
 
@@ -971,6 +985,7 @@ static int build_resource_tree(struct ast_sip_endpoint *endpoint, const struct a
 
 	tree->root = tree_node_alloc(resource, &visited, list->full_state);
 	if (!tree->root) {
+		AST_VECTOR_FREE(&visited);
 		return 500;
 	}
 
@@ -1008,26 +1023,6 @@ static int datastore_cmp(void *obj, void *arg, int flags)
 	return strcmp(datastore1->uid, uid2) ? 0 : CMP_MATCH | CMP_STOP;
 }
 
-static int subscription_remove_serializer(void *obj)
-{
-	struct sip_subscription_tree *sub_tree = obj;
-
-	/* This is why we keep the dialog on the subscription. When the subscription
-	 * is destroyed, there is no guarantee that the underlying dialog is ready
-	 * to be destroyed. Furthermore, there's no guarantee in the opposite direction
-	 * either. The dialog could be destroyed before our subscription is. We fix
-	 * this problem by keeping a reference to the dialog until it is time to
-	 * destroy the subscription. We need to have the dialog available when the
-	 * subscription is destroyed so that we can guarantee that our attempt to
-	 * remove the serializer will be successful.
-	 */
-	ast_sip_dialog_set_serializer(sub_tree->dlg, NULL);
-	ast_sip_dialog_set_endpoint(sub_tree->dlg, NULL);
-	pjsip_dlg_dec_session(sub_tree->dlg, &pubsub_module);
-
-	return 0;
-}
-
 static void add_subscription(struct sip_subscription_tree *obj)
 {
 	SCOPED_LOCK(lock, &subscriptions, AST_RWLIST_WRLOCK, AST_RWLIST_UNLOCK);
@@ -1051,14 +1046,32 @@ static void remove_subscription(struct sip_subscription_tree *obj)
 	AST_RWLIST_TRAVERSE_SAFE_END;
 }
 
-static void subscription_destructor(void *obj)
+static void destroy_subscription(struct ast_sip_subscription *sub)
 {
-	struct ast_sip_subscription *sub = obj;
-
 	ast_debug(3, "Destroying SIP subscription to resource %s\n", sub->resource);
 	ast_free(sub->body_text);
 
+	AST_VECTOR_FREE(&sub->children);
 	ao2_cleanup(sub->datastores);
+	ast_free(sub);
+}
+
+static void destroy_subscriptions(struct ast_sip_subscription *root)
+{
+	int i;
+
+	if (!root) {
+		return;
+	}
+
+	for (i = 0; i < AST_VECTOR_SIZE(&root->children); ++i) {
+		struct ast_sip_subscription *child;
+
+		child = AST_VECTOR_GET(&root->children, i);
+		destroy_subscriptions(child);
+	}
+
+	destroy_subscription(root);
 }
 
 static struct ast_sip_subscription *allocate_subscription(const struct ast_sip_subscription_handler *handler,
@@ -1067,7 +1080,7 @@ static struct ast_sip_subscription *allocate_subscription(const struct ast_sip_s
 	struct ast_sip_subscription *sub;
 	pjsip_sip_uri *contact_uri;
 
-	sub = ao2_alloc(sizeof(*sub) + strlen(resource) + 1, subscription_destructor);
+	sub = ast_calloc(1, sizeof(*sub) + strlen(resource) + 1);
 	if (!sub) {
 		return NULL;
 	}
@@ -1075,13 +1088,13 @@ static struct ast_sip_subscription *allocate_subscription(const struct ast_sip_s
 
 	sub->datastores = ao2_container_alloc(DATASTORE_BUCKETS, datastore_hash, datastore_cmp);
 	if (!sub->datastores) {
-		ao2_ref(sub, -1);
+		destroy_subscription(sub);
 		return NULL;
 	}
 
 	sub->body_text = ast_str_create(128);
 	if (!sub->body_text) {
-		ao2_ref(sub, -1);
+		destroy_subscription(sub);
 		return NULL;
 	}
 
@@ -1092,7 +1105,7 @@ static struct ast_sip_subscription *allocate_subscription(const struct ast_sip_s
 
 	sub->handler = handler;
 	sub->subscription_state = PJSIP_EVSUB_STATE_ACTIVE;
-	sub->tree = tree;
+	sub->tree = ao2_bump(tree);
 
 	return sub;
 }
@@ -1120,6 +1133,7 @@ static struct ast_sip_subscription *create_virtual_subscriptions(const struct as
 
 	sub->full_state = current->full_state;
 	sub->body_generator = generator;
+	AST_VECTOR_INIT(&sub->children, AST_VECTOR_SIZE(&current->children));
 
 	for (i = 0; i < AST_VECTOR_SIZE(&current->children); ++i) {
 		struct ast_sip_subscription *child;
@@ -1154,49 +1168,68 @@ static void shutdown_subscriptions(struct ast_sip_subscription *sub)
 	if (AST_VECTOR_SIZE(&sub->children) > 0) {
 		for (i = 0; i < AST_VECTOR_SIZE(&sub->children); ++i) {
 			shutdown_subscriptions(AST_VECTOR_GET(&sub->children, i));
-			ao2_cleanup(AST_VECTOR_GET(&sub->children, i));
 		}
 		return;
 	}
 
+	/* We notify subscription shutdown only on the tree leaves. */
 	if (sub->handler->subscription_shutdown) {
 		sub->handler->subscription_shutdown(sub);
 	}
+}
+static int subscription_unreference_dialog(void *obj)
+{
+	struct sip_subscription_tree *sub_tree = obj;
+
+	/* This is why we keep the dialog on the subscription. When the subscription
+	 * is destroyed, there is no guarantee that the underlying dialog is ready
+	 * to be destroyed. Furthermore, there's no guarantee in the opposite direction
+	 * either. The dialog could be destroyed before our subscription is. We fix
+	 * this problem by keeping a reference to the dialog until it is time to
+	 * destroy the subscription. We need to have the dialog available when the
+	 * subscription is destroyed so that we can guarantee that our attempt to
+	 * remove the serializer will be successful.
+	 */
+	pjsip_dlg_dec_session(sub_tree->dlg, &pubsub_module);
+	sub_tree->dlg = NULL;
+
+	return 0;
 }
 
 static void subscription_tree_destructor(void *obj)
 {
 	struct sip_subscription_tree *sub_tree = obj;
 
-	remove_subscription(sub_tree);
+	ast_debug(3, "Destroying subscription tree %p\n", sub_tree);
 
-	subscription_persistence_remove(sub_tree);
 	ao2_cleanup(sub_tree->endpoint);
 
-	if (sub_tree->dlg) {
-		ast_sip_push_task_synchronous(NULL, subscription_remove_serializer, sub_tree);
-	}
+	destroy_subscriptions(sub_tree->root);
 
-	shutdown_subscriptions(sub_tree->root);
-	ao2_cleanup(sub_tree->root);
+	if (sub_tree->dlg) {
+		ast_sip_push_task_synchronous(sub_tree->serializer, subscription_unreference_dialog, sub_tree);
+	}
 
 	ast_taskprocessor_unreference(sub_tree->serializer);
 	ast_module_unref(ast_module_info->self);
 }
 
+void ast_sip_subscription_destroy(struct ast_sip_subscription *sub)
+{
+	ast_debug(3, "Removing subscription %p reference to subscription tree %p\n", sub, sub->tree);
+	ao2_cleanup(sub->tree);
+}
+
 static void subscription_setup_dialog(struct sip_subscription_tree *sub_tree, pjsip_dialog *dlg)
 {
-	/* We keep a reference to the dialog until our subscription is destroyed. See
-	 * the subscription_destructor for more details
-	 */
-	pjsip_dlg_inc_session(dlg, &pubsub_module);
 	sub_tree->dlg = dlg;
 	ast_sip_dialog_set_serializer(dlg, sub_tree->serializer);
 	ast_sip_dialog_set_endpoint(dlg, sub_tree->endpoint);
 	pjsip_evsub_set_mod_data(sub_tree->evsub, pubsub_module.id, sub_tree);
+	pjsip_dlg_inc_session(dlg, &pubsub_module);
 }
 
-static struct sip_subscription_tree *allocate_subscription_tree(struct ast_sip_endpoint *endpoint)
+static struct sip_subscription_tree *allocate_subscription_tree(struct ast_sip_endpoint *endpoint, pjsip_rx_data *rdata)
 {
 	struct sip_subscription_tree *sub_tree;
 
@@ -1207,7 +1240,24 @@ static struct sip_subscription_tree *allocate_subscription_tree(struct ast_sip_e
 
 	ast_module_ref(ast_module_info->self);
 
-	sub_tree->serializer = ast_sip_create_serializer();
+	if (rdata) {
+		/*
+		 * We must continue using the serializer that the original
+		 * SUBSCRIBE came in on for the dialog.  There may be
+		 * retransmissions already enqueued in the original
+		 * serializer that can result in reentrancy and message
+		 * sequencing problems.
+		 */
+		sub_tree->serializer = ast_sip_get_distributor_serializer(rdata);
+	} else {
+		char tps_name[AST_TASKPROCESSOR_MAX_NAME + 1];
+
+		/* Create name with seq number appended. */
+		ast_taskprocessor_build_name(tps_name, sizeof(tps_name), "pjsip/pubsub/%s",
+			ast_sorcery_object_get_id(endpoint));
+
+		sub_tree->serializer = ast_sip_create_serializer_named(tps_name);
+	}
 	if (!sub_tree->serializer) {
 		ao2_ref(sub_tree, -1);
 		return NULL;
@@ -1216,7 +1266,6 @@ static struct sip_subscription_tree *allocate_subscription_tree(struct ast_sip_e
 	sub_tree->endpoint = ao2_bump(endpoint);
 	sub_tree->notify_sched_id = -1;
 
-	add_subscription(sub_tree);
 	return sub_tree;
 }
 
@@ -1249,9 +1298,9 @@ static struct sip_subscription_tree *create_subscription_tree(const struct ast_s
 	pjsip_dialog *dlg;
 	struct subscription_persistence *persistence;
 
-	sub_tree = allocate_subscription_tree(endpoint);
+	sub_tree = allocate_subscription_tree(endpoint, rdata);
 	if (!sub_tree) {
-		pjsip_endpt_respond_stateless(ast_sip_get_pjsip_endpoint(), rdata, 500, NULL, NULL, NULL);
+		*dlg_status = PJ_ENOMEM;
 		return NULL;
 	}
 	sub_tree->role = AST_SIP_NOTIFIER;
@@ -1290,28 +1339,142 @@ static struct sip_subscription_tree *create_subscription_tree(const struct ast_s
 		sub_tree->is_list = 1;
 	}
 
+	add_subscription(sub_tree);
+
 	return sub_tree;
 }
 
-static int generate_initial_notify(struct ast_sip_subscription *sub);
+static int initial_notify_task(void *obj);
 static int send_notify(struct sip_subscription_tree *sub_tree, unsigned int force_full_state);
+
+/*! Persistent subscription recreation continuation under distributor serializer data */
+struct persistence_recreate_data {
+	struct subscription_persistence *persistence;
+	pjsip_rx_data *rdata;
+};
+
+/*!
+ * \internal
+ * \brief subscription_persistence_recreate continuation under distributor serializer.
+ * \since 13.10.0
+ *
+ * \retval 0 on success.
+ * \retval -1 on error.
+ */
+static int sub_persistence_recreate(void *obj)
+{
+	struct persistence_recreate_data *recreate_data = obj;
+	struct subscription_persistence *persistence = recreate_data->persistence;
+	pjsip_rx_data *rdata = recreate_data->rdata;
+	struct ast_sip_endpoint *endpoint;
+	struct sip_subscription_tree *sub_tree;
+	struct ast_sip_pubsub_body_generator *generator;
+	struct ast_sip_subscription_handler *handler;
+	char *resource;
+	pjsip_sip_uri *request_uri;
+	size_t resource_size;
+	int resp;
+	struct resource_tree tree;
+	pjsip_expires_hdr *expires_header;
+
+	request_uri = pjsip_uri_get_uri(rdata->msg_info.msg->line.req.uri);
+	resource_size = pj_strlen(&request_uri->user) + 1;
+	resource = ast_alloca(resource_size);
+	ast_copy_pj_str(resource, &request_uri->user, resource_size);
+
+	handler = subscription_get_handler_from_rdata(rdata);
+	if (!handler || !handler->notifier) {
+		ast_log(LOG_WARNING, "Failed recreating '%s' subscription: Could not get subscription handler.\n",
+			persistence->endpoint);
+		ast_sorcery_delete(ast_sip_get_sorcery(), persistence);
+		return 0;
+	}
+
+	generator = subscription_get_generator_from_rdata(rdata, handler);
+	if (!generator) {
+		ast_log(LOG_WARNING, "Failed recreating '%s' subscription: Body generator not available.\n",
+			persistence->endpoint);
+		ast_sorcery_delete(ast_sip_get_sorcery(), persistence);
+		return 0;
+	}
+
+	ast_sip_mod_data_set(rdata->tp_info.pool, rdata->endpt_info.mod_data,
+		pubsub_module.id, MOD_DATA_PERSISTENCE, persistence);
+
+	/* Getting the endpoint may take some time that can affect the expiration. */
+	endpoint = ast_sorcery_retrieve_by_id(ast_sip_get_sorcery(), "endpoint",
+		persistence->endpoint);
+	if (!endpoint) {
+		ast_log(LOG_WARNING, "Failed recreating '%s' subscription: The endpoint was not found\n",
+			persistence->endpoint);
+		ast_sorcery_delete(ast_sip_get_sorcery(), persistence);
+		ao2_ref(endpoint, -1);
+		return 0;
+	}
+
+	/* Update the expiration header with the new expiration */
+	expires_header = pjsip_msg_find_hdr(rdata->msg_info.msg, PJSIP_H_EXPIRES,
+		rdata->msg_info.msg->hdr.next);
+	if (!expires_header) {
+		expires_header = pjsip_expires_hdr_create(rdata->tp_info.pool, 0);
+		if (!expires_header) {
+			ast_log(LOG_WARNING, "Failed recreating '%s' subscription: Could not update expires header.\n",
+				persistence->endpoint);
+			ast_sorcery_delete(ast_sip_get_sorcery(), persistence);
+			ao2_ref(endpoint, -1);
+			return 0;
+		}
+		pjsip_msg_add_hdr(rdata->msg_info.msg, (pjsip_hdr *) expires_header);
+	}
+	expires_header->ivalue = (ast_tvdiff_ms(persistence->expires, ast_tvnow()) / 1000);
+	if (expires_header->ivalue <= 0) {
+		/* The subscription expired since we started recreating the subscription. */
+		ast_sorcery_delete(ast_sip_get_sorcery(), persistence);
+		ao2_ref(endpoint, -1);
+		return 0;
+	}
+
+	memset(&tree, 0, sizeof(tree));
+	resp = build_resource_tree(endpoint, handler, resource, &tree,
+		ast_sip_pubsub_has_eventlist_support(rdata));
+	if (PJSIP_IS_STATUS_IN_CLASS(resp, 200)) {
+		pj_status_t dlg_status;
+
+		sub_tree = create_subscription_tree(handler, endpoint, rdata, resource, generator,
+			&tree, &dlg_status);
+		if (!sub_tree) {
+			if (dlg_status != PJ_EEXISTS) {
+				ast_log(LOG_WARNING, "Failed recreating '%s' subscription: Could not create subscription tree.\n",
+					persistence->endpoint);
+				ast_sorcery_delete(ast_sip_get_sorcery(), persistence);
+			}
+		} else {
+			sub_tree->persistence = ao2_bump(persistence);
+			subscription_persistence_update(sub_tree, rdata);
+			if (ast_sip_push_task(sub_tree->serializer, initial_notify_task,
+				ao2_bump(sub_tree))) {
+				/* Could not send initial subscribe NOTIFY */
+				pjsip_evsub_terminate(sub_tree->evsub, PJ_TRUE);
+				ao2_ref(sub_tree, -1);
+			}
+		}
+	} else {
+		ast_sorcery_delete(ast_sip_get_sorcery(), persistence);
+	}
+	resource_tree_destroy(&tree);
+	ao2_ref(endpoint, -1);
+
+	return 0;
+}
 
 /*! \brief Callback function to perform the actual recreation of a subscription */
 static int subscription_persistence_recreate(void *obj, void *arg, int flags)
 {
 	struct subscription_persistence *persistence = obj;
 	pj_pool_t *pool = arg;
-	pjsip_rx_data rdata = { { 0, }, };
-	RAII_VAR(struct ast_sip_endpoint *, endpoint, NULL, ao2_cleanup);
-	struct sip_subscription_tree *sub_tree;
-	struct ast_sip_pubsub_body_generator *generator;
-	int resp;
-	char *resource;
-	size_t resource_size;
-	pjsip_sip_uri *request_uri;
-	struct resource_tree tree;
-	pjsip_expires_hdr *expires_header;
-	struct ast_sip_subscription_handler *handler;
+	struct ast_taskprocessor *serializer;
+	pjsip_rx_data rdata;
+	struct persistence_recreate_data recreate_data;
 
 	/* If this subscription has already expired remove it */
 	if (ast_tvdiff_ms(persistence->expires, ast_tvnow()) <= 0) {
@@ -1319,86 +1482,41 @@ static int subscription_persistence_recreate(void *obj, void *arg, int flags)
 		return 0;
 	}
 
-	endpoint = ast_sorcery_retrieve_by_id(ast_sip_get_sorcery(), "endpoint", persistence->endpoint);
-	if (!endpoint) {
-		ast_log(LOG_WARNING, "A subscription for '%s' could not be recreated as the endpoint was not found\n",
-			persistence->endpoint);
-		ast_sorcery_delete(ast_sip_get_sorcery(), persistence);
-		return 0;
-	}
-
+	memset(&rdata, 0, sizeof(rdata));
 	pj_pool_reset(pool);
 	rdata.tp_info.pool = pool;
 
 	if (ast_sip_create_rdata(&rdata, persistence->packet, persistence->src_name, persistence->src_port,
 		persistence->transport_key, persistence->local_name, persistence->local_port)) {
-		ast_log(LOG_WARNING, "A subscription for '%s' could not be recreated as the message could not be parsed\n",
+		ast_log(LOG_WARNING, "Failed recreating '%s' subscription: The message could not be parsed\n",
 			persistence->endpoint);
 		ast_sorcery_delete(ast_sip_get_sorcery(), persistence);
 		return 0;
 	}
 
 	if (rdata.msg_info.msg->type != PJSIP_REQUEST_MSG) {
-		ast_log(LOG_NOTICE, "Endpoint %s persisted a SIP response instead of a subscribe request. Unable to reload subscription.\n",
-				ast_sorcery_object_get_id(endpoint));
+		ast_log(LOG_NOTICE, "Failed recreating '%s' subscription: Stored a SIP response instead of a request.\n",
+			persistence->endpoint);
 		ast_sorcery_delete(ast_sip_get_sorcery(), persistence);
 		return 0;
 	}
 
-	request_uri = pjsip_uri_get_uri(rdata.msg_info.msg->line.req.uri);
-	resource_size = pj_strlen(&request_uri->user) + 1;
-	resource = alloca(resource_size);
-	ast_copy_pj_str(resource, &request_uri->user, resource_size);
-
-	/* Update the expiration header with the new expiration */
-	expires_header = pjsip_msg_find_hdr(rdata.msg_info.msg, PJSIP_H_EXPIRES, rdata.msg_info.msg->hdr.next);
-	if (!expires_header) {
-		expires_header = pjsip_expires_hdr_create(pool, 0);
-		if (!expires_header) {
-			ast_sorcery_delete(ast_sip_get_sorcery(), persistence);
-			return 0;
-		}
-		pjsip_msg_add_hdr(rdata.msg_info.msg, (pjsip_hdr*)expires_header);
-	}
-	expires_header->ivalue = (ast_tvdiff_ms(persistence->expires, ast_tvnow()) / 1000);
-
-	handler = subscription_get_handler_from_rdata(&rdata);
-	if (!handler || !handler->notifier) {
+	/* Continue the remainder in the distributor serializer */
+	serializer = ast_sip_get_distributor_serializer(&rdata);
+	if (!serializer) {
+		ast_log(LOG_WARNING, "Failed recreating '%s' subscription: Could not get distributor serializer.\n",
+			persistence->endpoint);
 		ast_sorcery_delete(ast_sip_get_sorcery(), persistence);
 		return 0;
 	}
-
-	generator = subscription_get_generator_from_rdata(&rdata, handler);
-	if (!generator) {
-		ast_sorcery_delete(ast_sip_get_sorcery(), persistence);
-		return 0;
-	}
-
-	ast_sip_mod_data_set(rdata.tp_info.pool, rdata.endpt_info.mod_data,
-			pubsub_module.id, MOD_DATA_PERSISTENCE, persistence);
-
-	memset(&tree, 0, sizeof(tree));
-	resp = build_resource_tree(endpoint, handler, resource, &tree,
-		ast_sip_pubsub_has_eventlist_support(&rdata));
-	if (PJSIP_IS_STATUS_IN_CLASS(resp, 200)) {
-		pj_status_t dlg_status;
-
-		sub_tree = create_subscription_tree(handler, endpoint, &rdata, resource, generator, &tree, &dlg_status);
-		if (!sub_tree) {
-			ast_sorcery_delete(ast_sip_get_sorcery(), persistence);
-			ast_log(LOG_WARNING, "Failed to re-create subscription for %s\n", persistence->endpoint);
-			return 0;
-		}
-		sub_tree->persistence = ao2_bump(persistence);
-		subscription_persistence_update(sub_tree, &rdata);
-		if (generate_initial_notify(sub_tree->root)) {
-			pjsip_evsub_terminate(sub_tree->evsub, PJ_TRUE);
-		}
-		send_notify(sub_tree, 1);
-	} else {
+	recreate_data.persistence = persistence;
+	recreate_data.rdata = &rdata;
+	if (ast_sip_push_task_synchronous(serializer, sub_persistence_recreate, &recreate_data)) {
+		ast_log(LOG_WARNING, "Failed recreating '%s' subscription: Could not continue under distributor serializer.\n",
+			persistence->endpoint);
 		ast_sorcery_delete(ast_sip_get_sorcery(), persistence);
 	}
-	resource_tree_destroy(&tree);
+	ast_taskprocessor_unreference(serializer);
 
 	return 0;
 }
@@ -1484,7 +1602,11 @@ static void sip_subscription_to_ami(struct sip_subscription_tree *sub_tree,
 	ast_str_append(buf, 0, "Endpoint: %s\r\n",
 		       ast_sorcery_object_get_id(sub_tree->endpoint));
 
-	ast_copy_pj_str(str, &sub_tree->dlg->call_id->id, sizeof(str));
+	if (sub_tree->dlg) {
+		ast_copy_pj_str(str, &sub_tree->dlg->call_id->id, sizeof(str));
+	} else {
+		ast_copy_string(str, "<unknown>", sizeof(str));
+	}
 	ast_str_append(buf, 0, "Callid: %s\r\n", str);
 
 	ast_str_append(buf, 0, "State: %s\r\n", pjsip_evsub_get_state_name(sub_tree->evsub));
@@ -1505,15 +1627,40 @@ static void sip_subscription_to_ami(struct sip_subscription_tree *sub_tree,
 
 void *ast_sip_subscription_get_header(const struct ast_sip_subscription *sub, const char *header)
 {
-	pjsip_dialog *dlg = sub->tree->dlg;
-	pjsip_msg *msg = ast_sip_mod_data_get(dlg->mod_data, pubsub_module.id, MOD_DATA_MSG);
+	pjsip_dialog *dlg;
+	pjsip_msg *msg;
 	pj_str_t name;
 
+	dlg = sub->tree->dlg;
+	msg = ast_sip_mod_data_get(dlg->mod_data, pubsub_module.id, MOD_DATA_MSG);
 	pj_cstr(&name, header);
 
 	return pjsip_msg_find_hdr_by_name(msg, &name, NULL);
 }
 
+/*!
+ * \internal
+ * \brief Wrapper for pjsip_evsub_send_request
+ *
+ * This function (re)sets the transport before sending to catch cases
+ * where the transport might have changed.
+ *
+ * If pjproject gives us the ability to resend, we'll only reset the transport
+ * if PJSIP_ETPNOTAVAIL is returned from send.
+ *
+ * \returns pj_status_t
+ */
+static pj_status_t internal_pjsip_evsub_send_request(struct sip_subscription_tree *sub_tree, pjsip_tx_data *tdata)
+{
+	pjsip_tpselector selector = { .type = PJSIP_TPSELECTOR_NONE, };
+
+	ast_sip_set_tpselector_from_transport_name(sub_tree->endpoint->transport, &selector);
+	pjsip_dlg_set_transport(sub_tree->dlg, &selector);
+
+	return pjsip_evsub_send_request(sub_tree->evsub, tdata);
+}
+
+/* XXX This function is not used. */
 struct ast_sip_subscription *ast_sip_create_subscription(const struct ast_sip_subscription_handler *handler,
 		struct ast_sip_endpoint *endpoint, const char *resource)
 {
@@ -1525,7 +1672,7 @@ struct ast_sip_subscription *ast_sip_create_subscription(const struct ast_sip_su
 	pjsip_evsub *evsub;
 	struct sip_subscription_tree *sub_tree = NULL;
 
-	sub_tree = allocate_subscription_tree(endpoint);
+	sub_tree = allocate_subscription_tree(endpoint, NULL);
 	if (!sub_tree) {
 		return NULL;
 	}
@@ -1560,7 +1707,7 @@ struct ast_sip_subscription *ast_sip_create_subscription(const struct ast_sip_su
 	evsub = sub_tree->evsub;
 
 	if (pjsip_evsub_initiate(evsub, NULL, -1, &tdata) == PJ_SUCCESS) {
-		pjsip_evsub_send_request(evsub, tdata);
+		internal_pjsip_evsub_send_request(sub_tree, tdata);
 	} else {
 		/* pjsip_evsub_terminate will result in pubsub_on_evsub_state,
 		 * being called and terminating the subscription. Therefore, we don't
@@ -1571,7 +1718,15 @@ struct ast_sip_subscription *ast_sip_create_subscription(const struct ast_sip_su
 		return NULL;
 	}
 
+	add_subscription(sub_tree);
+
 	return sub;
+}
+
+pjsip_dialog *ast_sip_subscription_get_dialog(struct ast_sip_subscription *sub)
+{
+	ast_assert(sub->tree->dlg != NULL);
+	return sub->tree->dlg;
 }
 
 struct ast_sip_endpoint *ast_sip_subscription_get_endpoint(struct ast_sip_subscription *sub)
@@ -1639,6 +1794,7 @@ static int sip_subscription_send_request(struct sip_subscription_tree *sub_tree,
 {
 #ifdef TEST_FRAMEWORK
 	struct ast_sip_endpoint *endpoint = sub_tree->endpoint;
+	pjsip_evsub *evsub = sub_tree->evsub;
 #endif
 	int res;
 
@@ -1647,16 +1803,17 @@ static int sip_subscription_send_request(struct sip_subscription_tree *sub_tree,
 		return -1;
 	}
 
-	res = pjsip_evsub_send_request(sub_tree->evsub, tdata) == PJ_SUCCESS ? 0 : -1;
+	res = internal_pjsip_evsub_send_request(sub_tree, tdata);
+
 	subscription_persistence_update(sub_tree, NULL);
 
 	ast_test_suite_event_notify("SUBSCRIPTION_STATE_SET",
 		"StateText: %s\r\n"
 		"Endpoint: %s\r\n",
-		pjsip_evsub_get_state_name(sub_tree->evsub),
+		pjsip_evsub_get_state_name(evsub),
 		ast_sorcery_object_get_id(endpoint));
 
-	return res;
+	return (res == PJ_SUCCESS ? 0 : -1);
 }
 
 /*!
@@ -2061,6 +2218,8 @@ static pjsip_require_hdr *create_require_eventlist(pj_pool_t *pool)
 /*!
  * \brief Send a NOTIFY request to a subscriber
  *
+ * \pre sub_tree->dlg is locked
+ *
  * \param sub_tree The subscription tree representing the subscription
  * \param force_full_state If true, ignore resource list settings and send full resource list state.
  * \retval 0 Success
@@ -2093,6 +2252,9 @@ static int send_notify(struct sip_subscription_tree *sub_tree, unsigned int forc
 		pjsip_msg_add_hdr(tdata->msg, (pjsip_hdr *) require);
 	}
 
+	if (sub_tree->root->subscription_state == PJSIP_EVSUB_STATE_TERMINATED) {
+		sub_tree->last_notify = 1;
+	}
 	if (sip_subscription_send_request(sub_tree, tdata)) {
 		return -1;
 	}
@@ -2105,13 +2267,16 @@ static int send_notify(struct sip_subscription_tree *sub_tree, unsigned int forc
 static int serialized_send_notify(void *userdata)
 {
 	struct sip_subscription_tree *sub_tree = userdata;
+	pjsip_dialog *dlg = sub_tree->dlg;
 
+	pjsip_dlg_inc_lock(dlg);
 	/* It's possible that between when the notification was scheduled
 	 * and now, that a new SUBSCRIBE arrived, requiring full state to be
 	 * sent out in an immediate NOTIFY. If that has happened, we need to
 	 * bail out here instead of sending the batched NOTIFY.
 	 */
 	if (!sub_tree->send_scheduled_notify) {
+		pjsip_dlg_dec_lock(dlg);
 		ao2_cleanup(sub_tree);
 		return 0;
 	}
@@ -2121,6 +2286,7 @@ static int serialized_send_notify(void *userdata)
 			"Resource: %s",
 			sub_tree->root->resource);
 	sub_tree->notify_sched_id = -1;
+	pjsip_dlg_dec_lock(dlg);
 	ao2_cleanup(sub_tree);
 	return 0;
 }
@@ -2153,8 +2319,19 @@ static int schedule_notification(struct sip_subscription_tree *sub_tree)
 int ast_sip_subscription_notify(struct ast_sip_subscription *sub, struct ast_sip_body_data *notify_data,
 		int terminate)
 {
+	int res;
+	pjsip_dialog *dlg = sub->tree->dlg;
+
+	pjsip_dlg_inc_lock(dlg);
+
+	if (!sub->tree->evsub) {
+		pjsip_dlg_dec_lock(dlg);
+		return 0;
+	}
+
 	if (ast_sip_pubsub_generate_body_content(ast_sip_subscription_get_body_type(sub),
 				ast_sip_subscription_get_body_subtype(sub), notify_data, &sub->body_text)) {
+		pjsip_dlg_dec_lock(dlg);
 		return -1;
 	}
 
@@ -2164,9 +2341,8 @@ int ast_sip_subscription_notify(struct ast_sip_subscription *sub, struct ast_sip
 	}
 
 	if (sub->tree->notification_batch_interval) {
-		return schedule_notification(sub->tree);
+		res = schedule_notification(sub->tree);
 	} else {
-		int res;
 		/* See the note in pubsub_on_rx_refresh() for why sub->tree is refbumped here */
 		ao2_ref(sub->tree, +1);
 		res = send_notify(sub->tree, 0);
@@ -2174,9 +2350,15 @@ int ast_sip_subscription_notify(struct ast_sip_subscription *sub, struct ast_sip
 				"Resource: %s",
 				sub->tree->root->resource);
 		ao2_ref(sub->tree, -1);
-
-		return res;
 	}
+
+	pjsip_dlg_dec_lock(dlg);
+	return res;
+}
+
+pjsip_sip_uri *ast_sip_subscription_get_sip_uri(struct ast_sip_subscription *sub)
+{
+	return sub->uri;
 }
 
 void ast_sip_subscription_get_local_uri(struct ast_sip_subscription *sub, char *buf, size_t size)
@@ -2186,7 +2368,9 @@ void ast_sip_subscription_get_local_uri(struct ast_sip_subscription *sub, char *
 
 void ast_sip_subscription_get_remote_uri(struct ast_sip_subscription *sub, char *buf, size_t size)
 {
-	pjsip_dialog *dlg = sub->tree->dlg;
+	pjsip_dialog *dlg;
+
+	dlg = sub->tree->dlg;
 	ast_copy_pj_str(buf, &dlg->remote.info_str, size);
 }
 
@@ -2436,20 +2620,28 @@ void ast_sip_unregister_subscription_handler(struct ast_sip_subscription_handler
 	AST_RWLIST_TRAVERSE_SAFE_END;
 }
 
-static struct ast_sip_pubsub_body_generator *find_body_generator_type_subtype(const char *content_type,
-		const char *content_subtype)
+static struct ast_sip_pubsub_body_generator *find_body_generator_type_subtype_nolock(const char *type, const char *subtype)
 {
-	struct ast_sip_pubsub_body_generator *iter;
-	SCOPED_LOCK(lock, &body_generators, AST_RWLIST_RDLOCK, AST_RWLIST_UNLOCK);
+	struct ast_sip_pubsub_body_generator *gen;
 
-	AST_LIST_TRAVERSE(&body_generators, iter, list) {
-		if (!strcmp(iter->type, content_type) &&
-				!strcmp(iter->subtype, content_subtype)) {
+	AST_LIST_TRAVERSE(&body_generators, gen, list) {
+		if (!strcmp(gen->type, type)
+			&& !strcmp(gen->subtype, subtype)) {
 			break;
 		}
-	};
+	}
 
-	return iter;
+	return gen;
+}
+
+static struct ast_sip_pubsub_body_generator *find_body_generator_type_subtype(const char *type, const char *subtype)
+{
+	struct ast_sip_pubsub_body_generator *gen;
+
+	AST_RWLIST_RDLOCK(&body_generators);
+	gen = find_body_generator_type_subtype_nolock(type, subtype);
+	AST_RWLIST_UNLOCK(&body_generators);
+	return gen;
 }
 
 static struct ast_sip_pubsub_body_generator *find_body_generator_accept(const char *accept)
@@ -2510,6 +2702,7 @@ static int generate_initial_notify(struct ast_sip_subscription *sub)
 		return 0;
 	}
 
+	/* We notify subscription establishment only on the tree leaves. */
 	if (sub->handler->notifier->subscription_established(sub)) {
 		return -1;
 	}
@@ -2527,6 +2720,24 @@ static int generate_initial_notify(struct ast_sip_subscription *sub)
 	ao2_cleanup(notify_data);
 
 	return res;
+}
+
+static int initial_notify_task(void * obj)
+{
+	struct sip_subscription_tree *sub_tree;
+
+	sub_tree = obj;
+	if (generate_initial_notify(sub_tree->root)) {
+		pjsip_evsub_terminate(sub_tree->evsub, PJ_TRUE);
+	} else {
+		send_notify(sub_tree, 1);
+		ast_test_suite_event_notify("SUBSCRIPTION_ESTABLISHED",
+			"Resource: %s",
+			sub_tree->root->resource);
+	}
+
+	ao2_ref(sub_tree, -1);
+	return 0;
 }
 
 static pj_bool_t pubsub_on_rx_subscribe_request(pjsip_rx_data *rdata)
@@ -2566,7 +2777,7 @@ static pj_bool_t pubsub_on_rx_subscribe_request(pjsip_rx_data *rdata)
 
 	request_uri_sip = pjsip_uri_get_uri(request_uri);
 	resource_size = pj_strlen(&request_uri_sip->user) + 1;
-	resource = alloca(resource_size);
+	resource = ast_alloca(resource_size);
 	ast_copy_pj_str(resource, &request_uri_sip->user, resource_size);
 
 	expires_header = pjsip_msg_find_hdr(rdata->msg_info.msg, PJSIP_H_EXPIRES, rdata->msg_info.msg->hdr.next);
@@ -2616,13 +2827,9 @@ static pj_bool_t pubsub_on_rx_subscribe_request(pjsip_rx_data *rdata)
 		sub_tree->persistence = subscription_persistence_create(sub_tree);
 		subscription_persistence_update(sub_tree, rdata);
 		sip_subscription_accept(sub_tree, rdata, resp);
-		if (generate_initial_notify(sub_tree->root)) {
+		if (ast_sip_push_task(sub_tree->serializer, initial_notify_task, ao2_bump(sub_tree))) {
 			pjsip_evsub_terminate(sub_tree->evsub, PJ_TRUE);
-		} else {
-			send_notify(sub_tree, 1);
-			ast_test_suite_event_notify("SUBSCRIPTION_ESTABLISHED",
-					"Resource: %s",
-					sub_tree->root->resource);
+			ao2_ref(sub_tree, -1);
 		}
 	}
 
@@ -2783,7 +2990,7 @@ static struct ast_sip_publication *publish_request_initial(struct ast_sip_endpoi
 
 	request_uri_sip = pjsip_uri_get_uri(request_uri);
 	resource_size = pj_strlen(&request_uri_sip->user) + 1;
-	resource_name = alloca(resource_size);
+	resource_name = ast_alloca(resource_size);
 	ast_copy_pj_str(resource_name, &request_uri_sip->user, resource_size);
 
 	resource = ast_sorcery_retrieve_by_id(ast_sip_get_sorcery(), "inbound-publication", resource_name);
@@ -2972,27 +3179,24 @@ int ast_sip_pubsub_register_body_generator(struct ast_sip_pubsub_body_generator 
 	pj_str_t accept;
 	pj_size_t accept_len;
 
-	existing = find_body_generator_type_subtype(generator->type, generator->subtype);
+	AST_RWLIST_WRLOCK(&body_generators);
+	existing = find_body_generator_type_subtype_nolock(generator->type, generator->subtype);
 	if (existing) {
-		ast_log(LOG_WARNING, "Cannot register body generator of %s/%s."
-				"One is already registered.\n", generator->type, generator->subtype);
+		AST_RWLIST_UNLOCK(&body_generators);
+		ast_log(LOG_WARNING, "A body generator for %s/%s is already registered.\n",
+			generator->type, generator->subtype);
 		return -1;
 	}
-
-	AST_RWLIST_WRLOCK(&body_generators);
 	AST_LIST_INSERT_HEAD(&body_generators, generator, list);
 	AST_RWLIST_UNLOCK(&body_generators);
 
-	/* Lengths of type and subtype plus space for a slash. pj_str_t is not
-	 * null-terminated, so there is no need to allocate for the extra null
-	 * byte
-	 */
+	/* Lengths of type and subtype plus a slash. */
 	accept_len = strlen(generator->type) + strlen(generator->subtype) + 1;
 
-	accept.ptr = alloca(accept_len);
-	accept.slen = accept_len;
-	/* Safe use of sprintf */
-	sprintf(accept.ptr, "%s/%s", generator->type, generator->subtype);
+	/* Add room for null terminator that sprintf() will set. */
+	pj_strset(&accept, ast_alloca(accept_len + 1), accept_len);
+	sprintf((char *) pj_strbuf(&accept), "%s/%s", generator->type, generator->subtype);/* Safe */
+
 	pjsip_endpt_add_capability(ast_sip_get_pjsip_endpoint(), &pubsub_module,
 			PJSIP_H_ACCEPT, NULL, 1, &accept);
 
@@ -3062,14 +3266,15 @@ int ast_sip_pubsub_generate_body_content(const char *type, const char *subtype,
 	}
 
 	if (strcmp(data->body_type, generator->body_type)) {
-		ast_log(LOG_WARNING, "Body generator does not accept the type of data provided\n");
+		ast_log(LOG_WARNING, "%s/%s body generator does not accept the type of data provided\n",
+			type, subtype);
 		return -1;
 	}
 
 	body = generator->allocate_body(data->body_data);
 	if (!body) {
-		ast_log(LOG_WARNING, "Unable to allocate a NOTIFY body of type %s/%s\n",
-				type, subtype);
+		ast_log(LOG_WARNING, "%s/%s body generator could not to allocate a body\n",
+			type, subtype);
 		return -1;
 	}
 
@@ -3113,24 +3318,6 @@ static pj_bool_t pubsub_on_rx_request(pjsip_rx_data *rdata)
 	return PJ_FALSE;
 }
 
-static void pubsub_on_evsub_state(pjsip_evsub *evsub, pjsip_event *event)
-{
-	struct sip_subscription_tree *sub_tree;
-
-	if (pjsip_evsub_get_state(evsub) != PJSIP_EVSUB_STATE_TERMINATED) {
-		return;
-	}
-
-	sub_tree = pjsip_evsub_get_mod_data(evsub, pubsub_module.id);
-	if (!sub_tree) {
-		return;
-	}
-
-	ao2_cleanup(sub_tree);
-
-	pjsip_evsub_set_mod_data(evsub, pubsub_module.id, NULL);
-}
-
 static void set_state_terminated(struct ast_sip_subscription *sub)
 {
 	int i;
@@ -3141,6 +3328,145 @@ static void set_state_terminated(struct ast_sip_subscription *sub)
 	}
 }
 
+/* XXX This function and serialized_pubsub_on_rx_refresh are nearly identical */
+static int serialized_pubsub_on_server_timeout(void *userdata)
+{
+	struct sip_subscription_tree *sub_tree = userdata;
+	pjsip_dialog *dlg = sub_tree->dlg;
+
+	pjsip_dlg_inc_lock(dlg);
+	if (!sub_tree->evsub) {
+		pjsip_dlg_dec_lock(dlg);
+		return 0;
+	}
+	set_state_terminated(sub_tree->root);
+	send_notify(sub_tree, 1);
+	ast_test_suite_event_notify("SUBSCRIPTION_TERMINATED",
+			"Resource: %s",
+			sub_tree->root->resource);
+
+	pjsip_dlg_dec_lock(dlg);
+	ao2_cleanup(sub_tree);
+	return 0;
+}
+
+/*!
+ * \brief PJSIP callback when underlying SIP subscription changes state
+ *
+ * This callback is a bit of a mess, because it's not always called when
+ * you might expect it to be, and it can be called multiple times for the
+ * same state.
+ *
+ * For instance, this function is not called at all when an incoming SUBSCRIBE
+ * arrives to refresh a subscription. That makes sense in a way, since the
+ * subscription state has not made a change; it was active and remains active.
+ *
+ * However, if an incoming SUBSCRIBE arrives to end a subscription, then this
+ * will be called into once upon receiving the SUBSCRIBE (after the call to
+ * pubsub_on_rx_refresh) and again when sending a NOTIFY to end the subscription.
+ * In both cases, the apparent state of the subscription is "terminated".
+ *
+ * However, the double-terminated state changes don't happen in all cases. For
+ * instance, if a subscription expires, then the only time this callback is
+ * called is when we send the NOTIFY to end the subscription.
+ *
+ * As far as state changes are concerned, we only ever care about transitions
+ * to the "terminated" state. The action we take here is dependent on the
+ * conditions behind why the state change to "terminated" occurred. If the
+ * state change has occurred because we are sending a NOTIFY to end the
+ * subscription, we consider this to be the final hurrah of the subscription
+ * and take measures to start shutting things down. If the state change to
+ * terminated occurs for a different reason (e.g. transaction timeout,
+ * incoming SUBSCRIBE to end the subscription), then we push a task to
+ * send out a NOTIFY. When that NOTIFY is sent, this callback will be
+ * called again and we will actually shut down the subscription. The
+ * subscription tree's last_notify field let's us know if this is being
+ * called as a result of a terminating NOTIFY or not.
+ *
+ * There is no guarantee that this function will be called from a serializer
+ * thread since it can be called due to a transaction timeout. Therefore
+ * synchronization primitives are necessary to ensure that no operations
+ * step on each others' toes. The dialog lock is always held when this
+ * callback is called, so we ensure that relevant structures that may
+ * be touched in this function are always protected by the dialog lock
+ * elsewhere as well. The dialog lock in particular protects
+ *
+ * \li The subscription tree's last_notify field
+ * \li The subscription tree's evsub pointer
+ */
+static void pubsub_on_evsub_state(pjsip_evsub *evsub, pjsip_event *event)
+{
+	struct sip_subscription_tree *sub_tree;
+
+	ast_debug(3, "on_evsub_state called with state %s\n", pjsip_evsub_get_state_name(evsub));
+
+	if (pjsip_evsub_get_state(evsub) != PJSIP_EVSUB_STATE_TERMINATED) {
+		return;
+	}
+
+	sub_tree = pjsip_evsub_get_mod_data(evsub, pubsub_module.id);
+	if (!sub_tree) {
+		return;
+	}
+
+	if (!sub_tree->last_notify) {
+		if (ast_sip_push_task(sub_tree->serializer, serialized_pubsub_on_server_timeout, ao2_bump(sub_tree))) {
+			ast_log(LOG_ERROR, "Failed to push task to send final NOTIFY.\n");
+			ao2_ref(sub_tree, -1);
+		} else {
+			return;
+		}
+	}
+
+	remove_subscription(sub_tree);
+	pjsip_evsub_set_mod_data(evsub, pubsub_module.id, NULL);
+	sub_tree->evsub = NULL;
+	ast_sip_dialog_set_serializer(sub_tree->dlg, NULL);
+	ast_sip_dialog_set_endpoint(sub_tree->dlg, NULL);
+	subscription_persistence_remove(sub_tree);
+	shutdown_subscriptions(sub_tree->root);
+
+	/* Remove evsub's reference to the sub_tree */
+	ao2_ref(sub_tree, -1);
+}
+
+static int serialized_pubsub_on_rx_refresh(void *userdata)
+{
+	struct sip_subscription_tree *sub_tree = userdata;
+	pjsip_dialog *dlg = sub_tree->dlg;
+
+	pjsip_dlg_inc_lock(dlg);
+	if (!sub_tree->evsub) {
+		pjsip_dlg_dec_lock(dlg);
+		return 0;
+	}
+
+	if (pjsip_evsub_get_state(sub_tree->evsub) == PJSIP_EVSUB_STATE_TERMINATED) {
+		set_state_terminated(sub_tree->root);
+	}
+
+	send_notify(sub_tree, 1);
+
+	ast_test_suite_event_notify(sub_tree->root->subscription_state == PJSIP_EVSUB_STATE_TERMINATED ?
+			"SUBSCRIPTION_TERMINATED" : "SUBSCRIPTION_REFRESHED",
+			"Resource: %s", sub_tree->root->resource);
+
+	pjsip_dlg_dec_lock(dlg);
+	ao2_cleanup(sub_tree);
+	return 0;
+}
+
+/*!
+ * \brief Called whenever an in-dialog SUBSCRIBE is received
+ *
+ * This includes both SUBSCRIBE requests that actually refresh the subscription
+ * as well as SUBSCRIBE requests that end the subscription.
+ *
+ * In the case where the SUBSCRIBE is actually refreshing the subscription we
+ * push a task to send an appropriate NOTIFY request. In the case where the
+ * SUBSCRIBE is ending the subscription, we let the pubsub_on_evsub_state
+ * callback take care of sending the terminal NOTIFY request instead.
+ */
 static void pubsub_on_rx_refresh(pjsip_evsub *evsub, pjsip_rx_data *rdata,
 		int *p_st_code, pj_str_t **p_st_text, pjsip_hdr *res_hdr, pjsip_msg_body **p_body)
 {
@@ -3151,31 +3477,19 @@ static void pubsub_on_rx_refresh(pjsip_evsub *evsub, pjsip_rx_data *rdata,
 		return;
 	}
 
-	/* If sending a NOTIFY to terminate a subscription, then pubsub_on_evsub_state()
-	 * will be called when we send the NOTIFY, and that will result in dropping the
-	 * refcount of sub_tree by one, and possibly destroying the sub_tree. We need to
-	 * hold a reference to the sub_tree until this function returns so that we don't
-	 * try to read from or write to freed memory by accident
+	/* PJSIP will set the evsub's state to terminated before calling into this function
+	 * if the Expires value of the incoming SUBSCRIBE is 0.
 	 */
-	ao2_ref(sub_tree, +1);
-
-	if (pjsip_evsub_get_state(evsub) == PJSIP_EVSUB_STATE_TERMINATED) {
-		set_state_terminated(sub_tree->root);
+	if (pjsip_evsub_get_state(sub_tree->evsub) != PJSIP_EVSUB_STATE_TERMINATED) {
+		if (ast_sip_push_task(sub_tree->serializer, serialized_pubsub_on_rx_refresh, ao2_bump(sub_tree))) {
+			/* If we can't push the NOTIFY refreshing task...we'll just go with it. */
+			ao2_ref(sub_tree, -1);
+		}
 	}
-
-	if (send_notify(sub_tree, 1)) {
-		*p_st_code = 500;
-	}
-
-	ast_test_suite_event_notify(sub_tree->root->subscription_state == PJSIP_EVSUB_STATE_TERMINATED ?
-			"SUBSCRIPTION_TERMINATED" : "SUBSCRIPTION_REFRESHED",
-			"Resource: %s", sub_tree->root->resource);
 
 	if (sub_tree->is_list) {
 		pj_list_insert_before(res_hdr, create_require_eventlist(rdata->tp_info.pool));
 	}
-
-	ao2_ref(sub_tree, -1);
 }
 
 static void pubsub_on_rx_notify(pjsip_evsub *evsub, pjsip_rx_data *rdata, int *p_st_code,
@@ -3213,31 +3527,24 @@ static void pubsub_on_client_refresh(pjsip_evsub *evsub)
 	ast_sip_push_task(sub_tree->serializer, serialized_pubsub_on_client_refresh, sub_tree);
 }
 
-static int serialized_pubsub_on_server_timeout(void *userdata)
-{
-	struct sip_subscription_tree *sub_tree = userdata;
-
-	set_state_terminated(sub_tree->root);
-	send_notify(sub_tree, 1);
-	ast_test_suite_event_notify("SUBSCRIPTION_TERMINATED",
-			"Resource: %s",
-			sub_tree->root->resource);
-
-	ao2_cleanup(sub_tree);
-	return 0;
-}
-
 static void pubsub_on_server_timeout(pjsip_evsub *evsub)
 {
-	struct sip_subscription_tree *sub_tree = pjsip_evsub_get_mod_data(evsub, pubsub_module.id);
 
+	struct sip_subscription_tree *sub_tree = pjsip_evsub_get_mod_data(evsub, pubsub_module.id);
 	if (!sub_tree) {
-		/* if a subscription has been terminated and the subscription
-		   timeout/expires is less than the time it takes for all pending
-		   transactions to end then the subscription timer will not have
-		   been canceled yet and sub will be null, so do nothing since
-		   the subscription has already been terminated. */
-		return;
+		/* PJSIP does not terminate the server timeout timer when a SUBSCRIBE
+		 * with Expires: 0 arrives to end a subscription, nor does it terminate
+		 * this timer when we send a NOTIFY request in response to receiving such
+		 * a SUBSCRIBE. PJSIP does not stop the server timeout timer until the
+		 * NOTIFY transaction has finished (either through receiving a response
+		 * or through a transaction timeout).
+		 *
+		 * Therefore, it is possible that we can be told that a server timeout
+		 * occurred after we already thought that the subscription had been
+		 * terminated. In such a case, we will have already removed the sub_tree
+		 * from the evsub's mod_data array.
+		 */
+        return;
 	}
 
 	ao2_ref(sub_tree, +1);
@@ -3446,7 +3753,11 @@ static int list_item_handler(const struct aco_option *opt,
 	char *items = ast_strdupa(var->value);
 	char *item;
 
-	while ((item = strsep(&items, ","))) {
+	while ((item = ast_strip(strsep(&items, ",")))) {
+		if (ast_strlen_zero(item)) {
+			continue;
+		}
+
 		if (item_in_vector(list, item)) {
 			ast_log(LOG_WARNING, "Ignoring duplicated list item '%s'\n", item);
 			continue;
@@ -4258,6 +4569,7 @@ static int load_module(void)
 	if (apply_list_configuration(sorcery)) {
 		ast_sip_unregister_service(&pubsub_module);
 		ast_sched_context_destroy(sched);
+		return AST_MODULE_LOAD_FAILURE;
 	}
 
 	ast_sorcery_apply_default(sorcery, "inbound-publication", "config", "pjsip.conf,criteria=type=inbound-publication");

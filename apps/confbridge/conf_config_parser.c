@@ -227,6 +227,9 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 				<configOption name="template">
 					<synopsis>When using the CONFBRIDGE dialplan function, use a user profile as a template for creating a new temporary profile</synopsis>
 				</configOption>
+				<configOption name="timeout">
+					<synopsis>Kick the user out of the conference after this many seconds. 0 means there is no timeout for the user.</synopsis>
+				</configOption>
 			</configObject>
 			<configObject name="bridge_profile">
 				<synopsis>A named profile to apply to specific bridges.</synopsis>
@@ -312,6 +315,22 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 						conference adds the new portion to end of current record_file. When this is
 						set to no, a new <replaceable>record_file</replaceable> is generated every time you start then stop recording
 						on a conference.
+					</para></description>
+				</configOption>
+				<configOption name="regcontext">
+					<synopsis>The name of the context into which to register the name of the conference bridge as NoOP() at priority 1</synopsis>
+					<description><para>
+						When set this will cause the name of the created conference to be registered
+						into the named context at priority 1 with an operation of NoOP().  This can
+						then be used in other parts of the dialplan to test for the existence of a
+						specific conference bridge.
+						You should be aware that there are potential races between testing for the
+						existence of a bridge, and taking action upon that information, consider
+						for example two callers executing the check simultaniously, and then taking
+						special action as "first caller" into the bridge.  The same for exiting,
+						directly after the check the bridge can be destroyed before the new caller
+						enters (creating a new bridge), for example, and the "first member" actions
+						could thus be missed.
 					</para></description>
 				</configOption>
 				<configOption name="video_mode">
@@ -1560,6 +1579,8 @@ static char *handle_cli_confbridge_show_bridge_profile(struct ast_cli_entry *e, 
 		ast_cli(a->fd,"Max Members:          No Limit\n");
 	}
 
+	ast_cli(a->fd,"Registration context: %s\n", b_profile.regcontext);
+
 	switch (b_profile.flags
 		& (BRIDGE_OPT_VIDEO_SRC_LAST_MARKED | BRIDGE_OPT_VIDEO_SRC_FIRST_MARKED
 			| BRIDGE_OPT_VIDEO_SRC_FOLLOW_TALKER)) {
@@ -2109,6 +2130,7 @@ int conf_load_config(void)
 	aco_option_register(&cfg_info, "dsp_silence_threshold", ACO_EXACT, user_types, __stringify(DEFAULT_SILENCE_THRESHOLD), OPT_UINT_T, 0, FLDSET(struct user_profile, silence_threshold));
 	aco_option_register(&cfg_info, "dsp_talking_threshold", ACO_EXACT, user_types, __stringify(DEFAULT_TALKING_THRESHOLD), OPT_UINT_T, 0, FLDSET(struct user_profile, talking_threshold));
 	aco_option_register(&cfg_info, "jitterbuffer", ACO_EXACT, user_types, "no", OPT_BOOLFLAG_T, 1, FLDSET(struct user_profile, flags), USER_OPT_JITTERBUFFER);
+	aco_option_register(&cfg_info, "timeout", ACO_EXACT, user_types, "0", OPT_UINT_T, 0, FLDSET(struct user_profile, timeout));
 	/* This option should only be used with the CONFBRIDGE dialplan function */
 	aco_option_register_custom(&cfg_info, "template", ACO_EXACT, user_types, NULL, user_template_handler, 0);
 
@@ -2124,6 +2146,7 @@ int conf_load_config(void)
 	aco_option_register(&cfg_info, "record_file_append", ACO_EXACT, bridge_types, "yes", OPT_BOOLFLAG_T, 1, FLDSET(struct bridge_profile, flags), BRIDGE_OPT_RECORD_FILE_APPEND);
 	aco_option_register(&cfg_info, "max_members", ACO_EXACT, bridge_types, "0", OPT_UINT_T, 0, FLDSET(struct bridge_profile, max_members));
 	aco_option_register(&cfg_info, "record_file", ACO_EXACT, bridge_types, NULL, OPT_CHAR_ARRAY_T, 0, CHARFLDSET(struct bridge_profile, rec_file));
+	aco_option_register(&cfg_info, "regcontext", ACO_EXACT, bridge_types, NULL, OPT_CHAR_ARRAY_T, 0, CHARFLDSET(struct bridge_profile, regcontext));
 	aco_option_register(&cfg_info, "language", ACO_EXACT, bridge_types, "en", OPT_CHAR_ARRAY_T, 0, CHARFLDSET(struct bridge_profile, language));
 	aco_option_register_custom(&cfg_info, "^sound_", ACO_REGEX, bridge_types, NULL, sound_option_handler, 0);
 	/* This option should only be used with the CONFBRIDGE dialplan function */

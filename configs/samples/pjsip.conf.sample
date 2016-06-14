@@ -615,13 +615,28 @@
 ;disallow=      ; Media Codec s to disallow (default: "")
 ;dtmf_mode=rfc4733      ; DTMF mode (default: "rfc4733")
 ;media_address=         ; IP address used in SDP for media handling (default: "")
+;bind_rtp_to_media_address=     ; Bind the RTP session to the media_address.
+                                ; This causes all RTP packets to be sent from
+                                ; the specified address. (default: "no")
 ;force_rport=yes        ; Force use of return port (default: "yes")
 ;ice_support=no ; Enable the ICE mechanism to help traverse NAT (default: "no")
-;identify_by=username   ; Way s for Endpoint to be identified (default:
-                        ; "username")
+;identify_by=username   ; A comma-separated list of ways the Endpoint or AoR can be
+                        ; identified.
+                        ; "username": Identify by the From or To username and domain
+                        ; "auth_username": Identify by the Authorization username and realm
+                        ; In all cases, if an exact match on username and domain/realm fails,
+                        ; the match will be retried with just the username.
+                        ; (default: "username")
 ;redirect_method=user   ; How redirects received from an endpoint are handled
                         ; (default: "user")
-;mailboxes=     ; Mailbox es to be associated with (default: "")
+;mailboxes=     ; NOTIFY the endpoint when state changes for any of the specified mailboxes.
+                ; Asterisk will send unsolicited MWI NOTIFY messages to the endpoint when state
+                ; changes happen for any of the specified mailboxes. (default: "")
+;voicemail_extension= ; The voicemail extension to send in the NOTIFY Message-Account header
+                      ; (default: global/default_voicemail_extension)
+;mwi_subscribe_replaces_unsolicited=no
+                      ; An MWI subscribe will replace unsoliticed NOTIFYs
+                      ; (default: "no")
 ;moh_suggest=default    ; Default Music On Hold class (default: "default")
 ;outbound_auth= ; Authentication object used for outbound requests (default:
                 ; "")
@@ -807,6 +822,12 @@
                                 ; clients are slow to process the received
                                 ; information. Value is in milliseconds; default
                                 ; is 100 ms.
+;allow_reload=no    ; Although transports can now be reloaded, that may not be
+                    ; desirable because of the slight possibility of dropped
+                    ; calls. To make sure there are no unintentional drops, if
+                    ; this option is set to 'no' (the default) changes to the
+                    ; particular transport will be ignored. If set to 'yes',
+                    ; changes (if any) will be applied.
 
 ;==========================AOR SECTION OPTIONS=========================
 ;[aor]
@@ -815,7 +836,11 @@
 ;default_expiration=3600        ; Default expiration time in seconds for
                                 ; contacts that are dynamically bound to an AoR
                                 ; (default: "3600")
-;mailboxes=     ; Mailbox es to be associated with (default: "")
+;mailboxes=           ; Allow subscriptions for the specified mailbox(es)
+                      ; This option applies when an external entity subscribes to an AoR
+                      ; for Message Waiting Indications. (default: "")
+;voicemail_extension= ; The voicemail extension to send in the NOTIFY Message-Account header
+                      ; (default: global/default_voicemail_extension)
 ;maximum_expiration=7200        ; Maximum time to keep an AoR (default: "7200")
 ;max_contacts=0 ; Maximum number of contacts that can bind to an AoR (default:
                 ; "0")
@@ -877,14 +902,55 @@
 ;keep_alive_interval=20 ; The interval (in seconds) at which to send keepalive
                         ; messages on all active connection-oriented transports
                         ; (default: "0")
+;contact_expiration_check_interval=30
+                        ; The interval (in seconds) to check for expired contacts.
+;disable_multi_domain=no
+			; Disable Multi Domain support.
+			; If disabled it can improve realtime performace by reducing
+			; number of database requsts
+			; (default: "no")
 ;endpoint_identifier_order=ip,username,anonymous
             ; The order by which endpoint identifiers are given priority.
-            ; Identifier names are derived from res_pjsip_endpoint_identifier_*
-            ; modules. (default: ip,username,anonymous)
+            ; Currently, "ip", "username", "auth_username" and "anonymous" are valid
+            ; identifiers as registered by the res_pjsip_endpoint_identifier_* modules.
+            ; Some modules like res_pjsip_endpoint_identifier_user register more than
+            ; one identifier. Use the CLI command "pjsip show identifiers" to see the
+            ; identifiers currently available.
+            ; (default: ip,username,anonymous)
 ;max_initial_qualify_time=4 ; The maximum amount of time (in seconds) from
                             ; startup that qualifies should be attempted on all
                             ; contacts.  If greater than the qualify_frequency
                             ; for an aor, qualify_frequency will be used instead.
+;regcontext=sipregistrations  ; If regcontext is specified, Asterisk will dynamically
+                              ; create and destroy a NoOp priority 1 extension for a
+                              ; given endpoint who registers or unregisters with us.
+                              ; The extension added is the name of the endpoint.
+;default_voicemail_extension=asterisk
+                   ; The voicemail extension to send in the NOTIFY Message-Account header
+                   ; if not set on endpoint or aor.
+                   ; (default: "")
+;
+; The following unidentified_request options are only used when "auth_username"
+; matching is enabled in "endpoint_identifier_order".
+;
+;unidentified_request_count=5   ; The number of unidentified requests that can be
+                                ; received from a single IP address in
+                                ; unidentified_request_period seconds before a security
+                                ; event is generated. (default: 5)
+;unidentified_request_period=5  ; See above.  (default: 5 seconds)
+;unidentified_request_prune_interval=30
+                                ; The interval at which unidentified requests
+                                ; are check to see if they can be pruned.  If they're
+                                ; older than twice the unidentified_request_period,
+                                ; they're pruned.
+;
+;default_from_user=asterisk     ; When Asterisk generates an outgoing SIP request, the
+                                ; From header username will be set to this value if
+                                ; there is no better option (such as CallerID or
+                                ; endpoint/from_user) to be used
+;default_realm=asterisk         ; When Asterisk generates a challenge, the realm will be
+                                ; set to this value if there is no better option (such as
+                                ; auth/realm) to be used
 
 ; MODULE PROVIDING BELOW SECTION(S): res_pjsip_acl
 ;==========================ACL SECTION OPTIONS=========================
@@ -923,8 +989,25 @@
                         ; registration is unsuccessful (default: "60")
 ;forbidden_retry_interval=0     ; Interval used when receiving a 403 Forbidden
                                 ; response (default: "0")
+;fatal_retry_interval=0 ; Interval used when receiving a fatal response.
+                        ; (default: "0") A fatal response is any permanent
+                        ; failure (non-temporary 4xx, 5xx, 6xx) response
+                        ; received from the registrar. NOTE - if also set
+                        ; the 'forbidden_retry_interval' takes precedence
+                        ; over this one when a 403 is received. Also, if
+                        ; 'auth_rejection_permanent' equals 'yes' a 401 and
+                        ; 407 become subject to this retry interval.
 ;server_uri=    ; SIP URI of the server to register against (default: "")
 ;transport=     ; Transport used for outbound authentication (default: "")
+;line=          ; When enabled this option will cause a 'line' parameter to be
+                ; added to the Contact header placed into the outgoing
+                ; registration request. If the remote server sends a call
+                ; this line parameter will be used to establish a relationship
+                ; to the outbound registration, ultimately causing the
+                ; configured endpoint to be used (default: "no")
+;endpoint=      ; When line support is enabled this configured endpoint name
+                ; is used for incoming calls that are related to the outbound
+                ; registration (default: "")
 ;type=  ; Must be of type registration (default: "")
 
 

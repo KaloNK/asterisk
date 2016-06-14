@@ -168,6 +168,7 @@ static void logmsg_free(struct logmsg *msg)
 	if (msg->callid) {
 		ast_callid_unref(msg->callid);
 	}
+	ast_string_field_free_memory(msg);
 	ast_free(msg);
 }
 
@@ -286,6 +287,70 @@ static void make_components(struct logchannel *chan)
 	chan->logmask = logmask;
 }
 
+/*!
+ * \brief create the filename that will be used for a logger channel.
+ *
+ * \param channel The name of the logger channel
+ * \param[out] filename The filename for the logger channel
+ * \param size The size of the filename buffer
+ */
+static void make_filename(const char *channel, char *filename, size_t size)
+{
+	const char *log_dir_prefix = "";
+	const char *log_dir_separator = "";
+
+	*filename = '\0';
+
+	if (!strcasecmp(channel, "console")) {
+		return;
+	}
+
+	if (!strncasecmp(channel, "syslog", 6)) {
+		ast_copy_string(filename, channel, size);
+		return;
+	}
+
+	/* It's a filename */
+
+	if (channel[0] != '/') {
+		log_dir_prefix = ast_config_AST_LOG_DIR;
+		log_dir_separator = "/";
+	}
+
+	if (!ast_strlen_zero(hostname)) {
+		snprintf(filename, size, "%s%s%s.%s",
+			log_dir_prefix, log_dir_separator, channel, hostname);
+	} else {
+		snprintf(filename, size, "%s%s%s",
+			log_dir_prefix, log_dir_separator, channel);
+	}
+}
+
+/*!
+ * \brief Find a particular logger channel by name
+ *
+ * \pre logchannels list is locked
+ *
+ * \param channel The name of the logger channel to find
+ * \retval non-NULL The corresponding logger channel
+ * \retval NULL Unable to find a logger channel with that particular name
+ */
+static struct logchannel *find_logchannel(const char *channel)
+{
+	char filename[PATH_MAX];
+	struct logchannel *chan;
+
+	make_filename(channel, filename, sizeof(filename));
+
+	AST_RWLIST_TRAVERSE(&logchannels, chan, list) {
+		if (!strcmp(chan->filename, filename)) {
+			return chan;
+		}
+	}
+
+	return NULL;
+}
+
 static struct logchannel *make_logchannel(const char *channel, const char *components, int lineno, int dynamic)
 {
 	struct logchannel *chan;
@@ -300,6 +365,8 @@ static struct logchannel *make_logchannel(const char *channel, const char *compo
 	strcpy(chan->components, components);
 	chan->lineno = lineno;
 	chan->dynamic = dynamic;
+
+	make_filename(channel, chan->filename, sizeof(chan->filename));
 
 	if (!strcasecmp(channel, "console")) {
 		chan->type = LOGTYPE_CONSOLE;
@@ -322,25 +389,8 @@ static struct logchannel *make_logchannel(const char *channel, const char *compo
 		}
 
 		chan->type = LOGTYPE_SYSLOG;
-		ast_copy_string(chan->filename, channel, sizeof(chan->filename));
 		openlog("asterisk", LOG_PID, chan->facility);
 	} else {
-		const char *log_dir_prefix = "";
-		const char *log_dir_separator = "";
-
-		if (channel[0] != '/') {
-			log_dir_prefix = ast_config_AST_LOG_DIR;
-			log_dir_separator = "/";
-		}
-
-		if (!ast_strlen_zero(hostname)) {
-			snprintf(chan->filename, sizeof(chan->filename), "%s%s%s.%s",
-				log_dir_prefix, log_dir_separator, channel, hostname);
-		} else {
-			snprintf(chan->filename, sizeof(chan->filename), "%s%s%s",
-				log_dir_prefix, log_dir_separator, channel);
-		}
-
 		if (!(chan->fileptr = fopen(chan->filename, "a"))) {
 			/* Can't do real logging here since we're called with a lock
 			 * so log to any attached consoles */
@@ -416,7 +466,7 @@ static int init_logger_chain(int locked, const char *altconf)
 
 	/* If no config file, we're fine, set default options. */
 	if (!cfg) {
-		if (!(chan = ast_calloc(1, sizeof(*chan)))) {
+		if (!(chan = ast_calloc(1, sizeof(*chan) + 1))) {
 			fprintf(stderr, "Failed to initialize default logging\n");
 			return -1;
 		}
@@ -937,13 +987,9 @@ int ast_logger_rotate_channel(const char *log_channel)
 {
 	struct logchannel *f;
 	int success = AST_LOGGER_FAILURE;
+	char filename[PATH_MAX];
 
-	struct ast_str *filename = ast_str_create(64);
-	if (!filename) {
-		return AST_LOGGER_ALLOC_ERROR;
-	}
-
-	ast_str_append(&filename, 0, "%s/%s", ast_config_AST_LOG_DIR, log_channel);
+	make_filename(log_channel, filename, sizeof(filename));
 
 	AST_RWLIST_WRLOCK(&logchannels);
 
@@ -958,7 +1004,7 @@ int ast_logger_rotate_channel(const char *log_channel)
 		if (f->fileptr && (f->fileptr != stdout) && (f->fileptr != stderr)) {
 			fclose(f->fileptr);	/* Close file */
 			f->fileptr = NULL;
-			if (strcmp(ast_str_buffer(filename), f->filename) == 0) {
+			if (strcmp(filename, f->filename) == 0) {
 				rotate_file(f->filename);
 				success = AST_LOGGER_SUCCESS;
 			}
@@ -968,7 +1014,6 @@ int ast_logger_rotate_channel(const char *log_channel)
 	init_logger_chain(1 /* locked */, NULL);
 
 	AST_RWLIST_UNLOCK(&logchannels);
-	ast_free(filename);
 
 	return success;
 }
@@ -1099,45 +1144,35 @@ static char *handle_logger_show_channels(struct ast_cli_entry *e, int cmd, struc
 int ast_logger_create_channel(const char *log_channel, const char *components)
 {
 	struct logchannel *chan;
-	struct ast_str *filename = ast_str_create(64);
-	int chan_exists = AST_LOGGER_SUCCESS;
 
 	if (ast_strlen_zero(components)) {
 		return AST_LOGGER_DECLINE;
 	}
 
-	if (!filename) {
+	AST_RWLIST_WRLOCK(&logchannels);
+
+	chan = find_logchannel(log_channel);
+	if (chan) {
+		AST_RWLIST_UNLOCK(&logchannels);
+		return AST_LOGGER_FAILURE;
+	}
+
+	chan = make_logchannel(log_channel, components, 0, 1);
+	if (!chan) {
+		AST_RWLIST_UNLOCK(&logchannels);
 		return AST_LOGGER_ALLOC_ERROR;
 	}
 
-	ast_str_append(&filename, 0, "%s/%s", ast_config_AST_LOG_DIR, log_channel);
+	AST_RWLIST_INSERT_HEAD(&logchannels, chan, list);
+	global_logmask |= chan->logmask;
 
-	AST_RWLIST_WRLOCK(&logchannels);
-
-	AST_RWLIST_TRAVERSE(&logchannels, chan, list) {
-		if (!strcmp(ast_str_buffer(filename), chan->filename)) {
-			chan_exists = AST_LOGGER_FAILURE;
-			break;
-		}
-	}
-
-	if (!chan_exists) {
-		chan = make_logchannel(log_channel, components, 0, 1);
-		if (chan) {
-			AST_RWLIST_INSERT_HEAD(&logchannels, chan, list);
-			global_logmask |= chan->logmask;
-			chan_exists = AST_LOGGER_SUCCESS;
-		}
-	}
 	AST_RWLIST_UNLOCK(&logchannels);
 
-	return chan_exists;
+	return AST_LOGGER_SUCCESS;
 }
 
 static char *handle_logger_add_channel(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a)
 {
-	struct logchannel *chan;
-
 	switch (cmd) {
 	case CLI_INIT:
 		e->command = "logger add channel";
@@ -1156,57 +1191,34 @@ static char *handle_logger_add_channel(struct ast_cli_entry *e, int cmd, struct 
 		return CLI_SHOWUSAGE;
 	}
 
-	AST_RWLIST_WRLOCK(&logchannels);
-	AST_RWLIST_TRAVERSE(&logchannels, chan, list) {
-		if (!strcmp(chan->filename, a->argv[3])) {
-			break;
-		}
-	}
-
-	if (chan) {
-		AST_RWLIST_UNLOCK(&logchannels);
+	switch (ast_logger_create_channel(a->argv[3], a->argv[4])) {
+	case AST_LOGGER_SUCCESS:
+		return CLI_SUCCESS;
+	case AST_LOGGER_FAILURE:
 		ast_cli(a->fd, "Logger channel '%s' already exists\n", a->argv[3]);
 		return CLI_SUCCESS;
+	case AST_LOGGER_DECLINE:
+	case AST_LOGGER_ALLOC_ERROR:
+	default:
+		ast_cli(a->fd, "ERROR: Unable to create log channel '%s'\n", a->argv[3]);
+		return CLI_FAILURE;
 	}
-
-	chan = make_logchannel(a->argv[3], a->argv[4], 0, 1);
-	if (chan) {
-		AST_RWLIST_INSERT_HEAD(&logchannels, chan, list);
-		global_logmask |= chan->logmask;
-		AST_RWLIST_UNLOCK(&logchannels);
-		return CLI_SUCCESS;
-	}
-
-	AST_RWLIST_UNLOCK(&logchannels);
-	ast_cli(a->fd, "ERROR: Unable to create log channel '%s'\n", a->argv[3]);
-
-	return CLI_FAILURE;
 }
 
 int ast_logger_remove_channel(const char *log_channel)
 {
 	struct logchannel *chan;
-	struct ast_str *filename = ast_str_create(64);
-
-	if (!filename) {
-		return AST_LOGGER_ALLOC_ERROR;
-	}
-
-	ast_str_append(&filename, 0, "%s/%s", ast_config_AST_LOG_DIR, log_channel);
 
 	AST_RWLIST_WRLOCK(&logchannels);
-	AST_RWLIST_TRAVERSE_SAFE_BEGIN(&logchannels, chan, list) {
-		if (chan->dynamic && !strcmp(chan->filename, ast_str_buffer(filename))) {
-			AST_RWLIST_REMOVE_CURRENT(list);
-			break;
-		}
-	}
-	AST_RWLIST_TRAVERSE_SAFE_END;
-	AST_RWLIST_UNLOCK(&logchannels);
 
-	if (!chan) {
+	chan = find_logchannel(log_channel);
+	if (chan && chan->dynamic) {
+		AST_RWLIST_REMOVE(&logchannels, chan, list);
+	} else {
+		AST_RWLIST_UNLOCK(&logchannels);
 		return AST_LOGGER_FAILURE;
 	}
+	AST_RWLIST_UNLOCK(&logchannels);
 
 	if (chan->fileptr) {
 		fclose(chan->fileptr);
@@ -1254,30 +1266,17 @@ static char *handle_logger_remove_channel(struct ast_cli_entry *e, int cmd, stru
 		return CLI_SHOWUSAGE;
 	}
 
-	AST_RWLIST_WRLOCK(&logchannels);
-	AST_RWLIST_TRAVERSE_SAFE_BEGIN(&logchannels, chan, list) {
-		if (chan->dynamic && !strcmp(chan->filename, a->argv[3])) {
-			AST_RWLIST_REMOVE_CURRENT(list);
-			break;
-		}
-	}
-	AST_RWLIST_TRAVERSE_SAFE_END;
-	AST_RWLIST_UNLOCK(&logchannels);
-
-	if (!chan) {
+	switch (ast_logger_remove_channel(a->argv[3])) {
+	case AST_LOGGER_SUCCESS:
+		ast_cli(a->fd, "Removed dynamic logger channel '%s'\n", a->argv[3]);
+		return CLI_SUCCESS;
+	case AST_LOGGER_FAILURE:
 		ast_cli(a->fd, "Unable to find dynamic logger channel '%s'\n", a->argv[3]);
 		return CLI_SUCCESS;
+	default:
+		ast_cli(a->fd, "Internal failure attempting to delete dynamic logger channel '%s'\n", a->argv[3]);
+		return CLI_FAILURE;
 	}
-
-	ast_cli(a->fd, "Removed dynamic logger channel '%s'\n", chan->filename);
-	if (chan->fileptr) {
-		fclose(chan->fileptr);
-		chan->fileptr = NULL;
-	}
-	ast_free(chan);
-	chan = NULL;
-
-	return CLI_SUCCESS;
 }
 
 struct verb {
@@ -1307,7 +1306,7 @@ static struct sigaction handle_SIGXFSZ = {
 	.sa_flags = SA_RESTART,
 };
 
-static void ast_log_vsyslog(struct logmsg *msg)
+static void ast_log_vsyslog(struct logmsg *msg, int facility)
 {
 	char buf[BUFSIZ];
 	int syslog_level = ast_syslog_priority_from_loglevel(msg->level);
@@ -1324,6 +1323,9 @@ static void ast_log_vsyslog(struct logmsg *msg)
 		fprintf(stderr, "ast_log_vsyslog called with bogus level: %d\n", msg->level);
 		return;
 	}
+
+	/* Don't use LOG_MAKEPRI because it's broken in glibc<2.17 */
+	syslog_level = facility | syslog_level; /* LOG_MAKEPRI(facility, syslog_level); */
 
 	snprintf(buf, sizeof(buf), "%s[%d]%s: %s:%d in %s: %s",
 		 levels[msg->level], msg->lwp, call_identifier_str, msg->file, msg->line, msg->function, msg->message);
@@ -1410,7 +1412,7 @@ static void logger_print_normal(struct logmsg *logmsg)
 
 			/* Check syslog channels */
 			if (chan->type == LOGTYPE_SYSLOG && (chan->logmask & (1 << logmsg->level))) {
-				ast_log_vsyslog(logmsg);
+				ast_log_vsyslog(logmsg, chan->facility);
 			/* Console channels */
 			} else if (chan->type == LOGTYPE_CONSOLE && (chan->logmask & (1 << logmsg->level))) {
 				char linestr[128];

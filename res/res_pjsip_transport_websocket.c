@@ -275,24 +275,27 @@ static int transport_read(void *data)
 static int get_write_timeout(void)
 {
 	int write_timeout = -1;
-	struct ao2_container *transports;
+	struct ao2_container *transport_states;
 
-	transports = ast_sorcery_retrieve_by_fields(ast_sip_get_sorcery(), "transport", AST_RETRIEVE_FLAG_ALL, NULL);
+	transport_states = ast_sip_get_transport_states();
 
-	if (transports) {
-		struct ao2_iterator it_transports = ao2_iterator_init(transports, 0);
-		struct ast_sip_transport *transport;
+	if (transport_states) {
+		struct ao2_iterator it_transport_states = ao2_iterator_init(transport_states, 0);
+		struct ast_sip_transport_state *transport_state;
 
-		for (; (transport = ao2_iterator_next(&it_transports)); ao2_cleanup(transport)) {
-			if (transport->type != AST_TRANSPORT_WS && transport->type != AST_TRANSPORT_WSS) {
+		for (; (transport_state = ao2_iterator_next(&it_transport_states)); ao2_cleanup(transport_state)) {
+			struct ast_sip_transport *transport;
+			if (transport_state->type != AST_TRANSPORT_WS && transport_state->type != AST_TRANSPORT_WSS) {
 				continue;
 			}
+			transport = ast_sorcery_retrieve_by_id(ast_sip_get_sorcery(), "transport", transport_state->id);
 			ast_debug(5, "Found %s transport with write timeout: %d\n",
 				transport->type == AST_TRANSPORT_WS ? "WS" : "WSS",
 				transport->write_timeout);
 			write_timeout = MAX(write_timeout, transport->write_timeout);
 		}
-		ao2_cleanup(transports);
+		ao2_iterator_destroy(&it_transport_states);
+		ao2_cleanup(transport_states);
 	}
 
 	if (write_timeout < 0) {
@@ -303,14 +306,22 @@ static int get_write_timeout(void)
 	return write_timeout;
 }
 
-/*!
- \brief WebSocket connection handler.
- */
+static struct ast_taskprocessor *create_websocket_serializer(void)
+{
+	char tps_name[AST_TASKPROCESSOR_MAX_NAME + 1];
+
+	/* Create name with seq number appended. */
+	ast_taskprocessor_build_name(tps_name, sizeof(tps_name), "pjsip/websocket");
+
+	return ast_sip_create_serializer_named(tps_name);
+}
+
+/*! \brief WebSocket connection handler. */
 static void websocket_cb(struct ast_websocket *session, struct ast_variable *parameters, struct ast_variable *headers)
 {
-	struct ast_taskprocessor *serializer = NULL;
+	struct ast_taskprocessor *serializer;
 	struct transport_create_data create_data;
-	struct ws_transport *transport = NULL;
+	struct ws_transport *transport;
 	struct transport_read_data read_data;
 
 	if (ast_websocket_set_nonblock(session)) {
@@ -323,7 +334,8 @@ static void websocket_cb(struct ast_websocket *session, struct ast_variable *par
 		return;
 	}
 
-	if (!(serializer = ast_sip_create_serializer())) {
+	serializer = create_websocket_serializer();
+	if (!serializer) {
 		ast_websocket_unref(session);
 		return;
 	}
@@ -419,7 +431,7 @@ static int load_module(void)
 	CHECK_PJSIP_MODULE_LOADED();
 
 	pjsip_transport_register_type(PJSIP_TRANSPORT_RELIABLE, "WS", 5060, &transport_type_ws);
-	pjsip_transport_register_type(PJSIP_TRANSPORT_RELIABLE, "WSS", 5060, &transport_type_wss);
+	pjsip_transport_register_type(PJSIP_TRANSPORT_RELIABLE | PJSIP_TRANSPORT_SECURE, "WSS", 5060, &transport_type_wss);
 
 	if (ast_sip_register_service(&websocket_module) != PJ_SUCCESS) {
 		return AST_MODULE_LOAD_DECLINE;

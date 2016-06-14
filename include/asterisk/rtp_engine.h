@@ -228,6 +228,10 @@ enum ast_rtp_instance_stat {
 	AST_RTP_INSTANCE_STAT_REMOTE_SSRC,
 	/*! Retrieve channel unique ID */
 	AST_RTP_INSTANCE_STAT_CHANNEL_UNIQUEID,
+	/*! Retrieve number of octets transmitted */
+	AST_RTP_INSTANCE_STAT_TXOCTETCOUNT,
+	/*! Retrieve number of octets received */
+	AST_RTP_INSTANCE_STAT_RXOCTETCOUNT,
 };
 
 /* Codes for RTP-specific data - not defined by our AST_FORMAT codes */
@@ -355,6 +359,10 @@ struct ast_rtp_instance_stats {
 	unsigned int remote_ssrc;
 	/*! The Asterisk channel's unique ID that owns this instance */
 	char channel_uniqueid[MAX_CHANNEL_ID];
+	/*! Number of octets transmitted */
+	unsigned int txoctetcount;
+	/*! Number of octets received */
+	unsigned int rxoctetcount;
 };
 
 #define AST_RTP_STAT_SET(current_stat, combined, placement, value) \
@@ -929,7 +937,7 @@ int ast_rtp_instance_set_requested_target_address(struct ast_rtp_instance *insta
  * \since 1.8
  */
 #define ast_rtp_instance_set_remote_address(instance, address) \
-	ast_rtp_instance_set_requested_target_address((instance), (address));
+	ast_rtp_instance_set_requested_target_address((instance), (address))
 
 /*!
  * \brief Set the address that we are expecting to receive RTP on
@@ -1041,7 +1049,7 @@ void ast_rtp_instance_get_requested_target_address(struct ast_rtp_instance *inst
  * \since 1.8
  */
 #define ast_rtp_instance_get_remote_address(instance, address) \
-	ast_rtp_instance_get_incoming_source_address((instance), (address));
+	ast_rtp_instance_get_incoming_source_address((instance), (address))
 
 /*!
  * \brief Get the requested target address of the remote endpoint and
@@ -1077,7 +1085,7 @@ int ast_rtp_instance_get_and_cmp_requested_target_address(struct ast_rtp_instanc
  * \since 1.8
  */
 #define ast_rtp_instance_get_and_cmp_remote_address(instance, address) \
-	ast_rtp_instance_get_and_cmp_requested_target_address((instance), (address));
+	ast_rtp_instance_get_and_cmp_requested_target_address((instance), (address))
 
 /*!
  * \brief Set the value of an RTP instance extended property
@@ -2191,20 +2199,22 @@ int ast_rtp_instance_sendcng(struct ast_rtp_instance *instance, int level);
  * \param instance the RTP instance
  * \param remote_policy the remote endpoint's policy
  * \param local_policy our policy for this RTP instance's remote endpoint
+ * \param rtcp 1 for dedicated RTCP policies
  *
  * \retval 0 Success
  * \retval non-zero Failure
  */
-int ast_rtp_instance_add_srtp_policy(struct ast_rtp_instance *instance, struct ast_srtp_policy* remote_policy, struct ast_srtp_policy *local_policy);
+int ast_rtp_instance_add_srtp_policy(struct ast_rtp_instance *instance, struct ast_srtp_policy* remote_policy, struct ast_srtp_policy *local_policy, int rtcp);
 
 /*!
  * \brief Obtain the SRTP instance associated with an RTP instance
  *
  * \param instance the RTP instance
+ * \param rtcp 1 to request instance for RTCP
  * \retval the SRTP instance on success
  * \retval NULL if no SRTP instance exists
  */
-struct ast_srtp *ast_rtp_instance_get_srtp(struct ast_rtp_instance *instance);
+struct ast_srtp *ast_rtp_instance_get_srtp(struct ast_rtp_instance *instance, int rtcp);
 
 /*! \brief Custom formats declared in codecs.conf at startup must be communicated to the rtp_engine
  * so their mime type can payload number can be initialized. */

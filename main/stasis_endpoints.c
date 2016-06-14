@@ -86,6 +86,7 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 						<enum name="Reachable"/>
 						<enum name="Created"/>
 						<enum name="Removed"/>
+						<enum name="Updated"/>
 					</enumlist>
 				</parameter>
 				<parameter name="AOR">
@@ -96,6 +97,18 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 				</parameter>
 				<parameter name="RoundtripUsec">
 					<para>The RTT measured during the last qualify.</para>
+				</parameter>
+				<parameter name="UserAgent">
+					<para>Content of the User-Agent header in REGISTER request</para>
+				</parameter>
+				<parameter name="RegExpire">
+					<para>Absolute time that this contact is no longer valid after</para>
+				</parameter>
+				<parameter name="ViaAddress">
+					<para>IP address:port of the last Via header in REGISTER request</para>
+				</parameter>
+				<parameter name="CallID">
+					<para>Content of the Call-ID header in REGISTER request</para>
 				</parameter>
 			</syntax>
 		</managerEventInstance>
@@ -124,12 +137,7 @@ struct stasis_topic *ast_endpoint_topic_all_cached(void)
 	return stasis_cp_all_topic_cached(endpoint_cache_all);
 }
 
-static struct ast_manager_event_blob *peerstatus_to_ami(struct stasis_message *msg);
-
 STASIS_MESSAGE_TYPE_DEFN(ast_endpoint_snapshot_type);
-STASIS_MESSAGE_TYPE_DEFN(ast_endpoint_state_type,
-	.to_ami = peerstatus_to_ami,
-);
 
 static struct ast_manager_event_blob *peerstatus_to_ami(struct stasis_message *msg)
 {
@@ -166,10 +174,44 @@ static struct ast_manager_event_blob *peerstatus_to_ami(struct stasis_message *m
 		ast_str_buffer(peerstatus_event_string));
 }
 
-static struct ast_manager_event_blob *contactstatus_to_ami(struct stasis_message *msg);
+static struct ast_json *peerstatus_to_json(struct stasis_message *msg, const struct stasis_message_sanitizer *sanitize)
+{
+	struct ast_endpoint_blob *obj = stasis_message_data(msg);
+	struct ast_json *json_endpoint;
+	struct ast_json *json_peer;
+	struct ast_json *json_final;
+	const struct timeval *tv = stasis_message_timestamp(msg);
 
-STASIS_MESSAGE_TYPE_DEFN(ast_endpoint_contact_state_type,
-	.to_ami = contactstatus_to_ami,
+	json_endpoint = ast_endpoint_snapshot_to_json(obj->snapshot, NULL);
+	if (!json_endpoint) {
+		return NULL;
+	}
+
+	json_peer = ast_json_object_create();
+	if (!json_peer) {
+		ast_json_unref(json_endpoint);
+		return NULL;
+	}
+
+	/* Copy all fields from the blob */
+	ast_json_object_update(json_peer, obj->blob);
+
+	json_final = ast_json_pack("{s: s, s: o, s: o, s: o }",
+		"type", "PeerStatusChange",
+		"timestamp", ast_json_timeval(*tv, NULL),
+		"endpoint", json_endpoint,
+		"peer", json_peer);
+	if (!json_final) {
+		ast_json_unref(json_endpoint);
+		ast_json_unref(json_peer);
+	}
+
+	return json_final;
+}
+
+STASIS_MESSAGE_TYPE_DEFN(ast_endpoint_state_type,
+	.to_ami = peerstatus_to_ami,
+	.to_json = peerstatus_to_json,
 );
 
 static struct ast_manager_event_blob *contactstatus_to_ami(struct stasis_message *msg)
@@ -205,6 +247,39 @@ static struct ast_manager_event_blob *contactstatus_to_ami(struct stasis_message
 	return ast_manager_event_blob_create(EVENT_FLAG_SYSTEM, "ContactStatus",
 		"%s", ast_str_buffer(contactstatus_event_string));
 }
+
+static struct ast_json *contactstatus_to_json(struct stasis_message *msg, const struct stasis_message_sanitizer *sanitize)
+{
+	struct ast_endpoint_blob *obj = stasis_message_data(msg);
+	struct ast_json *json_endpoint;
+	struct ast_json *json_final;
+	const struct timeval *tv = stasis_message_timestamp(msg);
+
+	json_endpoint = ast_endpoint_snapshot_to_json(obj->snapshot, NULL);
+	if (!json_endpoint) {
+		return NULL;
+	}
+
+	json_final = ast_json_pack("{s: s, s: o, s: o, s: { s: s, s: s, s: s, s: s } } ",
+		"type", "ContactStatusChange",
+		"timestamp", ast_json_timeval(*tv, NULL),
+		"endpoint", json_endpoint,
+		"contact_info",
+		"uri", ast_json_string_get(ast_json_object_get(obj->blob, "uri")),
+		"contact_status", ast_json_string_get(ast_json_object_get(obj->blob, "contact_status")),
+		"aor", ast_json_string_get(ast_json_object_get(obj->blob, "aor")),
+		"roundtrip_usec", ast_json_string_get(ast_json_object_get(obj->blob, "roundtrip_usec")));
+	if (!json_final) {
+		ast_json_unref(json_endpoint);
+	}
+
+	return json_final;
+}
+
+STASIS_MESSAGE_TYPE_DEFN(ast_endpoint_contact_state_type,
+	.to_ami = contactstatus_to_ami,
+	.to_json = contactstatus_to_json
+);
 
 static void endpoint_blob_dtor(void *obj)
 {

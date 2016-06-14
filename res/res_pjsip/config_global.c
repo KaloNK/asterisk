@@ -34,6 +34,15 @@
 #define DEFAULT_DEBUG "no"
 #define DEFAULT_ENDPOINT_IDENTIFIER_ORDER "ip,username,anonymous"
 #define DEFAULT_MAX_INITIAL_QUALIFY_TIME 0
+#define DEFAULT_FROM_USER "asterisk"
+#define DEFAULT_REALM "asterisk"
+#define DEFAULT_REGCONTEXT ""
+#define DEFAULT_CONTACT_EXPIRATION_CHECK_INTERVAL 30
+#define DEFAULT_DISABLE_MULTI_DOMAIN 0
+#define DEFAULT_VOICEMAIL_EXTENSION ""
+#define DEFAULT_UNIDENTIFIED_REQUEST_COUNT 5
+#define DEFAULT_UNIDENTIFIED_REQUEST_PERIOD 5
+#define DEFAULT_UNIDENTIFIED_REQUEST_PRUNE_INTERVAL 30
 
 static char default_useragent[256];
 
@@ -41,11 +50,18 @@ struct global_config {
 	SORCERY_OBJECT(details);
 	AST_DECLARE_STRING_FIELDS(
 		AST_STRING_FIELD(useragent);
+		AST_STRING_FIELD(regcontext);
 		AST_STRING_FIELD(default_outbound_endpoint);
 		/*! Debug logging yes|no|host */
 		AST_STRING_FIELD(debug);
 		/*! Order by which endpoint identifiers are checked (comma separated list) */
 		AST_STRING_FIELD(endpoint_identifier_order);
+		/*! User name to place in From header if there is no better option */
+		AST_STRING_FIELD(default_from_user);
+		/*! Default voicemail extension */
+		AST_STRING_FIELD(default_voicemail_extension);
+		/*! Realm to use in challenges before an endpoint is identified */
+		AST_STRING_FIELD(default_realm);
 	);
 	/* Value to put in Max-Forwards header */
 	unsigned int max_forwards;
@@ -53,6 +69,16 @@ struct global_config {
 	unsigned int keep_alive_interval;
 	/* The maximum time for all contacts to be qualified at startup */
 	unsigned int max_initial_qualify_time;
+	/* The interval at which to check for expired contacts */
+	unsigned int contact_expiration_check_interval;
+	/*! Nonzero to disable multi domain support */
+	unsigned int disable_multi_domain;
+	/* The maximum number of unidentified requests per source IP address before a security event is logged */
+	unsigned int unidentified_request_count;
+	/* The period during which unidentified requests are accumulated */
+	unsigned int unidentified_request_period;
+	/* Interval at which expired unidentifed requests will be pruned */
+	unsigned int unidentified_request_prune_interval;
 };
 
 static void global_destructor(void *obj)
@@ -134,6 +160,38 @@ char *ast_sip_get_debug(void)
 	return res;
 }
 
+char *ast_sip_get_regcontext(void)
+{
+	char *res;
+	struct global_config *cfg;
+
+	cfg = get_global_cfg();
+	if (!cfg) {
+		return ast_strdup(DEFAULT_REGCONTEXT);
+	}
+
+	res = ast_strdup(cfg->regcontext);
+	ao2_ref(cfg, -1);
+
+	return res;
+}
+
+char *ast_sip_get_default_voicemail_extension(void)
+{
+	char *res;
+	struct global_config *cfg;
+
+	cfg = get_global_cfg();
+	if (!cfg) {
+		return ast_strdup(DEFAULT_VOICEMAIL_EXTENSION);
+	}
+
+	res = ast_strdup(cfg->default_voicemail_extension);
+	ao2_ref(cfg, -1);
+
+	return res;
+}
+
 char *ast_sip_get_endpoint_identifier_order(void)
 {
 	char *res;
@@ -164,6 +222,36 @@ unsigned int ast_sip_get_keep_alive_interval(void)
 	return interval;
 }
 
+unsigned int ast_sip_get_contact_expiration_check_interval(void)
+{
+	unsigned int interval;
+	struct global_config *cfg;
+
+	cfg = get_global_cfg();
+	if (!cfg) {
+		return DEFAULT_CONTACT_EXPIRATION_CHECK_INTERVAL;
+	}
+
+	interval = cfg->contact_expiration_check_interval;
+	ao2_ref(cfg, -1);
+	return interval;
+}
+
+unsigned int ast_sip_get_disable_multi_domain(void)
+{
+	unsigned int disable_multi_domain;
+	struct global_config *cfg;
+
+	cfg = get_global_cfg();
+	if (!cfg) {
+		return DEFAULT_DISABLE_MULTI_DOMAIN;
+	}
+
+	disable_multi_domain = cfg->disable_multi_domain;
+	ao2_ref(cfg, -1);
+	return disable_multi_domain;
+}
+
 unsigned int ast_sip_get_max_initial_qualify_time(void)
 {
 	unsigned int time;
@@ -177,6 +265,53 @@ unsigned int ast_sip_get_max_initial_qualify_time(void)
 	time = cfg->max_initial_qualify_time;
 	ao2_ref(cfg, -1);
 	return time;
+}
+
+void ast_sip_get_unidentified_request_thresholds(unsigned int *count, unsigned int *period,
+	unsigned int *prune_interval)
+{
+	struct global_config *cfg;
+
+	cfg = get_global_cfg();
+	if (!cfg) {
+		*count = DEFAULT_UNIDENTIFIED_REQUEST_COUNT;
+		*period = DEFAULT_UNIDENTIFIED_REQUEST_PERIOD;
+		*prune_interval = DEFAULT_UNIDENTIFIED_REQUEST_PRUNE_INTERVAL;
+		return;
+	}
+
+	*count = cfg->unidentified_request_count;
+	*period = cfg->unidentified_request_period;
+	*prune_interval = cfg->unidentified_request_prune_interval;
+
+	ao2_ref(cfg, -1);
+	return;
+}
+
+void ast_sip_get_default_realm(char *realm, size_t size)
+{
+	struct global_config *cfg;
+
+	cfg = get_global_cfg();
+	if (!cfg) {
+		ast_copy_string(realm, DEFAULT_REALM, size);
+	} else {
+		ast_copy_string(realm, cfg->default_realm, size);
+		ao2_ref(cfg, -1);
+	}
+}
+
+void ast_sip_get_default_from_user(char *from_user, size_t size)
+{
+	struct global_config *cfg;
+
+	cfg = get_global_cfg();
+	if (!cfg) {
+		ast_copy_string(from_user, DEFAULT_FROM_USER, size);
+	} else {
+		ast_copy_string(from_user, cfg->default_from_user, size);
+		ao2_ref(cfg, -1);
+	}
 }
 
 /*!
@@ -292,6 +427,29 @@ int ast_sip_initialize_sorcery_global(void)
 	ast_sorcery_object_field_register(sorcery, "global", "max_initial_qualify_time",
 		__stringify(DEFAULT_MAX_INITIAL_QUALIFY_TIME),
 		OPT_UINT_T, 0, FLDSET(struct global_config, max_initial_qualify_time));
+	ast_sorcery_object_field_register(sorcery, "global", "default_from_user", DEFAULT_FROM_USER,
+		OPT_STRINGFIELD_T, 0, STRFLDSET(struct global_config, default_from_user));
+	ast_sorcery_object_field_register(sorcery, "global", "default_voicemail_extension",
+		DEFAULT_VOICEMAIL_EXTENSION, OPT_STRINGFIELD_T, 0, STRFLDSET(struct global_config,
+		default_voicemail_extension));
+	ast_sorcery_object_field_register(sorcery, "global", "regcontext", DEFAULT_REGCONTEXT,
+		OPT_STRINGFIELD_T, 0, STRFLDSET(struct global_config, regcontext));
+	ast_sorcery_object_field_register(sorcery, "global", "contact_expiration_check_interval",
+		__stringify(DEFAULT_CONTACT_EXPIRATION_CHECK_INTERVAL),
+		OPT_UINT_T, 0, FLDSET(struct global_config, contact_expiration_check_interval));
+	ast_sorcery_object_field_register(sorcery, "global", "disable_multi_domain", "no",
+		OPT_BOOL_T, 1, FLDSET(struct global_config, disable_multi_domain));
+	ast_sorcery_object_field_register(sorcery, "global", "unidentified_request_count",
+		__stringify(DEFAULT_UNIDENTIFIED_REQUEST_COUNT),
+		OPT_UINT_T, 0, FLDSET(struct global_config, unidentified_request_count));
+	ast_sorcery_object_field_register(sorcery, "global", "unidentified_request_period",
+		__stringify(DEFAULT_UNIDENTIFIED_REQUEST_PERIOD),
+		OPT_UINT_T, 0, FLDSET(struct global_config, unidentified_request_period));
+	ast_sorcery_object_field_register(sorcery, "global", "unidentified_request_prune_interval",
+		__stringify(DEFAULT_UNIDENTIFIED_REQUEST_PRUNE_INTERVAL),
+		OPT_UINT_T, 0, FLDSET(struct global_config, unidentified_request_prune_interval));
+	ast_sorcery_object_field_register(sorcery, "global", "default_realm", DEFAULT_REALM,
+		OPT_STRINGFIELD_T, 0, STRFLDSET(struct global_config, default_realm));
 
 	if (ast_sorcery_instance_observer_add(sorcery, &observer_callbacks_global)) {
 		return -1;

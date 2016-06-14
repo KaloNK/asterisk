@@ -339,7 +339,7 @@ static char *complete_channeltypes(struct ast_cli_args *a)
 static char *handle_cli_core_show_channeltype(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a)
 {
 	struct chanlist *cl = NULL;
-	struct ast_str *codec_buf = ast_str_alloca(256);
+	struct ast_str *codec_buf = ast_str_alloca(AST_FORMAT_CAP_NAMES_LEN);
 
 	switch (cmd) {
 	case CLI_INIT:
@@ -872,6 +872,7 @@ __ast_channel_alloc_ap(int needqueue, int state, const char *cid_num, const char
 	ast_channel_hold_state_set(tmp, AST_CONTROL_UNHOLD);
 
 	ast_channel_streamid_set(tmp, -1);
+	ast_channel_vstreamid_set(tmp, -1);
 
 	ast_channel_fin_set(tmp, global_fin);
 	ast_channel_fout_set(tmp, global_fout);
@@ -4472,67 +4473,47 @@ static int indicate_redirecting(struct ast_channel *chan, const void *data, size
 	return res ? -1 : 0;
 }
 
-int ast_indicate_data(struct ast_channel *chan, int _condition,
-		const void *data, size_t datalen)
+static int indicate_data_internal(struct ast_channel *chan, int _condition, const void *data, size_t datalen)
 {
 	/* By using an enum, we'll get compiler warnings for values not handled
 	 * in switch statements. */
 	enum ast_control_frame_type condition = _condition;
 	struct ast_tone_zone_sound *ts = NULL;
+	const struct ast_control_t38_parameters *t38_parameters;
 	int res;
-	/* this frame is used by framehooks. if it is set, we must free it at the end of this function */
-	struct ast_frame *awesome_frame = NULL;
-
-	ast_channel_lock(chan);
-
-	/* Don't bother if the channel is about to go away, anyway. */
-	if ((ast_test_flag(ast_channel_flags(chan), AST_FLAG_ZOMBIE)
-			|| ast_check_hangup(chan))
-		&& condition != AST_CONTROL_MASQUERADE_NOTIFY) {
-		res = -1;
-		goto indicate_cleanup;
-	}
-
-	if (!ast_framehook_list_is_empty(ast_channel_framehooks(chan))) {
-		/* Do framehooks now, do it, go, go now */
-		struct ast_frame frame = {
-			.frametype = AST_FRAME_CONTROL,
-			.subclass.integer = condition,
-			.data.ptr = (void *) data, /* this cast from const is only okay because we do the ast_frdup below */
-			.datalen = datalen
-		};
-
-		/* we have now committed to freeing this frame */
-		awesome_frame = ast_frdup(&frame);
-
-		/* who knows what we will get back! the anticipation is killing me. */
-		if (!(awesome_frame = ast_framehook_list_write_event(ast_channel_framehooks(chan), awesome_frame))
-			|| awesome_frame->frametype != AST_FRAME_CONTROL) {
-			res = 0;
-			goto indicate_cleanup;
-		}
-
-		condition = awesome_frame->subclass.integer;
-		data = awesome_frame->data.ptr;
-		datalen = awesome_frame->datalen;
-	}
 
 	switch (condition) {
 	case AST_CONTROL_CONNECTED_LINE:
 		if (indicate_connected_line(chan, data, datalen)) {
 			res = 0;
-			goto indicate_cleanup;
+			return res;
 		}
 		break;
 	case AST_CONTROL_REDIRECTING:
 		if (indicate_redirecting(chan, data, datalen)) {
 			res = 0;
-			goto indicate_cleanup;
+			return res;
 		}
 		break;
 	case AST_CONTROL_HOLD:
 	case AST_CONTROL_UNHOLD:
-		ast_channel_hold_state_set(chan, condition);
+		ast_channel_hold_state_set(chan, _condition);
+		break;
+	case AST_CONTROL_T38_PARAMETERS:
+		t38_parameters = data;
+		switch (t38_parameters->request_response) {
+		case AST_T38_REQUEST_NEGOTIATE:
+		case AST_T38_NEGOTIATED:
+			ast_channel_set_is_t38_active_nolock(chan, 1);
+			break;
+		case AST_T38_REQUEST_TERMINATE:
+		case AST_T38_TERMINATED:
+		case AST_T38_REFUSED:
+			ast_channel_set_is_t38_active_nolock(chan, 0);
+			break;
+		default:
+			break;
+		}
 		break;
 	default:
 		break;
@@ -4540,7 +4521,7 @@ int ast_indicate_data(struct ast_channel *chan, int _condition,
 
 	if (is_visible_indication(condition)) {
 		/* A new visible indication is requested. */
-		ast_channel_visible_indication_set(chan, condition);
+		ast_channel_visible_indication_set(chan, _condition);
 	} else if (condition == AST_CONTROL_UNHOLD || _condition < 0) {
 		/* Visible indication is cleared/stopped. */
 		ast_channel_visible_indication_set(chan, 0);
@@ -4548,7 +4529,7 @@ int ast_indicate_data(struct ast_channel *chan, int _condition,
 
 	if (ast_channel_tech(chan)->indicate) {
 		/* See if the channel driver can handle this condition. */
-		res = ast_channel_tech(chan)->indicate(chan, condition, data, datalen);
+		res = ast_channel_tech(chan)->indicate(chan, _condition, data, datalen);
 	} else {
 		res = -1;
 	}
@@ -4556,7 +4537,7 @@ int ast_indicate_data(struct ast_channel *chan, int _condition,
 	if (!res) {
 		/* The channel driver successfully handled this indication */
 		res = 0;
-		goto indicate_cleanup;
+		return res;
 	}
 
 	/* The channel driver does not support this indication, let's fake
@@ -4569,7 +4550,7 @@ int ast_indicate_data(struct ast_channel *chan, int _condition,
 		/* Stop any tones that are playing */
 		ast_playtones_stop(chan);
 		res = 0;
-		goto indicate_cleanup;
+		return res;
 	}
 
 	/* Handle conditions that we have tones for. */
@@ -4577,7 +4558,7 @@ int ast_indicate_data(struct ast_channel *chan, int _condition,
 	case _XXX_AST_CONTROL_T38:
 		/* deprecated T.38 control frame */
 		res = -1;
-		goto indicate_cleanup;
+		return res;
 	case AST_CONTROL_T38_PARAMETERS:
 		/* there is no way to provide 'default' behavior for these
 		 * control frames, so we need to return failure, but there
@@ -4586,7 +4567,7 @@ int ast_indicate_data(struct ast_channel *chan, int _condition,
 		 * so just return right now. in addition, we want to return
 		 * whatever value the channel driver returned, in case it
 		 * has some meaning.*/
-		goto indicate_cleanup;
+		return res;
 	case AST_CONTROL_RINGING:
 		ts = ast_get_indication_tone(ast_channel_zone(chan), "ring");
 		/* It is common practice for channel drivers to return -1 if trying
@@ -4668,6 +4649,53 @@ int ast_indicate_data(struct ast_channel *chan, int _condition,
 		/* not handled */
 		ast_log(LOG_WARNING, "Unable to handle indication %u for '%s'\n", condition, ast_channel_name(chan));
 	}
+
+	return res;
+}
+
+int ast_indicate_data(struct ast_channel *chan, int _condition, const void *data, size_t datalen)
+{
+	int res;
+	/* this frame is used by framehooks. if it is set, we must free it at the end of this function */
+	struct ast_frame *awesome_frame = NULL;
+
+	ast_channel_lock(chan);
+
+	/* Don't bother if the channel is about to go away, anyway. */
+	if ((ast_test_flag(ast_channel_flags(chan), AST_FLAG_ZOMBIE)
+			|| (ast_check_hangup(chan) && !ast_channel_is_leaving_bridge(chan)))
+		&& _condition != AST_CONTROL_MASQUERADE_NOTIFY) {
+		res = -1;
+		goto indicate_cleanup;
+	}
+
+	if (!ast_framehook_list_is_empty(ast_channel_framehooks(chan))) {
+		/* Do framehooks now, do it, go, go now */
+		struct ast_frame frame = {
+			.frametype = AST_FRAME_CONTROL,
+			.subclass.integer = _condition,
+			.data.ptr = (void *) data, /* this cast from const is only okay because we do the ast_frdup below */
+			.datalen = datalen
+		};
+
+		/* we have now committed to freeing this frame */
+		awesome_frame = ast_frdup(&frame);
+
+		/* who knows what we will get back! the anticipation is killing me. */
+		awesome_frame = ast_framehook_list_write_event(ast_channel_framehooks(chan),
+			awesome_frame);
+		if (!awesome_frame
+			|| awesome_frame->frametype != AST_FRAME_CONTROL) {
+			res = 0;
+			goto indicate_cleanup;
+		}
+
+		_condition = awesome_frame->subclass.integer;
+		data = awesome_frame->data.ptr;
+		datalen = awesome_frame->datalen;
+	}
+
+	res = indicate_data_internal(chan, _condition, data, datalen);
 
 indicate_cleanup:
 	ast_channel_unlock(chan);
@@ -5011,10 +5039,15 @@ int ast_write(struct ast_channel *chan, struct ast_frame *fr)
 				res = ast_senddigit_end(chan, fr->subclass.integer, fr->len);
 				ast_channel_lock(chan);
 				CHECK_BLOCKING(chan);
-			} else if (fr->frametype == AST_FRAME_CONTROL && fr->subclass.integer == AST_CONTROL_UNHOLD) {
-				/* This is a side case where Echo is basically being called and the person put themselves on hold and took themselves off hold */
-				res = (ast_channel_tech(chan)->indicate == NULL) ? 0 :
-					ast_channel_tech(chan)->indicate(chan, fr->subclass.integer, fr->data.ptr, fr->datalen);
+			} else if (fr->frametype == AST_FRAME_CONTROL
+				&& fr->subclass.integer == AST_CONTROL_UNHOLD) {
+				/*
+				 * This is a side case where Echo is basically being called
+				 * and the person put themselves on hold and took themselves
+				 * off hold.
+				 */
+				indicate_data_internal(chan, fr->subclass.integer, fr->data.ptr,
+					fr->datalen);
 			}
 			res = 0;	/* XXX explain, why 0 ? */
 			goto done;
@@ -5026,8 +5059,8 @@ int ast_write(struct ast_channel *chan, struct ast_frame *fr)
 	CHECK_BLOCKING(chan);
 	switch (fr->frametype) {
 	case AST_FRAME_CONTROL:
-		res = (ast_channel_tech(chan)->indicate == NULL) ? 0 :
-			ast_channel_tech(chan)->indicate(chan, fr->subclass.integer, fr->data.ptr, fr->datalen);
+		indicate_data_internal(chan, fr->subclass.integer, fr->data.ptr, fr->datalen);
+		res = 0;
 		break;
 	case AST_FRAME_DTMF_BEGIN:
 		if (ast_channel_audiohooks(chan)) {
@@ -5094,7 +5127,7 @@ int ast_write(struct ast_channel *chan, struct ast_frame *fr)
 			f = fr;
 		} else {
 			if (ast_format_cmp(ast_channel_writeformat(chan), fr->subclass.format) != AST_FORMAT_CMP_EQUAL) {
-				struct ast_str *codec_buf = ast_str_alloca(256);
+				struct ast_str *codec_buf = ast_str_alloca(AST_FORMAT_CAP_NAMES_LEN);
 
 				/*
 				 * We are not setup to write this frame.  Things may have changed
@@ -5435,8 +5468,8 @@ static int set_format(struct ast_channel *chan, struct ast_format_cap *cap_set, 
 		res = ast_translator_best_choice(cap_native, cap_set, &best_native_fmt, &best_set_fmt);
 	}
 	if (res < 0) {
-		struct ast_str *codec_native = ast_str_alloca(256);
-		struct ast_str *codec_set = ast_str_alloca(256);
+		struct ast_str *codec_native = ast_str_alloca(AST_FORMAT_CAP_NAMES_LEN);
+		struct ast_str *codec_set = ast_str_alloca(AST_FORMAT_CAP_NAMES_LEN);
 
 		ast_format_cap_get_names(cap_native, &codec_native);
 		ast_channel_unlock(chan);
@@ -5630,6 +5663,7 @@ static void call_forward_inherit(struct ast_channel *new_chan, struct ast_channe
 struct ast_channel *ast_call_forward(struct ast_channel *caller, struct ast_channel *orig, int *timeout, struct ast_format_cap *cap, struct outgoing_helper *oh, int *outstate)
 {
 	char tmpchan[256];
+	char forwarder[AST_CHANNEL_NAME];
 	struct ast_channel *new_chan = NULL;
 	char *data, *type;
 	int cause = 0;
@@ -5637,6 +5671,7 @@ struct ast_channel *ast_call_forward(struct ast_channel *caller, struct ast_chan
 
 	/* gather data and request the new forward channel */
 	ast_copy_string(tmpchan, ast_channel_call_forward(orig), sizeof(tmpchan));
+	ast_copy_string(forwarder, ast_channel_name(orig), sizeof(forwarder));
 	if ((data = strchr(tmpchan, '/'))) {
 		*data++ = '\0';
 		type = tmpchan;
@@ -5680,6 +5715,7 @@ struct ast_channel *ast_call_forward(struct ast_channel *caller, struct ast_chan
 	ast_set_flag(ast_channel_flags(new_chan), AST_FLAG_ORIGINATED);
 
 	ast_channel_lock_both(orig, new_chan);
+	pbx_builtin_setvar_helper(new_chan, "FORWARDERNAME", forwarder);
 	ast_party_connected_line_copy(ast_channel_connected(new_chan), ast_channel_connected(orig));
 	ast_party_redirecting_copy(ast_channel_redirecting(new_chan), ast_channel_redirecting(orig));
 	ast_channel_req_accountcodes(new_chan, orig, AST_CHANNEL_REQUESTOR_REPLACEMENT);
@@ -5978,8 +6014,8 @@ struct ast_channel *ast_request(const char *type, struct ast_format_cap *request
 			res = ast_translator_best_choice(tmp_cap, chan->tech->capabilities, &tmp_fmt, &best_audio_fmt);
 			ao2_ref(tmp_cap, -1);
 			if (res < 0) {
-				struct ast_str *tech_codecs = ast_str_alloca(64);
-				struct ast_str *request_codecs = ast_str_alloca(64);
+				struct ast_str *tech_codecs = ast_str_alloca(AST_FORMAT_CAP_NAMES_LEN);
+				struct ast_str *request_codecs = ast_str_alloca(AST_FORMAT_CAP_NAMES_LEN);
 
 				ast_log(LOG_WARNING, "No translator path exists for channel type %s (native %s) to %s\n", type,
 					ast_format_cap_get_names(chan->tech->capabilities, &tech_codecs),

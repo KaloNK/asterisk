@@ -34,6 +34,7 @@
 ASTERISK_FILE_VERSION(__FILE__, "$Revision$");
 
 #include <math.h> /* HUGE_VAL */
+#include <sys/stat.h>
 
 #include "asterisk/config.h"
 #include "asterisk/module.h"
@@ -49,6 +50,7 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$");
 #include "asterisk/format_cap.h"
 
 #define CONFIG_FILE "test_config.conf"
+#define CONFIG_INCLUDE_FILE "test_config_include.conf"
 
 /*
  * This builds the folowing config:
@@ -881,6 +883,77 @@ static int hook_cb(struct ast_config *cfg)
 	return 0;
 }
 
+AST_TEST_DEFINE(config_save)
+{
+	enum ast_test_result_state res = AST_TEST_FAIL;
+	struct ast_flags config_flags = { 0 };
+	struct ast_config *cfg;
+	char config_filename[PATH_MAX];
+	char include_filename[PATH_MAX];
+	struct stat config_stat;
+	off_t before_save;
+
+	switch (cmd) {
+	case TEST_INIT:
+		info->name = "config_save";
+		info->category = "/main/config/";
+		info->summary = "Test config save";
+		info->description =
+			"Test configuration save.";
+		return AST_TEST_NOT_RUN;
+	case TEST_EXECUTE:
+		break;
+	}
+
+	if (write_config_file()) {
+		ast_test_status_update(test, "Could not write initial config files\n");
+		return res;
+	}
+
+	snprintf(config_filename, PATH_MAX, "%s/%s", ast_config_AST_CONFIG_DIR, CONFIG_FILE);
+	snprintf(include_filename, PATH_MAX, "%s/%s", ast_config_AST_CONFIG_DIR, CONFIG_INCLUDE_FILE);
+
+	cfg = ast_config_load(CONFIG_FILE, config_flags);
+	if (!cfg) {
+		ast_test_status_update(test, "Could not load config\n");
+		goto out;
+	}
+
+	/* We need to re-save to get the generator header */
+	if (ast_config_text_file_save(CONFIG_FILE, cfg, "TEST")) {
+		ast_test_status_update(test, "Unable to write files\n");
+		goto out;
+	}
+
+	stat(config_filename, &config_stat);
+	before_save = config_stat.st_size;
+
+	if (!ast_include_new(cfg, CONFIG_FILE, CONFIG_INCLUDE_FILE, 0, NULL, 4, include_filename, PATH_MAX)) {
+		ast_test_status_update(test, "Could not create include\n");
+		goto out;
+	}
+
+	if (ast_config_text_file_save(CONFIG_FILE, cfg, "TEST")) {
+		ast_test_status_update(test, "Unable to write files\n");
+		goto out;
+	}
+
+	stat(config_filename, &config_stat);
+	if (config_stat.st_size <= before_save) {
+		ast_test_status_update(test, "Did not save config file with #include\n");
+		goto out;
+	}
+
+	res = AST_TEST_PASS;
+
+out:
+	ast_config_destroy(cfg);
+	unlink(config_filename);
+	unlink(include_filename);
+
+	return res;
+}
+
 AST_TEST_DEFINE(config_hook)
 {
 	enum ast_test_result_state res = AST_TEST_FAIL;
@@ -1492,8 +1565,8 @@ AST_TEST_DEFINE(config_options_test)
 			res = AST_TEST_FAIL;
 		}
 		if (!ast_format_cap_identical(arr[x]->codeccapopt, control->codeccapopt)) {
-			struct ast_str *codec_buf1 = ast_str_alloca(64);
-			struct ast_str *codec_buf2 = ast_str_alloca(64);
+			struct ast_str *codec_buf1 = ast_str_alloca(AST_FORMAT_CAP_NAMES_LEN);
+			struct ast_str *codec_buf2 = ast_str_alloca(AST_FORMAT_CAP_NAMES_LEN);
 
 			ast_test_status_update(test, "format did not match: '%s' vs '%s' on loop %d\n",
 				ast_format_cap_get_names(arr[x]->codeccapopt, &codec_buf1),
@@ -1672,8 +1745,69 @@ out:
 	return res;
 }
 
+AST_TEST_DEFINE(variable_lists_match)
+{
+	RAII_VAR(struct ast_variable *, left, NULL, ast_variables_destroy);
+	RAII_VAR(struct ast_variable *, right, NULL, ast_variables_destroy);
+	struct ast_variable *var;
+
+	switch (cmd) {
+	case TEST_INIT:
+		info->name = "variable_lists_match";
+		info->category = "/main/config/";
+		info->summary = "Test ast_variable_lists_match";
+		info->description =	"Test ast_variable_lists_match";
+		return AST_TEST_NOT_RUN;
+	case TEST_EXECUTE:
+		break;
+	}
+
+	var = ast_variable_new("aaa", "111", "");
+	ast_test_validate(test, var);
+	left = var;
+	var = ast_variable_new("bbb", "222", "");
+	ast_test_validate(test, var);
+	ast_variable_list_append(&left, var);
+
+	var = ast_variable_new("aaa", "111", "");
+	ast_test_validate(test, var);
+	right = var;
+
+	ast_test_validate(test, ast_variable_lists_match(left, right, 0));
+	ast_test_validate(test, !ast_variable_lists_match(left, right, 1));
+
+	var = ast_variable_new("bbb", "222", "");
+	ast_test_validate(test, var);
+	ast_variable_list_append(&right, var);
+
+	ast_test_validate(test, ast_variable_lists_match(left, right, 0));
+	ast_test_validate(test, ast_variable_lists_match(left, right, 1));
+
+	var = ast_variable_new("ccc >", "333", "");
+	ast_test_validate(test, var);
+	ast_variable_list_append(&right, var);
+
+	ast_test_validate(test, !ast_variable_lists_match(left, right, 0));
+	ast_test_validate(test, !ast_variable_lists_match(left, right, 1));
+
+	var = ast_variable_new("ccc", "444", "");
+	ast_test_validate(test, var);
+	ast_variable_list_append(&left, var);
+
+	ast_test_validate(test, ast_variable_lists_match(left, right, 0));
+	ast_test_validate(test, !ast_variable_lists_match(left, right, 1));
+
+	ast_test_validate(test, !ast_variable_lists_match(left, NULL, 0));
+	ast_test_validate(test, ast_variable_lists_match(NULL, NULL, 0));
+	ast_test_validate(test, !ast_variable_lists_match(NULL, right, 0));
+	ast_test_validate(test, ast_variable_lists_match(left, left, 0));
+
+	return AST_TEST_PASS;
+}
+
 static int unload_module(void)
 {
+	AST_TEST_UNREGISTER(config_save);
 	AST_TEST_UNREGISTER(config_basic_ops);
 	AST_TEST_UNREGISTER(config_filtered_ops);
 	AST_TEST_UNREGISTER(config_template_ops);
@@ -1682,11 +1816,13 @@ static int unload_module(void)
 	AST_TEST_UNREGISTER(ast_parse_arg_test);
 	AST_TEST_UNREGISTER(config_options_test);
 	AST_TEST_UNREGISTER(config_dialplan_function);
+	AST_TEST_UNREGISTER(variable_lists_match);
 	return 0;
 }
 
 static int load_module(void)
 {
+	AST_TEST_REGISTER(config_save);
 	AST_TEST_REGISTER(config_basic_ops);
 	AST_TEST_REGISTER(config_filtered_ops);
 	AST_TEST_REGISTER(config_template_ops);
@@ -1695,6 +1831,7 @@ static int load_module(void)
 	AST_TEST_REGISTER(ast_parse_arg_test);
 	AST_TEST_REGISTER(config_options_test);
 	AST_TEST_REGISTER(config_dialplan_function);
+	AST_TEST_REGISTER(variable_lists_match);
 	return AST_MODULE_LOAD_SUCCESS;
 }
 

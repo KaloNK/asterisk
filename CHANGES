@@ -9,6 +9,432 @@
 ==============================================================================
 
 ------------------------------------------------------------------------------
+--- Functionality changes from Asterisk 13.9.0 to Asterisk 13.10.0 -----------
+------------------------------------------------------------------------------
+
+Core
+------------------
+ * A channel variable FORWARDERNAME is now set which indicates which channel
+   was responsible for a forwarding requests received on dial attempt.
+
+chan_multicast_rtp
+------------------
+ * Deprecated in favor of chan_rtp which is basically chan_multicast_rtp
+   renamed to chan_rtp with UnicastRTP channels added and some internal code
+   improvements.
+
+chan_rtp
+------------------
+ * The format for dialing a unicast RTP channel is:
+   UnicastRTP/<destination-addr>[/[<options>]]
+   Where <destination-addr> is something like '127.0.0.1:5060'.
+   Where <options> are in standard Asterisk flag options format:
+   c(<codec>) - Specify which codec/format to use such as 'ulaw'.
+   e(<engine>) - Specify which RTP engine to use such as 'asterisk'.
+
+ * More options are available over what chan_multicast_rtp supports.
+   The format for dialing a multicast RTP channel is:
+   MulticastRTP/<type>/<destination-addr>[/[<control-addr>][/[<options>]]]
+   Where <type> can be either 'basic' or 'linksys'.
+   Where <destination-addr> is something like '224.0.0.3:5060'.
+   Where <control-addr> is something like '127.0.0.1:5060'.
+   Where <options> are in standard Asterisk flag options format:
+   c(<codec>) - Specify which codec/format to use such as 'ulaw'.
+   i(<address>) - Specify the interface address from which multicast RTP
+     is sent.
+   l(<enable>) - Set whether packets are looped back to the sender.  The
+     enable value can be 0 to set looping to off and non-zero to set
+     looping on.
+   t(<ttl>) - Set the time-to-live (TTL) value for multicast packets.
+
+func_odbc
+------------------
+ * Added new global option "single_db_connection".
+   Enabling this option func_odbc will use a single database connection per DSN.
+   This option is enabled by default.
+
+res_fax
+------------------
+ * Added FAXMODE variable to let dialplan know what fax transport was used.
+   FAXMODE variable is set to either "audio" or "T38".
+
+res_pjsip
+------------------
+ * Added "via_addr", "via_port", "call_id" to contacts.
+   As res_pjsip_nat rewrites contact's address, only the last Via header
+   can contain the source address of registered endpoint.
+   Also Call-Id header may contain the source address of registered endpoint.
+   Added new fields ViaAddress,CallID to AMI event ContactStatus
+
+ * Endpoint IP Access Controls
+   Added new configuration Endpoint options:
+    "acl" - list of IP ACL section names in acl.conf
+    "deny" - List of IP addresses to deny access from
+    "permit" - List of IP addresses to permit access from
+    "contact_acl" - List of Contact ACL section names in acl.conf
+    "contact_deny" - List of Contact header addresses to deny
+    "contact_permit" - List of Contact header addresses to permit
+
+ * Added new status Updated to AMI event ContactStatus on update registration
+
+ * Added "reg_server" to contacts.
+   If the Asterisk system name is set in asterisk.conf, it will be stored
+   into the "reg_server" field in the ps_contacts table to facilitate
+   multi-server setups.
+
+ * When starting Asterisk, received traffic will now be ignored until Asterisk
+   has loaded all modules and is fully booted.
+
+res_hep
+------------------
+ * Added a new option, 'uuid_type', that sets the preferred source of the Homer
+   correlation UUID. The valid options are:
+   - call-id: Use the PJSIP SIP Call-ID header value
+   - channel: Use the Asterisk channel name
+   The default value is 'call-id'. In the event that a HEP module cannot find a
+   valid value using the specified 'uuid_type', the module may fallback to a
+   more readily available source for the correlation UUID.
+
+res_pjsip_info_empty
+--------------------
+ * A new module that can respond to empty Content-Type INFO packets during call.
+   Some SBCs will terminate a call if their empty INFO packets are not responded
+   to within a predefined time.
+
+res_odbc
+------------------
+ * A new option has been added, 'max_connections', which sets the maximum number
+   of concurrent connections to the database. This option defaults to 1 which
+   returns the behavior to that of Asterisk 13.7 and prior.
+
+app_confbridge
+------------------
+ * Added a bridge profile option called regcontext that allows you to
+   dynamically register the conference bridge name as an extension into
+   the specified context.  This allows tracking down conferences on multi-
+   server installations via alternate means (DUNDI for example). By default
+   this feature is not used.
+
+Codecs
+------------------
+ * Added the associated format name to 'core show codecs'.
+
+res_ari_channels
+------------------
+ * Added 'formats' to channel create/originate to allow setting the allowed
+   formats for a channel when no originator channel is available.  Especially
+   useful for Local channel creation where no other format information is
+   available.  'core show codecs' can now be used to look up suitable format
+   names.
+
+------------------------------------------------------------------------------
+--- Functionality changes from Asterisk 13.8.0 to Asterisk 13.9.0 ------------
+------------------------------------------------------------------------------
+
+res_pjsip
+------------------
+ * Added new global option (disable_multi_domain) to pjsip.
+   Disabling Multi Domain can improve realtime performace by reducing
+   number of database requsts.
+
+chan_pjsip
+------------------
+ * Added 'pjsip show channelstats' CLI command.
+
+res_pjsip_outbound_publish
+------------------
+ * Added support for setting the transport used on outbound publish
+   using the transport configuration option.
+
+------------------------------------------------------------------------------
+--- Functionality changes from Asterisk 13.7.0 to Asterisk 13.8.0 ------------
+------------------------------------------------------------------------------
+
+res_pjsip_caller_id
+------------------
+ * Per RFC3325, the 'From' header is now anonymized on outgoing calls when
+   caller id presentation is prohibited.
+
+res_pjsip_config_wizard
+------------------
+ * A new command (pjsip export config_wizard primitives) has been added that
+   will export all the pjsip objects it created to the console or a file
+   suitable for reuse in a pjsip.conf file.
+
+Build System
+------------------
+ * To help insure that Asterisk is compiled and run with the same known
+   version of pjproject, a new option (--with-pjproject-bundled) has been
+   added to ./configure.  When specified, the version of pjproject specified
+   in third-party/versions.mak will be downloaded and configured.  When you
+   make Asterisk, the build process will also automatically build pjproject
+   and Asterisk will be statically linked to it.  Once a particular version
+   of pjproject is configured and built, it won't be configured or built
+   again unless you run a 'make distclean'.
+
+   To facilitate testing, when 'make install' is run, the pjsua and pjsystest
+   utilities and the pjproject python bindings will be installed in
+   ASTDATADIR/third-party/pjproject.
+
+   The default behavior remains building with the shared pjproject
+   installation, if any.
+
+app_confbridge
+------------------
+ * Added CONFBRIDGE_INFO(muted,) for querying the muted conference state.
+
+ * Added Muted header to AMI ConfbridgeListRooms action response list events
+   to indicate the muted conference state.
+
+ * Added Muted column to CLI "confbridge list" output to indicate the muted
+   conference state and made the locked column a yes/no value instead of a
+   locked/unlocked value.
+
+REDIRECTING(reason)
+------------------
+ * The REDIRECTING(reason) value is now treated consistently between
+   chan_sip and chan_pjsip.
+
+   Both channel drivers match incoming reason values with values documented
+   by REDIRECTING(reason) and values documented by RFC5806 regardless of
+   whether they are quoted or not.  RFC5806 values are mapped to the
+   equivalent REDIRECTING(reason) documented value and is set in
+   REDIRECTING(reason).  e.g., an incoming RFC5806 'unconditional' value or a
+   quoted string version ('"unconditional"') is converted to
+   REDIRECTING(reason)'s 'cfu' value.  The user's dialplan only needs to deal
+   with 'cfu' instead of any of the aliases.
+
+   The incoming 480 response reason text supported by chan_sip checks for
+   known reason values and if not matched then puts quotes around the reason
+   string and assigns that to REDIRECTING(reason).
+
+   Both channel drivers send outgoing known REDIRECTING(reason) values as the
+   unquoted RFC5806 equivalent.  User custom values are either sent as is or
+   with added quotes if SIP doesn't allow a character within the value as
+   part of a RFC3261 Section 25.1 token.  Note that there are still
+   limitations on what characters can be put in a custom user value.  e.g.,
+   embedding quotes in the middle of the reason string is just going to cause
+   you grief.
+
+ * Setting a REDIRECTING(reason) value now recognizes RFC5806 aliases.
+   e.g., Setting REDIRECTING(reason) to 'unconditional' is converted to the
+   'cfu' value.
+
+res_pjproject
+------------------
+ * This module is the successor of res_pjsip_log_forwarder.  As well as
+   handling the log forwarding (which now displays as 'pjproject:0' instead
+   of 'pjsip:0'), it also adds a 'pjproject show buildopts' command to the CLI.
+   This displays the compiled-in options of the pjproject installation
+   Asterisk is currently running against.
+
+ * Another feature of this module is the ability to map pjproject log levels
+   to Asterisk log levels, or to suppress the pjproject log messages
+   altogether.  Many of the messages emitted by pjproject itself are the result
+   of errors which Asterisk will ultimately handle so the messages can be
+   misleading or just noise.  A new config file (pjproject.conf) has been added
+   to configure the mapping and a new CLI command (pjproject show log mappings)
+   has been added to display the mappings currently in use.
+
+res_pjsip
+------------------
+ * Transports are now reloadable.  In testing, no in-progress calls were
+   disrupted if the ip address or port weren't changed, but the possibility
+   still exists.  To make sure there are no unintentional drops, a new option
+   'allow_reload', which defaults to 'no' has been added to transport.  If
+   left at the default, changes to the particular transport will be ignored.
+   If set to 'yes', changes (if any) will be applied.
+
+ * Added new global option (regcontext) to pjsip. When set, Asterisk will
+   dynamically create and destroy a NoOp priority 1 extension
+   for a given endpoint who registers or unregisters with us.
+
+ * Endpoints and aors can now be identified by the username and realm in an
+   incoming Authorization header.  To use this feature, add "auth_username"
+   to your endpoint's "identify_by" list.  You can combine "auth_username"
+   and the original "username" to test both the From/To and Authorization
+   headers.  For endpoints, the order is controlled by the global
+   "endpoint_identifier_order" setting.  For matching aors to an endpoint
+   for inbound registration, the order is controlled by this option.
+
+ * In conjunction with the "auth_username" change, 3 new options have been
+   added to the global configuration object that control how many unidentified
+   requests over a certain period from the same IP address can be received
+   before a security altert is generated.  A new CLI command
+   "pjsip show unidentified_requests" will list the current candidates.
+
+res_pjsip_history
+------------------
+ * A new module, res_pjsip_history, has been added that provides SIP history
+   viewing/filtering from the CLI. The module is intended to be used on systems
+   with busy SIP traffic, where existing forms of viewing SIP messages - such
+   as the res_pjsip_logger - may be inadequate. The module provides two new
+   CLI commands:
+   - 'pjsip set history {on|off|clear}' - this enables/disables SIP history
+     capturing, as well as clears an existing history capture. Note that SIP
+     packets captured are stored in memory until cleared. As a result, the
+     history capture should only be used for debugging/viewing purposes, and
+     should *NOT* be left permanently enabled on a system.
+   - 'pjsip show history' - displays the captured SIP history. When invoked
+     with no options, the entire captured history is displayed. Two options
+     are available:
+     -- 'entry <num>' - display a detailed view of a single SIP message in
+        the history
+     -- 'where ...' - filter the history based on some expression. For more
+        information on filtering, view the current CLI help for the
+        'pjsip show history' command.
+
+Voicemail
+------------------
+ * app_voicemail and res_mwi_external can now be built together.  The default
+   remains to build app_voicemail and not res_mwi_external but if they are
+   both built, the load order will cause res_mwi_external to load first and
+   app_voicemail will be skipped.  Use 'preload=app_voicemail.so' in
+   modules.conf to force app_voicemail to be the voicemail provider.
+
+Queue
+-------------------
+ * Added field ReasonPause on QueueMemberStatus if set when paused, the reason
+   the queue member was paused.
+
+res_pjsip_sdp_rtp
+------------------
+ * A new option (bind_rtp_to_media_address) has been added to endpoint which
+   will cause res_pjsip_sdp_rtp to actually bind the RTP instance to the
+   media_address as well as using it in the SDP.  If set, RTP packets will now
+   originate from the media address instead of the operating system's "primary"
+   ip address.
+
+res_rtp_asterisk
+------------------
+ * A new configuration section - ice_host_candidates - has been added to
+   rtp.conf, allowing automatically discovered ICE host candidates to be
+   overriden. This allows an Asterisk server behind a 1:1 NAT to send its
+   external IP as a host candidate rather than relying on STUN to discover it.
+
+------------------------------------------------------------------------------
+--- Functionality changes from Asterisk 13.6.0 to Asterisk 13.7.0 ------------
+------------------------------------------------------------------------------
+
+Codecs
+------------------
+ * Added format attribute negotiation for the VP8 video codec. Format attribute
+   negotiation is provided by the res_format_attr_vp8 module.
+
+ConfBridge
+------------------
+ * A new "timeout" user profile option has been added. This configures the number
+   of seconds that a participant may stay in the ConfBridge after joining. When
+   the time expires, the user is ejected from the conference and CONFBRIDGE_RESULT
+   is set to "TIMEOUT" on the channel.
+
+chan_sip
+------------------
+ * The websockets_enabled option has been added to the general section of
+   sip.conf.  The option is enabled by default to match the previous behavior.
+   The option should be disabled when using res_pjsip_transport_websockets to
+   ensure chan_sip will not conflict with PJSIP websockets.
+
+Dialplan Functions
+------------------
+ * The HOLD_INTERCEPT dialplan function now actually exists in the source tree.
+   While support for the events was added in Asterisk 13.4.0, the function
+   accidentally never made it in. That function is now present, and will cause
+   the 'hold' raised by a channel to be intercepted and converted into an
+   event instead.
+
+res_pjsip_outbound_registration
+-------------------------------
+ * A new 'fatal_retry_interval' option has been added to outbound registration.
+   When set (default is zero), and upon receiving a failure response to an
+   outbound registration, registration is retried at the given interval up to
+   'max_retries'.
+
+ * If res_statsd is loaded and a StatsD server is configured, basic statistics
+   regarding the state of outbound registrations will now be emitted. This
+   includes:
+   - A GAUGE statistic for the overall number of outbound registrations, i.e.:
+       PJSIP.registrations.count
+   - A GAUGE statistic for the overall number of outbound registrations in a
+     particular state, e.g.:
+       PJSIP.registrations.state.Registered
+
+res_pjsip
+------------------
+ * The ability to use "like" has been added to the pjsip list and show
+   CLI commands.  For instance: CLI> pjsip list endpoints like abc
+
+ * If res_statsd is loaded and a StatsD server is configured, basic statistics
+   regarding the state of PJSIP contacts will now be emitted. This includes:
+   - A GAUGE statistic for the overall number of contacts in a particular
+     state, e.g.:
+       PJSIP.contacts.states.Reachable
+   - A TIMER statistic for the RTT time for each qualified contact, e.g.:
+       PJSIP.contacts.alice@@127.0.0.1:5061.rtt
+
+res_sorcery_memory_cache
+------------------------
+ * A new caching strategy, full_backend_cache, has been added which caches
+   all stored objects in the backend. When enabled all objects will be
+   expired or go stale according to the configuration. As well when enabled
+   all retrieval operations will be performed against the cache instead of
+   the backend.
+
+func_callerid
+-------------------
+ * CALLERID(pres) is now documented as a valid alternative to setting both
+   CALLERID(name-pres) and CALLERID(num-pres) at once.  Some channel drivers,
+   like chan_sip, don't make a distinction between the two: they take the
+   least public value from name-pres and num-pres.  By using CALLERID(pres)
+   for reading and writing, you touch the same combined value in the dialplan.
+   The same applies to CONNECTEDLINE(pres), REDIRECTING(orig-pres),
+   REDIRECTING(to-pres) and REDIRECTING(from-pres).
+
+res_endpoint_stats
+-------------------
+ * A new module that emits StatsD statistics regarding Asterisk endpoints.
+   This includes a total count of the number of endpoints, the count of the
+   number of endpoints in the technology agnostic state of the endpoint -
+   online or offline - as well as the number of channels associated with each
+   endpoint. These are recorded as three different GAUGE statistics:
+    - endpoints.count
+    - endpoints.state.{unknown|offline|online}
+    - endpoints.{tech}.{resource}.channels
+
+
+------------------------------------------------------------------------------
+--- Functionality changes from Asterisk 13.5.0 to Asterisk 13.6.0 ------------
+------------------------------------------------------------------------------
+
+Dialplan Functions
+------------------
+ * The CHANNEL function, when used on a PJSIP channel, now exposes a 'call-id'
+   extraction option when using with the 'pjsip' signalling option. It will
+   return the SIP Call-ID associated with the INVITE request that established
+   the PJSIP channel.
+
+ARI
+------------------
+ * Two new endpoint related events are now available: PeerStatusChange and
+   ContactStatusChange. In particular, these events are useful when subscribing
+   to all event sources, as they provide additional endpoint related
+   information beyond the addition/removal of channels from an endpoint.
+   The ARI version has been bumped to 1.9.0 as a result.
+
+ * Added the ability to subscribe to all ARI events in Asterisk, regardless
+   of whether the application 'controls' the resource. This is useful for
+   scenarios where an ARI application merely wants to observe the system,
+   as opposed to control it. There are two ways to accomplish this:
+   (1) Via the WebSocket connection URI. A new query paramter, 'subscribeAll',
+       has been added that, when present and True, will subscribe all
+       specified applications to all ARI event sources in Asterisk.
+   (2) Via the applications resource. An ARI client can, at any time, subscribe
+       to all resources in an event source merely by not providing an explicit
+       resource. For example, subscribing to an event source of 'channels:'
+       as opposed to 'channels:12345' will subscribe the application to all
+       channels.
+
+------------------------------------------------------------------------------
 --- Functionality changes from Asterisk 13.4.0 to Asterisk 13.5.0 ------------
 ------------------------------------------------------------------------------
 

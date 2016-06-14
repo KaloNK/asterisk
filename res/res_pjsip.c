@@ -42,9 +42,11 @@
 #include "asterisk/res_pjsip_cli.h"
 #include "asterisk/test.h"
 #include "asterisk/res_pjsip_presence_xml.h"
+#include "asterisk/res_pjproject.h"
 
 /*** MODULEINFO
 	<depend>pjproject</depend>
+	<depend>res_pjproject</depend>
 	<depend>res_sorcery_config</depend>
 	<depend>res_sorcery_memory</depend>
 	<depend>res_sorcery_astdb</depend>
@@ -233,6 +235,14 @@
 					</para></note>
 					</description>
 				</configOption>
+				<configOption name="bind_rtp_to_media_address">
+					<synopsis>Bind the RTP instance to the media_address</synopsis>
+					<description><para>
+						If media_address is specified, this option causes the RTP instance to be bound to the
+						specified ip address which causes the packets to be sent from that address.
+					</para>
+					</description>
+				</configOption>
 				<configOption name="force_rport" default="yes">
 					<synopsis>Force use of return port</synopsis>
 				</configOption>
@@ -242,18 +252,35 @@
 				<configOption name="identify_by" default="username,location">
 					<synopsis>Way(s) for Endpoint to be identified</synopsis>
 					<description><para>
-						An endpoint can be identified in multiple ways. Currently, the only supported
-						option is <literal>username</literal>, which matches the endpoint based on the
-						username in the From header.
+						Endpoints and aors can be identified in multiple ways. Currently, the supported
+						options are <literal>username</literal>, which matches the endpoint or aor id based on
+						the username and domain in the From header (or To header for aors), and
+						<literal>auth_username</literal>, which matches the endpoint or aor id based on the
+						username and realm in the Authentication header.  In all cases, if an exact match
+						on both username and domain/realm fails, the match will be retried with just the username.
 						</para>
+						<note><para>
+						Identification by auth_username has some security considerations because an
+						Authentication header is not present on the first message of a dialog when
+						digest authentication is used.  The client can't generate it until the server
+						sends the challenge in a 401 response.  Since Asterisk normally sends a security
+						event when an incoming request can't be matched to an endpoint, using auth_username
+						requires that the security event be deferred until a request is received with
+						the Authentication header and only generated if the username doesn't result in a
+						match.  This may result in a delay before an attack is recognized.  You can control
+						how many unmatched requests are received from a single ip address before a security
+						event is generated using the unidentified_request parameters in the "global"
+						configuration object.
+						</para></note>
 						<note><para>Endpoints can also be identified by IP address; however, that method
 						of identification is not handled by this configuration option. See the documentation
 						for the <literal>identify</literal> configuration section for more details on that
-						method of endpoint identification. If this option is set to <literal>username</literal>
-						and an <literal>identify</literal> configuration section exists for the endpoint, then
-						the endpoint can be identified in multiple ways.</para></note>
+						method of endpoint identification. If this option is set and an <literal>identify</literal>
+						configuration section exists for the endpoint, then the endpoint can be identified in
+						multiple ways.</para></note>
 						<enumlist>
 							<enum name="username" />
+							<enum name="auth_username" />
 						</enumlist>
 					</description>
 				</configOption>
@@ -291,6 +318,12 @@
 						For endpoints that SUBSCRIBE for MWI, use the <literal>mailboxes</literal> option in your AOR
 						configuration.
 					</para></description>
+				</configOption>
+				<configOption name="mwi_subscribe_replaces_unsolicited">
+					<synopsis>An MWI subscribe will replace sending unsolicited NOTIFYs</synopsis>
+				</configOption>
+				<configOption name="voicemail_extension">
+					<synopsis>The voicemail extension to send in the NOTIFY Message-Account header</synopsis>
 				</configOption>
 				<configOption name="moh_suggest" default="default">
 					<synopsis>Default Music On Hold class</synopsis>
@@ -813,6 +846,56 @@
 						channel is hung up. By default this option is set to 0, which means do not check.
 					</para></description>
 				</configOption>
+				<configOption name="acl">
+					<synopsis>List of IP ACL section names in acl.conf</synopsis>
+					<description><para>
+						This matches sections configured in <literal>acl.conf</literal>. The value is
+						defined as a list of comma-delimited section names.
+					</para></description>
+				</configOption>
+				<configOption name="deny">
+					<synopsis>List of IP addresses to deny access from</synopsis>
+					<description><para>
+						The value is a comma-delimited list of IP addresses. IP addresses may
+						have a subnet mask appended. The subnet mask may be written in either
+						CIDR or dotted-decimal notation. Separate the IP address and subnet
+						mask with a slash ('/')
+					</para></description>
+				</configOption>
+				<configOption name="permit">
+					<synopsis>List of IP addresses to permit access from</synopsis>
+					<description><para>
+						The value is a comma-delimited list of IP addresses. IP addresses may
+						have a subnet mask appended. The subnet mask may be written in either
+						CIDR or dotted-decimal notation. Separate the IP address and subnet
+						mask with a slash ('/')
+					</para></description>
+				</configOption>
+				<configOption name="contact_acl">
+					<synopsis>List of Contact ACL section names in acl.conf</synopsis>
+					<description><para>
+						This matches sections configured in <literal>acl.conf</literal>. The value is
+						defined as a list of comma-delimited section names.
+					</para></description>
+				</configOption>
+				<configOption name="contact_deny">
+					<synopsis>List of Contact header addresses to deny</synopsis>
+					<description><para>
+						The value is a comma-delimited list of IP addresses. IP addresses may
+						have a subnet mask appended. The subnet mask may be written in either
+						CIDR or dotted-decimal notation. Separate the IP address and subnet
+						mask with a slash ('/')
+					</para></description>
+				</configOption>
+				<configOption name="contact_permit">
+					<synopsis>List of Contact header addresses to permit</synopsis>
+					<description><para>
+						The value is a comma-delimited list of IP addresses. IP addresses may
+						have a subnet mask appended. The subnet mask may be written in either
+						CIDR or dotted-decimal notation. Separate the IP address and subnet
+						mask with a slash ('/')
+					</para></description>
+				</configOption>
 			</configObject>
 			<configObject name="auth">
 				<synopsis>Authentication type</synopsis>
@@ -1016,6 +1099,14 @@
 						Value is in milliseconds; default is 100 ms.</para>
 					</description>
 				</configOption>
+				<configOption name="allow_reload" default="no">
+					<synopsis>Allow this transport to be reloaded.</synopsis>
+					<description>
+						<para>Allow this transport to be reloaded when res_pjsip is reloaded.
+						This option defaults to "no" because reloading a transport may disrupt
+						in-progress calls.</para>
+					</description>
+				</configOption>
 			</configObject>
 			<configObject name="contact">
 				<synopsis>A way of creating an aliased name to a SIP URI</synopsis>
@@ -1051,6 +1142,13 @@
 						If <literal>0</literal> no timeout. Time in fractional seconds.
 					</para></description>
 				</configOption>
+				<configOption name="authenticate_qualify" default="no">
+					<synopsis>Authenticates a qualify request if needed</synopsis>
+					<description><para>
+						If true and a qualify request receives a challenge or authenticate response
+						authentication is attempted before declaring the contact available.
+					</para></description>
+				</configOption>
 				<configOption name="outbound_proxy">
 					<synopsis>Outbound proxy used when sending OPTIONS request</synopsis>
 					<description><para>
@@ -1066,6 +1164,34 @@
 					<description><para>
 						The User-Agent is automatically stored based on data present in incoming SIP
 						REGISTER requests and is not intended to be configured manually.
+					</para></description>
+				</configOption>
+				<configOption name="reg_server">
+					<synopsis>Asterisk Server name</synopsis>
+					<description><para>
+						Asterisk Server name on which SIP endpoint registered.
+					</para></description>
+				</configOption>
+				<configOption name="via_addr">
+					<synopsis>IP-address of the last Via header from registration.</synopsis>
+					<description><para>
+						The last Via header should contain the address of UA which sent the request.
+						The IP-address of the last Via header is automatically stored based on data present
+						in incoming SIP REGISTER requests and is not intended to be configured manually.
+					</para></description>
+				</configOption>
+				<configOption name="via_port">
+					<synopsis>IP-port of the last Via header from registration.</synopsis>
+					<description><para>
+						The IP-port of the last Via header is automatically stored based on data present
+						in incoming SIP REGISTER requests and is not intended to be configured manually.
+					</para></description>
+				</configOption>
+				<configOption name="call_id">
+					<synopsis>Call-ID header from registration.</synopsis>
+					<description><para>
+						The Call-ID header is automatically stored based on data present
+						in incoming SIP REGISTER requests and is not intended to be configured manually.
 					</para></description>
 				</configOption>
 			</configObject>
@@ -1116,6 +1242,9 @@
 						For endpoints that cannot SUBSCRIBE for MWI, you can set the <literal>mailboxes</literal> option in your
 						endpoint configuration section to enable unsolicited MWI NOTIFYs to the endpoint.
 					</para></description>
+				</configOption>
+				<configOption name="voicemail_extension">
+					<synopsis>The voicemail extension to send in the NOTIFY Message-Account header</synopsis>
 				</configOption>
 				<configOption name="maximum_expiration" default="7200">
 					<synopsis>Maximum time to keep an AoR</synopsis>
@@ -1261,9 +1390,36 @@
 				<configOption name="keep_alive_interval" default="0">
 					<synopsis>The interval (in seconds) to send keepalives to active connection-oriented transports.</synopsis>
 				</configOption>
+				<configOption name="contact_expiration_check_interval" default="30">
+					<synopsis>The interval (in seconds) to check for expired contacts.</synopsis>
+				</configOption>
+				<configOption name="disable_multi_domain" default="no">
+					<synopsis>Disable Multi Domain support</synopsis>
+					<description><para>
+						If disabled it can improve realtime performace by reducing number of database requsts.
+					</para></description>
+				</configOption>
 				<configOption name="max_initial_qualify_time" default="0">
 					<synopsis>The maximum amount of time from startup that qualifies should be attempted on all contacts.
 					If greater than the qualify_frequency for an aor, qualify_frequency will be used instead.</synopsis>
+				</configOption>
+				<configOption name="unidentified_request_period" default="5">
+					<synopsis>The number of seconds over which to accumulate unidentified requests.</synopsis>
+					<description><para>
+					If <literal>unidentified_request_count</literal> unidentified requests are received
+					during <literal>unidentified_request_period</literal>, a security event will be generated.
+					</para></description>
+				</configOption>
+				<configOption name="unidentified_request_count" default="5">
+					<synopsis>The number of unidentified requests from a single IP to allow.</synopsis>
+					<description><para>
+					If <literal>unidentified_request_count</literal> unidentified requests are received
+					during <literal>unidentified_request_period</literal>, a security event will be generated.
+					</para></description>
+				</configOption>
+				<configOption name="unidentified_request_prune_interval" default="30">
+					<synopsis>The interval at which unidentified requests are older than
+					twice the unidentified_request_period are pruned.</synopsis>
 				</configOption>
 				<configOption name="type">
 					<synopsis>Must be of type 'global'.</synopsis>
@@ -1271,8 +1427,15 @@
 				<configOption name="user_agent" default="Asterisk &lt;Asterisk Version&gt;">
 					<synopsis>Value used in User-Agent header for SIP requests and Server header for SIP responses.</synopsis>
 				</configOption>
+				<configOption name="regcontext" default="">
+                                        <synopsis>When set, Asterisk will dynamically create and destroy a NoOp priority 1 extension for a given
+					peer who registers or unregisters with us.</synopsis>
+                                </configOption>
 				<configOption name="default_outbound_endpoint" default="default_outbound_endpoint">
 					<synopsis>Endpoint to use when sending an outbound request to a URI without a specified endpoint.</synopsis>
+				</configOption>
+				<configOption name="default_voicemail_extension">
+					<synopsis>The voicemail extension to send in the NOTIFY Message-Account header if not specified on endpoint or aor</synopsis>
 				</configOption>
 				<configOption name="debug" default="no">
 					<synopsis>Enable/Disable SIP debug logging.  Valid options include yes|no or
@@ -1281,7 +1444,34 @@
 				<configOption name="endpoint_identifier_order" default="ip,username,anonymous">
 					<synopsis>The order by which endpoint identifiers are processed and checked.
                                         Identifier names are usually derived from and can be found in the endpoint
-                                        identifier module itself (res_pjsip_endpoint_identifier_*)</synopsis>
+                                        identifier module itself (res_pjsip_endpoint_identifier_*).
+                                        You can use the CLI command "pjsip show identifiers" to see the
+                                        identifiers currently available.</synopsis>
+                    <description>
+						<note><para>
+						One of the identifiers is "auth_username" which matches on the username in
+						an Authentication header.  This method has some security considerations because an
+						Authentication header is not present on the first message of a dialog when
+						digest authentication is used.  The client can't generate it until the server
+						sends the challenge in a 401 response.  Since Asterisk normally sends a security
+						event when an incoming request can't be matched to an endpoint, using auth_username
+						requires that the security event be deferred until a request is received with
+						the Authentication header and only generated if the username doesn't result in a
+						match.  This may result in a delay before an attack is recognized.  You can control
+						how many unmatched requests are received from a single ip address before a security
+						event is generated using the unidentified_request parameters.
+						</para></note>
+                    </description>
+				</configOption>
+				<configOption name="default_from_user" default="asterisk">
+					<synopsis>When Asterisk generates an outgoing SIP request, the From header username will be
+                                        set to this value if there is no better option (such as CallerID) to be
+                                        used.</synopsis>
+				</configOption>
+				<configOption name="default_realm" default="asterisk">
+					<synopsis>When Asterisk generates an challenge, the digest will be
+                                        set to this value if there is no better option (such as auth/realm) to be
+                                        used.</synopsis>
 				</configOption>
 			</configObject>
 		</configFile>
@@ -1787,6 +1977,18 @@
 				<parameter name="EndpointName">
 					<para>The name of the endpoint associated with this information.</para>
 				</parameter>
+				<parameter name="UserAgent">
+					<para>Content of the User-Agent header in REGISTER request</para>
+				</parameter>
+				<parameter name="RegExpire">
+					<para>Absolute time that this contact is no longer valid after</para>
+				</parameter>
+				<parameter name="ViaAddress">
+					<para>IP address:port of the last Via header in REGISTER request</para>
+				</parameter>
+				<parameter name="CallID">
+					<para>Content of the Call-ID header in REGISTER request</para>
+				</parameter>
 			</syntax>
 		</managerEventInstance>
 	</managerEvent>
@@ -1905,6 +2107,18 @@ static struct ast_taskprocessor *serializer_pool[SERIALIZER_POOL_SIZE];
 static pjsip_endpoint *ast_pjsip_endpoint;
 
 static struct ast_threadpool *sip_threadpool;
+
+/*! Local host address for IPv4 */
+static pj_sockaddr host_ip_ipv4;
+
+/*! Local host address for IPv4 (string form) */
+static char host_ip_ipv4_string[PJ_INET6_ADDRSTRLEN + 2];
+
+/*! Local host address for IPv6 */
+static pj_sockaddr host_ip_ipv6;
+
+/*! Local host address for IPv6 (string form) */
+static char host_ip_ipv6_string[PJ_INET6_ADDRSTRLEN + 2];
 
 static int register_service_noref(void *data)
 {
@@ -2191,6 +2405,57 @@ struct ast_sip_endpoint *ast_sip_identify_endpoint(pjsip_rx_data *rdata)
 	return endpoint;
 }
 
+static int do_cli_dump_endpt(void *v_a)
+{
+	struct ast_cli_args *a = v_a;
+
+	ast_pjproject_log_intercept_begin(a->fd);
+	pjsip_endpt_dump(ast_sip_get_pjsip_endpoint(), a->argc == 4 ? PJ_TRUE : PJ_FALSE);
+	ast_pjproject_log_intercept_end();
+
+	return 0;
+}
+
+static char *cli_dump_endpt(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a)
+{
+	switch (cmd) {
+	case CLI_INIT:
+#ifdef AST_DEVMODE
+		e->command = "pjsip dump endpt [details]";
+		e->usage =
+			"Usage: pjsip dump endpt [details]\n"
+			"       Dump the res_pjsip endpt internals.\n"
+			"\n"
+			"Warning: PJPROJECT documents that the function used by this\n"
+			"CLI command may cause a crash when asking for details because\n"
+			"it tries to access all active memory pools.\n";
+#else
+		/*
+		 * In non-developer mode we will not document or make easily accessible
+		 * the details option even though it is still available.  The user has
+		 * to know it exists to use it.  Presumably they would also be aware of
+		 * the potential crash warning.
+		 */
+		e->command = "pjsip dump endpt";
+		e->usage =
+			"Usage: pjsip dump endpt\n"
+			"       Dump the res_pjsip endpt internals.\n";
+#endif /* AST_DEVMODE */
+		return NULL;
+	case CLI_GENERATE:
+		return NULL;
+	}
+
+	if (4 < a->argc
+		|| (a->argc == 4 && strcasecmp(a->argv[3], "details"))) {
+		return CLI_SHOWUSAGE;
+	}
+
+	ast_sip_push_task_synchronous(NULL, do_cli_dump_endpt, a);
+
+	return CLI_SUCCESS;
+}
+
 static char *cli_show_endpoint_identifiers(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a)
 {
 #define ENDPOINT_IDENTIFIER_FORMAT "%-20.20s\n"
@@ -2254,8 +2519,9 @@ static char *cli_show_settings(struct ast_cli_entry *e, int cmd, struct ast_cli_
 }
 
 static struct ast_cli_entry cli_commands[] = {
-        AST_CLI_DEFINE(cli_show_settings, "Show global and system configuration options"),
-        AST_CLI_DEFINE(cli_show_endpoint_identifiers, "List registered endpoint identifiers")
+	AST_CLI_DEFINE(cli_dump_endpt, "Dump the res_pjsip endpt internals"),
+	AST_CLI_DEFINE(cli_show_settings, "Show global and system configuration options"),
+	AST_CLI_DEFINE(cli_show_endpoint_identifiers, "List registered endpoint identifiers")
 };
 
 AST_RWLIST_HEAD_STATIC(endpoint_formatters, ast_sip_endpoint_formatter);
@@ -2325,10 +2591,11 @@ static int sip_dialog_create_from(pj_pool_t *pool, pj_str_t *from, const char *u
 	pjsip_sip_uri *sip_uri;
 	pjsip_transport_type_e type = PJSIP_TRANSPORT_UNSPECIFIED;
 	int local_port;
-	char uuid_str[AST_UUID_STR_LEN];
+	char default_user[PJSIP_MAX_URL_SIZE];
 
 	if (ast_strlen_zero(user)) {
-		user = ast_uuid_generate_str(uuid_str, sizeof(uuid_str));
+		ast_sip_get_default_from_user(default_user, sizeof(default_user));
+		user = default_user;
 	}
 
 	/* Parse the provided target URI so we can determine what transport it will end up using */
@@ -2399,29 +2666,23 @@ static int sip_dialog_create_from(pj_pool_t *pool, pj_str_t *from, const char *u
 	return 0;
 }
 
-static int sip_get_tpselector_from_endpoint(const struct ast_sip_endpoint *endpoint, pjsip_tpselector *selector)
+int ast_sip_set_tpselector_from_transport(const struct ast_sip_transport *transport, pjsip_tpselector *selector)
 {
-	RAII_VAR(struct ast_sip_transport *, transport, NULL, ao2_cleanup);
-	const char *transport_name = endpoint->transport;
+	RAII_VAR(struct ast_sip_transport_state *, transport_state, NULL, ao2_cleanup);
 
-	if (ast_strlen_zero(transport_name)) {
-		return 0;
-	}
-
-	transport = ast_sorcery_retrieve_by_id(ast_sip_get_sorcery(), "transport", transport_name);
-
-	if (!transport || !transport->state) {
-		ast_log(LOG_ERROR, "Unable to retrieve PJSIP transport '%s' for endpoint '%s'\n",
-			transport_name, ast_sorcery_object_get_id(endpoint));
+	transport_state = ast_sip_get_transport_state(ast_sorcery_object_get_id(transport));
+	if (!transport_state) {
+		ast_log(LOG_ERROR, "Unable to retrieve PJSIP transport state for '%s'\n",
+			ast_sorcery_object_get_id(transport));
 		return -1;
 	}
 
-	if (transport->state->transport) {
+	if (transport_state->transport) {
 		selector->type = PJSIP_TPSELECTOR_TRANSPORT;
-		selector->u.transport = transport->state->transport;
-	} else if (transport->state->factory) {
+		selector->u.transport = transport_state->transport;
+	} else if (transport_state->factory) {
 		selector->type = PJSIP_TPSELECTOR_LISTENER;
-		selector->u.listener = transport->state->factory;
+		selector->u.listener = transport_state->factory;
 	} else if (transport->type == AST_TRANSPORT_WS || transport->type == AST_TRANSPORT_WSS) {
 		/* The WebSocket transport has no factory as it can not create outgoing connections, so
 		 * even if an endpoint is locked to a WebSocket transport we let the PJSIP logic
@@ -2433,6 +2694,35 @@ static int sip_get_tpselector_from_endpoint(const struct ast_sip_endpoint *endpo
 	}
 
 	return 0;
+}
+
+int ast_sip_set_tpselector_from_transport_name(const char *transport_name, pjsip_tpselector *selector)
+{
+	RAII_VAR(struct ast_sip_transport *, transport, NULL, ao2_cleanup);
+
+	if (ast_strlen_zero(transport_name)) {
+		return 0;
+	}
+
+	transport = ast_sorcery_retrieve_by_id(ast_sip_get_sorcery(), "transport", transport_name);
+	if (!transport) {
+		ast_log(LOG_ERROR, "Unable to retrieve PJSIP transport '%s'\n",
+			transport_name);
+		return -1;
+	}
+
+	return ast_sip_set_tpselector_from_transport(transport, selector);
+}
+
+static int sip_get_tpselector_from_endpoint(const struct ast_sip_endpoint *endpoint, pjsip_tpselector *selector)
+{
+	const char *transport_name = endpoint->transport;
+
+	if (ast_strlen_zero(transport_name)) {
+		return 0;
+	}
+
+	return ast_sip_set_tpselector_from_transport_name(endpoint->transport, selector);
 }
 
 void ast_sip_add_usereqphone(const struct ast_sip_endpoint *endpoint, pj_pool_t *pool, pjsip_uri *uri)
@@ -2545,6 +2835,8 @@ pjsip_dialog *ast_sip_create_dialog_uac(const struct ast_sip_endpoint *endpoint,
 
 		pj_strdup2_with_null(dlg->pool, &tmp, outbound_proxy);
 		if (!(route = pjsip_parse_hdr(dlg->pool, &ROUTE_HNAME, tmp.ptr, tmp.slen, NULL))) {
+			ast_log(LOG_ERROR, "Could not create dialog to endpoint '%s' as outbound proxy URI '%s' is not valid\n",
+				ast_sorcery_object_get_id(endpoint), outbound_proxy);
 			dlg->sess_count--;
 			pjsip_dlg_terminate(dlg);
 			return NULL;
@@ -2627,7 +2919,11 @@ pjsip_dialog *ast_sip_create_dialog_uas(const struct ast_sip_endpoint *endpoint,
 			(type != PJSIP_TRANSPORT_UDP && type != PJSIP_TRANSPORT_UDP6) ? ";transport=" : "",
 			(type != PJSIP_TRANSPORT_UDP && type != PJSIP_TRANSPORT_UDP6) ? pjsip_transport_get_type_name(type) : "");
 
+#ifdef HAVE_PJSIP_DLG_CREATE_UAS_AND_INC_LOCK
+	*status = pjsip_dlg_create_uas_and_inc_lock(pjsip_ua_instance(), rdata, &contact, &dlg);
+#else
 	*status = pjsip_dlg_create_uas(pjsip_ua_instance(), rdata, &contact, &dlg);
+#endif
 	if (*status != PJ_SUCCESS) {
 		char err[PJ_ERR_MSG_SIZE];
 
@@ -2640,6 +2936,9 @@ pjsip_dialog *ast_sip_create_dialog_uas(const struct ast_sip_endpoint *endpoint,
 	dlg->sess_count++;
 	pjsip_dlg_set_transport(dlg, &selector);
 	dlg->sess_count--;
+#ifdef HAVE_PJSIP_DLG_CREATE_UAS_AND_INC_LOCK
+	pjsip_dlg_dec_lock(dlg);
+#endif
 
 	return dlg;
 }
@@ -2738,6 +3037,8 @@ static int create_out_of_dialog_request(const pjsip_method *method, struct ast_s
 	pj_str_t from;
 	pj_pool_t *pool;
 	pjsip_tpselector selector = { .type = PJSIP_TPSELECTOR_NONE, };
+	pjsip_uri *sip_uri;
+	const char *fromuser;
 
 	if (ast_strlen_zero(uri)) {
 		if (!endpoint && (!contact || ast_strlen_zero(contact->uri))) {
@@ -2774,7 +3075,18 @@ static int create_out_of_dialog_request(const pjsip_method *method, struct ast_s
 		return -1;
 	}
 
-	if (sip_dialog_create_from(pool, &from, endpoint ? endpoint->fromuser : NULL,
+	sip_uri = pjsip_parse_uri(pool, remote_uri.ptr, remote_uri.slen, 0);
+	if (!sip_uri || (!PJSIP_URI_SCHEME_IS_SIP(sip_uri) && !PJSIP_URI_SCHEME_IS_SIPS(sip_uri))) {
+		ast_log(LOG_ERROR, "Unable to create outbound %.*s request to endpoint %s as URI '%s' is not valid\n",
+			(int) pj_strlen(&method->name), pj_strbuf(&method->name),
+			endpoint ? ast_sorcery_object_get_id(endpoint) : "<none>",
+			pj_strbuf(&remote_uri));
+		pjsip_endpt_release_pool(ast_sip_get_pjsip_endpoint(), pool);
+		return -1;
+	}
+
+	fromuser = endpoint ? (!ast_strlen_zero(endpoint->fromuser) ? endpoint->fromuser : ast_sorcery_object_get_id(endpoint)) : NULL;
+	if (sip_dialog_create_from(pool, &from, fromuser,
 				endpoint ? endpoint->fromdomain : NULL, &remote_uri, &selector)) {
 		ast_log(LOG_ERROR, "Unable to create From header for %.*s request to endpoint %s\n",
 				(int) pj_strlen(&method->name), pj_strbuf(&method->name),
@@ -2798,8 +3110,9 @@ static int create_out_of_dialog_request(const pjsip_method *method, struct ast_s
 	/* If an outbound proxy is specified on the endpoint apply it to this request */
 	if (endpoint && !ast_strlen_zero(endpoint->outbound_proxy) &&
 		ast_sip_set_outbound_proxy((*tdata), endpoint->outbound_proxy)) {
-		ast_log(LOG_ERROR, "Unable to apply outbound proxy on request %.*s to endpoint %s\n",
-			(int) pj_strlen(&method->name), pj_strbuf(&method->name), ast_sorcery_object_get_id(endpoint));
+		ast_log(LOG_ERROR, "Unable to apply outbound proxy on request %.*s to endpoint %s as outbound proxy URI '%s' is not valid\n",
+			(int) pj_strlen(&method->name), pj_strbuf(&method->name), ast_sorcery_object_get_id(endpoint),
+			endpoint->outbound_proxy);
 		pjsip_endpt_release_pool(ast_sip_get_pjsip_endpoint(), pool);
 		return -1;
 	}
@@ -2944,8 +3257,6 @@ struct send_request_wrapper {
 	pj_timer_entry *timeout_timer;
 	/*! Original timeout. */
 	pj_int32_t timeout;
-	/*! Timeout/cleanup lock. */
-	pj_mutex_t *lock;
 	/*! The transmit data. */
 	pjsip_tx_data *tdata;
 };
@@ -2971,7 +3282,7 @@ static void endpt_send_request_cb(void *token, pjsip_event *e)
 		ast_debug(2, "%p: PJSIP tsx response received\n", req_wrapper);
 	}
 
-	pj_mutex_lock(req_wrapper->lock);
+	ao2_lock(req_wrapper);
 
 	/* It's possible that our own timer was already processing while
 	 * we were waiting on the lock so check the timer id.  If it's
@@ -3012,7 +3323,7 @@ static void endpt_send_request_cb(void *token, pjsip_event *e)
 		req_wrapper->cb_called = 1;
 		ast_debug(2, "%p: Callbacks executed\n", req_wrapper);
 	}
-	pj_mutex_unlock(req_wrapper->lock);
+	ao2_unlock(req_wrapper);
 	ao2_ref(req_wrapper, -1);
 }
 
@@ -3029,12 +3340,12 @@ static void send_request_timer_callback(pj_timer_heap_t *theap, pj_timer_entry *
 	ast_debug(2, "%p: Internal tsx timer expired after %d msec\n",
 		req_wrapper, req_wrapper->timeout);
 
-	pj_mutex_lock(req_wrapper->lock);
+	ao2_lock(req_wrapper);
 	/* If the id is not TIMEOUT_TIMER2 then the timer was cancelled above
 	 * while the lock was being held so just clean up.
 	 */
 	if (entry->id != TIMEOUT_TIMER2) {
-		pj_mutex_unlock(req_wrapper->lock);
+		ao2_unlock(req_wrapper);
 		ast_debug(3, "%p: Timeout already handled\n", req_wrapper);
 		ao2_ref(req_wrapper, -1);
 		return;
@@ -3052,7 +3363,7 @@ static void send_request_timer_callback(pj_timer_heap_t *theap, pj_timer_entry *
 		ast_debug(2, "%p: Callbacks executed\n", req_wrapper);
 	}
 
-	pj_mutex_unlock(req_wrapper->lock);
+	ao2_unlock(req_wrapper);
 	ao2_ref(req_wrapper, -1);
 }
 
@@ -3060,7 +3371,6 @@ static void send_request_wrapper_destructor(void *obj)
 {
 	struct send_request_wrapper *req_wrapper = obj;
 
-	pj_mutex_destroy(req_wrapper->lock);
 	pjsip_tx_data_dec_ref(req_wrapper->tdata);
 	ast_debug(2, "%p: wrapper destroyed\n", req_wrapper);
 }
@@ -3071,10 +3381,10 @@ static pj_status_t endpt_send_request(struct ast_sip_endpoint *endpoint,
 	struct send_request_wrapper *req_wrapper;
 	pj_status_t ret_val;
 	pjsip_endpoint *endpt = ast_sip_get_pjsip_endpoint();
+	pjsip_tpselector selector = { .type = PJSIP_TPSELECTOR_NONE, };
 
 	/* Create wrapper to detect if the callback was actually called on an error. */
-	req_wrapper = ao2_alloc_options(sizeof(*req_wrapper), send_request_wrapper_destructor,
-		AO2_ALLOC_OPT_LOCK_NOLOCK);
+	req_wrapper = ao2_alloc(sizeof(*req_wrapper), send_request_wrapper_destructor);
 	if (!req_wrapper) {
 		pjsip_tx_data_dec_ref(tdata);
 		return PJ_ENOMEM;
@@ -3086,25 +3396,11 @@ static pj_status_t endpt_send_request(struct ast_sip_endpoint *endpoint,
 	req_wrapper->callback = cb;
 	req_wrapper->timeout = timeout;
 	req_wrapper->timeout_timer = NULL;
-	req_wrapper->lock = NULL;
 	req_wrapper->tdata = tdata;
 	/* Add a reference to tdata.  The wrapper destructor cleans it up. */
 	pjsip_tx_data_add_ref(tdata);
 
-	ret_val = pj_mutex_create_simple(tdata->pool, "tsx_timeout", &req_wrapper->lock);
-	if (ret_val != PJ_SUCCESS) {
-		char errmsg[PJ_ERR_MSG_SIZE];
-		pj_strerror(ret_val, errmsg, sizeof(errmsg));
-		ast_log(LOG_ERROR, "Error %d '%s' sending %.*s request to endpoint %s\n",
-			(int) ret_val, errmsg, (int) pj_strlen(&tdata->msg->line.req.method.name),
-			pj_strbuf(&tdata->msg->line.req.method.name),
-			endpoint ? ast_sorcery_object_get_id(endpoint) : "<unknown>");
-		pjsip_tx_data_dec_ref(tdata);
-		ao2_ref(req_wrapper, -1);
-		return PJ_ENOMEM;
-	}
-
-	pj_mutex_lock(req_wrapper->lock);
+	ao2_lock(req_wrapper);
 
 	if (timeout > 0) {
 		pj_time_val timeout_timer_val = { timeout / 1000, timeout % 1000 };
@@ -3136,14 +3432,21 @@ static pj_status_t endpt_send_request(struct ast_sip_endpoint *endpoint,
 	 */
 	ao2_ref(req_wrapper, +1);
 
+	if (endpoint) {
+		sip_get_tpselector_from_endpoint(endpoint, &selector);
+		pjsip_tx_data_set_transport(tdata, &selector);
+	}
+
 	ret_val = pjsip_endpt_send_request(endpt, tdata, -1, req_wrapper, endpt_send_request_cb);
 	if (ret_val != PJ_SUCCESS) {
 		char errmsg[PJ_ERR_MSG_SIZE];
 
 		if (timeout > 0) {
-			pj_timer_heap_cancel_if_active(pjsip_endpt_get_timer_heap(endpt),
+			int timers_cancelled = pj_timer_heap_cancel_if_active(pjsip_endpt_get_timer_heap(endpt),
 				req_wrapper->timeout_timer, TIMER_INACTIVE);
-			ao2_ref(req_wrapper, -1);
+			if (timers_cancelled > 0) {
+				ao2_ref(req_wrapper, -1);
+			}
 		}
 
 		/* Complain of failure to send the request. */
@@ -3166,7 +3469,7 @@ static pj_status_t endpt_send_request(struct ast_sip_endpoint *endpoint,
 			ao2_ref(req_wrapper, -1);
 		}
 	}
-	pj_mutex_unlock(req_wrapper->lock);
+	ao2_unlock(req_wrapper);
 	ao2_ref(req_wrapper, -1);
 	return ret_val;
 }
@@ -3363,23 +3666,34 @@ int ast_sip_append_body(pjsip_tx_data *tdata, const char *body_text)
 	return 0;
 }
 
+struct ast_taskprocessor *ast_sip_create_serializer_group_named(const char *name, struct ast_serializer_shutdown_group *shutdown_group)
+{
+	return ast_threadpool_serializer_group(name, sip_threadpool, shutdown_group);
+}
+
 struct ast_taskprocessor *ast_sip_create_serializer_group(struct ast_serializer_shutdown_group *shutdown_group)
 {
-	struct ast_taskprocessor *serializer;
-	char name[AST_UUID_STR_LEN];
+	char tps_name[AST_TASKPROCESSOR_MAX_NAME + 1];
 
-	ast_uuid_generate_str(name, sizeof(name));
+	/* Create name with seq number appended. */
+	ast_taskprocessor_build_name(tps_name, sizeof(tps_name), "pjsip-group-serializer");
 
-	serializer = ast_threadpool_serializer_group(name, sip_threadpool, shutdown_group);
-	if (!serializer) {
-		return NULL;
-	}
-	return serializer;
+	return ast_sip_create_serializer_group_named(tps_name, shutdown_group);
+}
+
+struct ast_taskprocessor *ast_sip_create_serializer_named(const char *name)
+{
+	return ast_sip_create_serializer_group_named(name, NULL);
 }
 
 struct ast_taskprocessor *ast_sip_create_serializer(void)
 {
-	return ast_sip_create_serializer_group(NULL);
+	char tps_name[AST_TASKPROCESSOR_MAX_NAME + 1];
+
+	/* Create name with seq number appended. */
+	ast_taskprocessor_build_name(tps_name, sizeof(tps_name), "pjsip-serializer");
+
+	return ast_sip_create_serializer_group_named(tps_name, NULL);
 }
 
 /*!
@@ -3409,10 +3723,14 @@ static void serializer_pool_shutdown(void)
  */
 static int serializer_pool_setup(void)
 {
+	char tps_name[AST_TASKPROCESSOR_MAX_NAME + 1];
 	int idx;
 
 	for (idx = 0; idx < SERIALIZER_POOL_SIZE; ++idx) {
-		serializer_pool[idx] = ast_sip_create_serializer();
+		/* Create name with seq number appended. */
+		ast_taskprocessor_build_name(tps_name, sizeof(tps_name), "pjsip/default");
+
+		serializer_pool[idx] = ast_sip_create_serializer_named(tps_name);
 		if (!serializer_pool[idx]) {
 			serializer_pool_shutdown();
 			return -1;
@@ -3438,11 +3756,7 @@ int ast_sip_push_task(struct ast_taskprocessor *serializer, int (*sip_task)(void
 		serializer = serializer_pool[pos];
 	}
 
-	if (serializer) {
-		return ast_taskprocessor_push(serializer, sip_task, task_data);
-	} else {
-		return ast_threadpool_push(sip_threadpool, sip_task, task_data);
-	}
+	return ast_taskprocessor_push(serializer, sip_task, task_data);
 }
 
 struct sync_task_data {
@@ -3670,6 +3984,14 @@ int ast_sip_send_stateful_response(pjsip_rx_data *rdata, pjsip_tx_data *tdata, s
 	pjsip_transaction *tsx;
 
 	if (pjsip_tsx_create_uas(NULL, rdata, &tsx) != PJ_SUCCESS) {
+		struct ast_sip_contact *contact;
+
+		/* ast_sip_create_response bumps the refcount of the contact and adds it to the tdata.
+		 * We'll leak that reference if we don't get rid of it here.
+		 */
+		contact = ast_sip_mod_data_get(tdata->mod_data, supplement_module.id, MOD_DATA_CONTACT);
+		ao2_cleanup(contact);
+		ast_sip_mod_data_set(tdata->pool, tdata->mod_data, supplement_module.id, MOD_DATA_CONTACT, NULL);
 		pjsip_tx_data_dec_ref(tdata);
 		return -1;
 	}
@@ -3697,6 +4019,59 @@ int ast_sip_create_response(const pjsip_rx_data *rdata, int st_code,
 	return res;
 }
 
+int ast_sip_get_host_ip(int af, pj_sockaddr *addr)
+{
+	if (af == pj_AF_INET() && !ast_strlen_zero(host_ip_ipv4_string)) {
+		pj_sockaddr_copy_addr(addr, &host_ip_ipv4);
+		return 0;
+	} else if (af == pj_AF_INET6() && !ast_strlen_zero(host_ip_ipv6_string)) {
+		pj_sockaddr_copy_addr(addr, &host_ip_ipv6);
+		return 0;
+	}
+
+	return -1;
+}
+
+const char *ast_sip_get_host_ip_string(int af)
+{
+	if (af == pj_AF_INET()) {
+		return host_ip_ipv4_string;
+	} else if (af == pj_AF_INET6()) {
+		return host_ip_ipv6_string;
+	}
+
+	return NULL;
+}
+
+/*!
+ * \brief Set name and number information on an identity header.
+ *
+ * \param pool Memory pool to use for string duplication
+ * \param id_hdr A From, P-Asserted-Identity, or Remote-Party-ID header to modify
+ * \param id The identity information to apply to the header
+ */
+void ast_sip_modify_id_header(pj_pool_t *pool, pjsip_fromto_hdr *id_hdr, const struct ast_party_id *id)
+{
+	pjsip_name_addr *id_name_addr;
+	pjsip_sip_uri *id_uri;
+
+	id_name_addr = (pjsip_name_addr *) id_hdr->uri;
+	id_uri = pjsip_uri_get_uri(id_name_addr->uri);
+
+	if (id->name.valid) {
+		int name_buf_len = strlen(id->name.str) * 2 + 1;
+		char *name_buf = ast_alloca(name_buf_len);
+
+		ast_escape_quoted(id->name.str, name_buf, name_buf_len);
+		pj_strdup2(pool, &id_name_addr->display, name_buf);
+	}
+
+	if (id->number.valid) {
+		pj_strdup2(pool, &id_uri->user, id->number.str);
+	}
+}
+
+
 static void remove_request_headers(pjsip_endpoint *endpt)
 {
 	const pjsip_hdr *request_headers = pjsip_endpt_get_request_headers(endpt);
@@ -3707,6 +4082,11 @@ static void remove_request_headers(pjsip_endpoint *endpt)
 		iter = iter->next;
 		pj_list_erase(to_erase);
 	}
+}
+
+long ast_sip_threadpool_queue_size(void)
+{
+	return ast_threadpool_queue_size(sip_threadpool);
 }
 
 AST_TEST_DEFINE(xml_sanitization_end_null)
@@ -3772,29 +4152,55 @@ static int reload_configuration_task(void *obj)
 	return 0;
 }
 
-static int load_module(void)
+static int unload_pjsip(void *data)
 {
+	/*
+	 * These calls need the pjsip endpoint and serializer to clean up.
+	 * If they're not set, then there's nothing to clean up anyway.
+	 */
+	if (ast_pjsip_endpoint && serializer_pool[0]) {
+		ast_res_pjsip_cleanup_options_handling();
+		internal_sip_destroy_outbound_authentication();
+		ast_sip_destroy_distributor();
+		ast_res_pjsip_destroy_configuration();
+		ast_sip_destroy_system();
+		ast_sip_destroy_global_headers();
+		internal_sip_unregister_service(&supplement_module);
+	}
+
+	if (monitor_thread) {
+		stop_monitor_thread();
+		monitor_thread = NULL;
+	}
+
+	if (memory_pool) {
+		pj_pool_release(memory_pool);
+		memory_pool = NULL;
+	}
+
+	ast_pjsip_endpoint = NULL;
+
+	if (caching_pool.lock) {
+		pj_caching_pool_destroy(&caching_pool);
+	}
+
+	pj_shutdown();
+
+	return 0;
+}
+
+static int load_pjsip(void)
+{
+	pj_status_t status;
+
 	/* The third parameter is just copied from
 	 * example code from PJLIB. This can be adjusted
 	 * if necessary.
 	 */
-	pj_status_t status;
-	struct ast_threadpool_options options;
-
-	if (pj_init() != PJ_SUCCESS) {
-		return AST_MODULE_LOAD_DECLINE;
-	}
-
-	if (pjlib_util_init() != PJ_SUCCESS) {
-		pj_shutdown();
-		return AST_MODULE_LOAD_DECLINE;
-	}
-
 	pj_caching_pool_init(&caching_pool, NULL, 1024 * 1024);
 	if (pjsip_endpt_create(&caching_pool.factory, "SIP", &ast_pjsip_endpoint) != PJ_SUCCESS) {
 		ast_log(LOG_ERROR, "Failed to create PJSIP endpoint structure. Aborting load\n");
-		pj_caching_pool_destroy(&caching_pool);
-		return AST_MODULE_LOAD_DECLINE;
+		goto error;
 	}
 
 	/* PJSIP will automatically try to add a Max-Forwards header. Since we want to control that,
@@ -3805,49 +4211,18 @@ static int load_module(void)
 	memory_pool = pj_pool_create(&caching_pool.factory, "SIP", 1024, 1024, NULL);
 	if (!memory_pool) {
 		ast_log(LOG_ERROR, "Failed to create memory pool for SIP. Aborting load\n");
-		pjsip_endpt_destroy(ast_pjsip_endpoint);
-		ast_pjsip_endpoint = NULL;
-		pj_caching_pool_destroy(&caching_pool);
-		return AST_MODULE_LOAD_DECLINE;
+		goto error;
 	}
 
-	if (ast_sip_initialize_system()) {
-		ast_log(LOG_ERROR, "Failed to initialize SIP 'system' configuration section. Aborting load\n");
-		pj_pool_release(memory_pool);
-		memory_pool = NULL;
-		pjsip_endpt_destroy(ast_pjsip_endpoint);
-		ast_pjsip_endpoint = NULL;
-		pj_caching_pool_destroy(&caching_pool);
-		return AST_MODULE_LOAD_DECLINE;
+	if (!pj_gethostip(pj_AF_INET(), &host_ip_ipv4)) {
+		pj_sockaddr_print(&host_ip_ipv4, host_ip_ipv4_string, sizeof(host_ip_ipv4_string), 2);
+		ast_verb(3, "Local IPv4 address determined to be: %s\n", host_ip_ipv4_string);
 	}
 
-	sip_get_threadpool_options(&options);
-	options.thread_start = sip_thread_start;
-	sip_threadpool = ast_threadpool_create("SIP", NULL, &options);
-	if (!sip_threadpool) {
-		ast_log(LOG_ERROR, "Failed to create SIP threadpool. Aborting load\n");
-		ast_sip_destroy_system();
-		pj_pool_release(memory_pool);
-		memory_pool = NULL;
-		pjsip_endpt_destroy(ast_pjsip_endpoint);
-		ast_pjsip_endpoint = NULL;
-		pj_caching_pool_destroy(&caching_pool);
-		return AST_MODULE_LOAD_DECLINE;
+	if (!pj_gethostip(pj_AF_INET6(), &host_ip_ipv6)) {
+		pj_sockaddr_print(&host_ip_ipv6, host_ip_ipv6_string, sizeof(host_ip_ipv6_string), 2);
+		ast_verb(3, "Local IPv6 address determined to be: %s\n", host_ip_ipv6_string);
 	}
-
-	if (serializer_pool_setup()) {
-		ast_log(LOG_ERROR, "Failed to create SIP serializer pool. Aborting load\n");
-		ast_threadpool_shutdown(sip_threadpool);
-		ast_sip_destroy_system();
-		pj_pool_release(memory_pool);
-		memory_pool = NULL;
-		pjsip_endpt_destroy(ast_pjsip_endpoint);
-		ast_pjsip_endpoint = NULL;
-		pj_caching_pool_destroy(&caching_pool);
-		return AST_MODULE_LOAD_DECLINE;
-	}
-
-	ast_sip_initialize_dns();
 
 	pjsip_tsx_layer_init_module(ast_pjsip_endpoint);
 	pjsip_ua_init_module(ast_pjsip_endpoint, NULL);
@@ -3857,73 +4232,81 @@ static int load_module(void)
 			NULL, PJ_THREAD_DEFAULT_STACK_SIZE * 2, 0, &monitor_thread);
 	if (status != PJ_SUCCESS) {
 		ast_log(LOG_ERROR, "Failed to start SIP monitor thread. Aborting load\n");
-		ast_sip_destroy_system();
-		pj_pool_release(memory_pool);
-		memory_pool = NULL;
-		pjsip_endpt_destroy(ast_pjsip_endpoint);
-		ast_pjsip_endpoint = NULL;
-		pj_caching_pool_destroy(&caching_pool);
+		goto error;
+	}
+
+	return AST_MODULE_LOAD_SUCCESS;
+
+error:
+	unload_pjsip(NULL);
+	return AST_MODULE_LOAD_DECLINE;
+}
+
+static int load_module(void)
+{
+	struct ast_threadpool_options options;
+
+	CHECK_PJPROJECT_MODULE_LOADED();
+
+	/* pjproject and config_system need to be initialized before all else */
+	if (pj_init() != PJ_SUCCESS) {
 		return AST_MODULE_LOAD_DECLINE;
 	}
+
+	if (pjlib_util_init() != PJ_SUCCESS) {
+		goto error;
+	}
+
+	if (ast_sip_initialize_system()) {
+		ast_log(LOG_ERROR, "Failed to initialize SIP 'system' configuration section. Aborting load\n");
+		goto error;
+	}
+
+	/* The serializer needs threadpool and threadpool needs pjproject to be initialized so it's next */
+	sip_get_threadpool_options(&options);
+	options.thread_start = sip_thread_start;
+	sip_threadpool = ast_threadpool_create("SIP", NULL, &options);
+	if (!sip_threadpool) {
+		goto error;
+	}
+
+	if (serializer_pool_setup()) {
+		ast_log(LOG_ERROR, "Failed to create SIP serializer pool. Aborting load\n");
+		goto error;
+	}
+
+	if (ast_sip_initialize_scheduler()) {
+		ast_log(LOG_ERROR, "Failed to start scheduler. Aborting load\n");
+		goto error;
+	}
+
+	/* Now load all the pjproject infrastructure. */
+	if (load_pjsip()) {
+		goto error;
+	}
+
+	ast_sip_initialize_dns();
 
 	ast_sip_initialize_global_headers();
 
 	if (ast_res_pjsip_initialize_configuration(ast_module_info)) {
 		ast_log(LOG_ERROR, "Failed to initialize SIP configuration. Aborting load\n");
-		ast_sip_destroy_global_headers();
-		stop_monitor_thread();
-		ast_sip_destroy_system();
-		pj_pool_release(memory_pool);
-		memory_pool = NULL;
-		pjsip_endpt_destroy(ast_pjsip_endpoint);
-		ast_pjsip_endpoint = NULL;
-		pj_caching_pool_destroy(&caching_pool);
-		return AST_MODULE_LOAD_DECLINE;
+		goto error;
 	}
 
 	if (ast_sip_initialize_distributor()) {
 		ast_log(LOG_ERROR, "Failed to register distributor module. Aborting load\n");
-		ast_res_pjsip_destroy_configuration();
-		ast_sip_destroy_global_headers();
-		stop_monitor_thread();
-		ast_sip_destroy_system();
-		pj_pool_release(memory_pool);
-		memory_pool = NULL;
-		pjsip_endpt_destroy(ast_pjsip_endpoint);
-		ast_pjsip_endpoint = NULL;
-		pj_caching_pool_destroy(&caching_pool);
-		return AST_MODULE_LOAD_DECLINE;
+		goto error;
 	}
 
 	if (internal_sip_register_service(&supplement_module)) {
 		ast_log(LOG_ERROR, "Failed to initialize supplement hooks. Aborting load\n");
-		ast_sip_destroy_distributor();
-		ast_res_pjsip_destroy_configuration();
-		ast_sip_destroy_global_headers();
-		stop_monitor_thread();
-		ast_sip_destroy_system();
-		pj_pool_release(memory_pool);
-		memory_pool = NULL;
-		pjsip_endpt_destroy(ast_pjsip_endpoint);
-		ast_pjsip_endpoint = NULL;
-		pj_caching_pool_destroy(&caching_pool);
-		return AST_MODULE_LOAD_DECLINE;
+		goto error;
 	}
 
 	if (internal_sip_initialize_outbound_authentication()) {
 		ast_log(LOG_ERROR, "Failed to initialize outbound authentication. Aborting load\n");
-		internal_sip_unregister_service(&supplement_module);
-		ast_sip_destroy_distributor();
-		ast_res_pjsip_destroy_configuration();
-		ast_sip_destroy_global_headers();
-		stop_monitor_thread();
-		ast_sip_destroy_system();
-		pj_pool_release(memory_pool);
-		memory_pool = NULL;
-		pjsip_endpt_destroy(ast_pjsip_endpoint);
-		ast_pjsip_endpoint = NULL;
-		pj_caching_pool_destroy(&caching_pool);
-		return AST_MODULE_LOAD_DECLINE;
+		goto error;
 	}
 
 	ast_res_pjsip_init_options_handling(0);
@@ -3932,7 +4315,19 @@ static int load_module(void)
 	AST_TEST_REGISTER(xml_sanitization_end_null);
 	AST_TEST_REGISTER(xml_sanitization_exceeds_buffer);
 
+	ast_pjproject_ref();
+
 	return AST_MODULE_LOAD_SUCCESS;
+
+error:
+	unload_pjsip(NULL);
+
+	/* These functions all check for NULLs and are safe to call at any time */
+	ast_sip_destroy_scheduler();
+	serializer_pool_shutdown();
+	ast_threadpool_shutdown(sip_threadpool);
+
+	return AST_MODULE_LOAD_DECLINE;
 }
 
 static int reload_module(void)
@@ -3949,43 +4344,22 @@ static int reload_module(void)
 	return 0;
 }
 
-static int unload_pjsip(void *data)
-{
-	ast_cli_unregister_multiple(cli_commands, ARRAY_LEN(cli_commands));
-	ast_res_pjsip_cleanup_options_handling();
-	internal_sip_destroy_outbound_authentication();
-	ast_sip_destroy_distributor();
-	ast_res_pjsip_destroy_configuration();
-	ast_sip_destroy_system();
-	ast_sip_destroy_global_headers();
-	internal_sip_unregister_service(&supplement_module);
-	if (monitor_thread) {
-		stop_monitor_thread();
-	}
-	if (memory_pool) {
-		pj_pool_release(memory_pool);
-		memory_pool = NULL;
-	}
-	ast_pjsip_endpoint = NULL;
-	pj_caching_pool_destroy(&caching_pool);
-	pj_shutdown();
-	return 0;
-}
-
 static int unload_module(void)
 {
 	AST_TEST_UNREGISTER(xml_sanitization_end_null);
 	AST_TEST_UNREGISTER(xml_sanitization_exceeds_buffer);
+	ast_cli_unregister_multiple(cli_commands, ARRAY_LEN(cli_commands));
 
 	/* The thread this is called from cannot call PJSIP/PJLIB functions,
 	 * so we have to push the work to the threadpool to handle
 	 */
 	ast_sip_push_task_synchronous(NULL, unload_pjsip, NULL);
-
+	ast_sip_destroy_scheduler();
 	serializer_pool_shutdown();
 	ast_threadpool_shutdown(sip_threadpool);
 
-	ast_sip_destroy_cli();
+	ast_pjproject_unref();
+
 	return 0;
 }
 

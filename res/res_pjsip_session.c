@@ -30,6 +30,7 @@
 
 #include "asterisk/res_pjsip.h"
 #include "asterisk/res_pjsip_session.h"
+#include "asterisk/callerid.h"
 #include "asterisk/datastore.h"
 #include "asterisk/module.h"
 #include "asterisk/logger.h"
@@ -362,6 +363,13 @@ static int handle_negotiated_sdp_session_media(void *obj, void *arg, int flags)
 			}
 		}
 	}
+
+	if (session_media->handler && session_media->handler->stream_stop) {
+		ast_debug(1, "Stopping SDP media stream '%s' as it is not currently negotiated\n",
+			session_media->stream_type);
+		session_media->handler->stream_stop(session_media);
+	}
+
 	return CMP_MATCH;
 }
 
@@ -793,6 +801,75 @@ static pjmedia_sdp_session *generate_session_refresh_sdp(struct ast_sip_session 
 	return create_local_sdp(inv_session, session, previous_sdp);
 }
 
+static void set_from_header(struct ast_sip_session *session)
+{
+	struct ast_party_id effective_id;
+	struct ast_party_id connected_id;
+	pj_pool_t *dlg_pool;
+	pjsip_fromto_hdr *dlg_info;
+	pjsip_name_addr *dlg_info_name_addr;
+	pjsip_sip_uri *dlg_info_uri;
+	int restricted;
+
+	if (!session->channel || session->saved_from_hdr) {
+		return;
+	}
+
+	/* We need to save off connected_id for RPID/PAI generation */
+	ast_party_id_init(&connected_id);
+	ast_channel_lock(session->channel);
+	effective_id = ast_channel_connected_effective_id(session->channel);
+	ast_party_id_copy(&connected_id, &effective_id);
+	ast_channel_unlock(session->channel);
+
+	restricted =
+		((ast_party_id_presentation(&connected_id) & AST_PRES_RESTRICTION) != AST_PRES_ALLOWED);
+
+	/* Now set up dlg->local.info so pjsip can correctly generate From */
+
+	dlg_pool = session->inv_session->dlg->pool;
+	dlg_info = session->inv_session->dlg->local.info;
+	dlg_info_name_addr = (pjsip_name_addr *) dlg_info->uri;
+	dlg_info_uri = pjsip_uri_get_uri(dlg_info_name_addr);
+
+	if (session->endpoint->id.trust_outbound || !restricted) {
+		ast_sip_modify_id_header(dlg_pool, dlg_info, &connected_id);
+	}
+
+	ast_party_id_free(&connected_id);
+
+	if (!ast_strlen_zero(session->endpoint->fromuser)) {
+		dlg_info_name_addr->display.ptr = NULL;
+		dlg_info_name_addr->display.slen = 0;
+		pj_strdup2(dlg_pool, &dlg_info_uri->user, session->endpoint->fromuser);
+	}
+
+	if (!ast_strlen_zero(session->endpoint->fromdomain)) {
+		pj_strdup2(dlg_pool, &dlg_info_uri->host, session->endpoint->fromdomain);
+	}
+
+	ast_sip_add_usereqphone(session->endpoint, dlg_pool, dlg_info->uri);
+
+	/* We need to save off the non-anonymized From for RPID/PAI generation (for domain) */
+	session->saved_from_hdr = pjsip_hdr_clone(dlg_pool, dlg_info);
+
+	/* In chan_sip, fromuser and fromdomain trump restricted so we only
+	 * anonymize if they're not set.
+	 */
+	if (restricted) {
+		/* fromuser doesn't provide a display name so we always set it */
+		pj_strdup2(dlg_pool, &dlg_info_name_addr->display, "Anonymous");
+
+		if (ast_strlen_zero(session->endpoint->fromuser)) {
+			pj_strdup2(dlg_pool, &dlg_info_uri->user, "anonymous");
+		}
+
+		if (ast_strlen_zero(session->endpoint->fromdomain)) {
+			pj_strdup2(dlg_pool, &dlg_info_uri->host, "anonymous.invalid");
+		}
+	}
+}
+
 int ast_sip_session_refresh(struct ast_sip_session *session,
 		ast_sip_session_request_creation_cb on_request_creation,
 		ast_sip_session_sdp_creation_cb on_sdp_creation,
@@ -860,6 +937,12 @@ int ast_sip_session_refresh(struct ast_sip_session *session,
 		}
 	}
 
+	/*
+	 * We MUST call set_from_header() before pjsip_inv_(reinvite|update).  If we don't, the
+	 * From in the reINVITE/UPDATE will be wrong but the rest of the messages will be OK.
+	 */
+	set_from_header(session);
+
 	if (method == AST_SIP_SESSION_REFRESH_METHOD_INVITE) {
 		if (pjsip_inv_reinvite(inv_session, NULL, new_sdp, &tdata)) {
 			ast_log(LOG_WARNING, "Failed to create reinvite properly.\n");
@@ -881,10 +964,32 @@ int ast_sip_session_refresh(struct ast_sip_session *session,
 	return 0;
 }
 
+/*!
+ * \internal
+ * \brief Wrapper for pjsip_inv_send_msg
+ *
+ * This function (re)sets the transport before sending to catch cases
+ * where the transport might have changed.
+ *
+ * If pjproject gives us the ability to resend, we'll only reset the transport
+ * if PJSIP_ETPNOTAVAIL is returned from send.
+ *
+ * \returns pj_status_t
+ */
+static pj_status_t internal_pjsip_inv_send_msg(pjsip_inv_session *inv, const char *transport_name, pjsip_tx_data *tdata)
+{
+	pjsip_tpselector selector = { .type = PJSIP_TPSELECTOR_NONE, };
+
+	ast_sip_set_tpselector_from_transport_name(transport_name, &selector);
+	pjsip_dlg_set_transport(inv->dlg, &selector);
+
+	return pjsip_inv_send_msg(inv, tdata);
+}
+
 void ast_sip_session_send_response(struct ast_sip_session *session, pjsip_tx_data *tdata)
 {
 	handle_outgoing_response(session, tdata);
-	pjsip_inv_send_msg(session->inv_session, tdata);
+	internal_pjsip_inv_send_msg(session->inv_session, session->endpoint->transport, tdata);
 	return;
 }
 
@@ -1020,7 +1125,54 @@ static pj_bool_t session_reinvite_on_rx_request(pjsip_rx_data *rdata)
 	}
 
 	if (!sdp_info->sdp) {
+		const pjmedia_sdp_session *local;
+		int i;
+
 		ast_queue_unhold(session->channel);
+
+		pjmedia_sdp_neg_get_active_local(session->inv_session->neg, &local);
+		if (!local) {
+			return PJ_FALSE;
+		}
+
+		/*
+		 * Some devices indicate hold with deferred SDP reinvites (i.e. no SDP in the reinvite).
+		 * When hold is initially indicated, we
+		 * - Receive an INVITE with no SDP
+		 * - Send a 200 OK with SDP, indicating sendrecv in the media streams
+		 * - Receive an ACK with SDP, indicating sendonly in the media streams
+		 *
+		 * At this point, the pjmedia negotiator saves the state of the media direction so that
+		 * if we are to send any offers, we'll offer recvonly in the media streams. This is
+		 * problematic if the device is attempting to unhold, though. If the device unholds
+		 * by sending a reinvite with no SDP, then we will respond with a 200 OK with recvonly.
+		 * According to RFC 3264, if an offerer offers recvonly, then the answerer MUST respond
+		 * with sendonly or inactive. The result of this is that the stream is not off hold.
+		 *
+		 * Therefore, in this case, when we receive a reinvite while the stream is on hold, we
+		 * need to be sure to offer sendrecv. This way, the answerer can respond with sendrecv
+		 * in order to get the stream off hold. If this is actually a different purpose reinvite
+		 * (like a session timer refresh), then the answerer can respond to our sendrecv with
+		 * sendonly, keeping the stream on hold.
+		 */
+		for (i = 0; i < local->media_count; ++i) {
+			pjmedia_sdp_media *m = local->media[i];
+			pjmedia_sdp_attr *recvonly;
+			pjmedia_sdp_attr *inactive;
+
+			recvonly = pjmedia_sdp_attr_find2(m->attr_count, m->attr, "recvonly", NULL);
+			inactive = pjmedia_sdp_attr_find2(m->attr_count, m->attr, "inactive", NULL);
+			if (recvonly || inactive) {
+				pjmedia_sdp_attr *to_remove = recvonly ?: inactive;
+				pjmedia_sdp_attr *sendrecv;
+
+				pjmedia_sdp_attr_remove(&m->attr_count, m->attr, to_remove);
+
+				sendrecv = pjmedia_sdp_attr_create(session->inv_session->pool, "sendrecv", NULL);
+				pjmedia_sdp_media_add_attr(m, sendrecv);
+			}
+		}
+
 		return PJ_FALSE;
 	}
 
@@ -1053,6 +1205,7 @@ static pjsip_module session_reinvite_module = {
 	.on_rx_request = session_reinvite_on_rx_request,
 };
 
+
 void ast_sip_session_send_request_with_cb(struct ast_sip_session *session, pjsip_tx_data *tdata,
 		ast_sip_session_response_cb on_response)
 {
@@ -1066,21 +1219,9 @@ void ast_sip_session_send_request_with_cb(struct ast_sip_session *session, pjsip
 	ast_sip_mod_data_set(tdata->pool, tdata->mod_data, session_module.id,
 			     MOD_DATA_ON_RESPONSE, on_response);
 
-	if (!ast_strlen_zero(session->endpoint->fromuser) ||
-		!ast_strlen_zero(session->endpoint->fromdomain)) {
-		pjsip_fromto_hdr *from = pjsip_msg_find_hdr(tdata->msg, PJSIP_H_FROM, tdata->msg->hdr.next);
-		pjsip_sip_uri *uri = pjsip_uri_get_uri(from->uri);
-
-		if (!ast_strlen_zero(session->endpoint->fromuser)) {
-			pj_strdup2(tdata->pool, &uri->user, session->endpoint->fromuser);
-		}
-		if (!ast_strlen_zero(session->endpoint->fromdomain)) {
-			pj_strdup2(tdata->pool, &uri->host, session->endpoint->fromdomain);
-		}
-	}
-
 	handle_outgoing_request(session, tdata);
-	pjsip_inv_send_msg(session->inv_session, tdata);
+	internal_pjsip_inv_send_msg(session->inv_session, session->endpoint->transport, tdata);
+
 	return;
 }
 
@@ -1103,9 +1244,17 @@ int ast_sip_session_create_invite(struct ast_sip_session *session, pjsip_tx_data
 #ifdef PJMEDIA_SDP_NEG_ANSWER_MULTIPLE_CODECS
 	pjmedia_sdp_neg_set_answer_multiple_codecs(session->inv_session->neg, PJ_TRUE);
 #endif
+
+	/*
+	 * We MUST call set_from_header() before pjsip_inv_invite.  If we don't, the
+	 * From in the initial INVITE will be wrong but the rest of the messages will be OK.
+	 */
+	set_from_header(session);
+
 	if (pjsip_inv_invite(session->inv_session, tdata) != PJ_SUCCESS) {
 		return -1;
 	}
+
 	return 0;
 }
 
@@ -1254,7 +1403,7 @@ struct ast_sip_channel_pvt *ast_sip_channel_pvt_alloc(void *pvt, struct ast_sip_
 }
 
 struct ast_sip_session *ast_sip_session_alloc(struct ast_sip_endpoint *endpoint,
-	struct ast_sip_contact *contact, pjsip_inv_session *inv_session)
+	struct ast_sip_contact *contact, pjsip_inv_session *inv_session, pjsip_rx_data *rdata)
 {
 	RAII_VAR(struct ast_sip_session *, session, NULL, ao2_cleanup);
 	struct ast_sip_session_supplement *iter;
@@ -1279,7 +1428,24 @@ struct ast_sip_session *ast_sip_session_alloc(struct ast_sip_endpoint *endpoint,
 	/* fill session->media with available types */
 	ao2_callback(sdp_handlers, OBJ_NODATA, add_session_media, session);
 
-	session->serializer = ast_sip_create_serializer();
+	if (rdata) {
+		/*
+		 * We must continue using the serializer that the original
+		 * INVITE came in on for the dialog.  There may be
+		 * retransmissions already enqueued in the original
+		 * serializer that can result in reentrancy and message
+		 * sequencing problems.
+		 */
+		session->serializer = ast_sip_get_distributor_serializer(rdata);
+	} else {
+		char tps_name[AST_TASKPROCESSOR_MAX_NAME + 1];
+
+		/* Create name with seq number appended. */
+		ast_taskprocessor_build_name(tps_name, sizeof(tps_name), "pjsip/outsess/%s",
+			ast_sorcery_object_get_id(endpoint));
+
+		session->serializer = ast_sip_create_serializer_named(tps_name);
+	}
 	if (!session->serializer) {
 		return NULL;
 	}
@@ -1290,6 +1456,11 @@ struct ast_sip_session *ast_sip_session_alloc(struct ast_sip_endpoint *endpoint,
 	session->contact = ao2_bump(contact);
 	session->inv_session = inv_session;
 	session->req_caps = ast_format_cap_alloc(AST_FORMAT_CAP_FLAG_DEFAULT);
+	if (!session->req_caps) {
+		/* Release the ref held by session->inv_session */
+		ao2_ref(session, -1);
+		return NULL;
+	}
 
 	if ((endpoint->dtmf == AST_SIP_DTMF_INBAND) || (endpoint->dtmf == AST_SIP_DTMF_AUTO)) {
 		dsp_features |= DSP_FEATURE_DIGIT_DETECT;
@@ -1572,7 +1743,9 @@ struct ast_sip_session *ast_sip_session_create_outgoing(struct ast_sip_endpoint 
 	timer.sess_expires = endpoint->extensions.timer.sess_expires;
 	pjsip_timer_init_session(inv_session, &timer);
 
-	if (!(session = ast_sip_session_alloc(endpoint, found_contact ? found_contact : contact, inv_session))) {
+	session = ast_sip_session_alloc(endpoint, found_contact ? found_contact : contact,
+		inv_session, NULL);
+	if (!session) {
 		pjsip_inv_terminate(inv_session, 500, PJ_FALSE);
 		return NULL;
 	}
@@ -1835,7 +2008,7 @@ static pjsip_inv_session *pre_session_setup(pjsip_rx_data *rdata, const struct a
 		if (pjsip_inv_initial_answer(inv_session, rdata, 500, NULL, NULL, &tdata) != PJ_SUCCESS) {
 			pjsip_inv_terminate(inv_session, 500, PJ_FALSE);
 		}
-		pjsip_inv_send_msg(inv_session, tdata);
+		internal_pjsip_inv_send_msg(inv_session, endpoint->transport, tdata);
 		return NULL;
 	}
 	return inv_session;
@@ -1983,12 +2156,12 @@ static void handle_new_invite_request(pjsip_rx_data *rdata)
 		return;
 	}
 
-	session = ast_sip_session_alloc(endpoint, NULL, inv_session);
+	session = ast_sip_session_alloc(endpoint, NULL, inv_session, rdata);
 	if (!session) {
 		if (pjsip_inv_initial_answer(inv_session, rdata, 500, NULL, NULL, &tdata) == PJ_SUCCESS) {
 			pjsip_inv_terminate(inv_session, 500, PJ_FALSE);
 		} else {
-			pjsip_inv_send_msg(inv_session, tdata);
+			internal_pjsip_inv_send_msg(inv_session, endpoint->transport, tdata);
 		}
 		return;
 	}
@@ -1998,7 +2171,7 @@ static void handle_new_invite_request(pjsip_rx_data *rdata)
 		if (pjsip_inv_initial_answer(inv_session, rdata, 500, NULL, NULL, &tdata) == PJ_SUCCESS) {
 			pjsip_inv_terminate(inv_session, 500, PJ_FALSE);
 		} else {
-			pjsip_inv_send_msg(inv_session, tdata);
+			internal_pjsip_inv_send_msg(inv_session, endpoint->transport, tdata);
 		}
 		ao2_cleanup(invite);
 	}
@@ -2390,8 +2563,16 @@ static void session_inv_on_tsx_state_changed(pjsip_inv_session *inv, pjsip_trans
 		break;
 	case PJSIP_EVENT_RX_MSG:
 		cb = ast_sip_mod_data_get(tsx->mod_data, session_module.id, MOD_DATA_ON_RESPONSE);
-		handle_incoming(session, e->body.tsx_state.src.rdata, e->type,
-				AST_SIP_SESSION_AFTER_MEDIA);
+		/* As the PJSIP invite session implementation responds with a 200 OK before we have a
+		 * chance to be invoked session supplements for BYE requests actually end up executing
+		 * in the invite session state callback as well. To prevent session supplements from
+		 * running on the BYE request again we explicitly squash invocation of them here.
+		 */
+		if ((e->body.tsx_state.src.rdata->msg_info.msg->type != PJSIP_REQUEST_MSG) ||
+			(tsx->method.id != PJSIP_BYE_METHOD)) {
+			handle_incoming(session, e->body.tsx_state.src.rdata, e->type,
+							AST_SIP_SESSION_AFTER_MEDIA);
+		}
 		if (tsx->method.id == PJSIP_INVITE_METHOD) {
 			if (tsx->role == PJSIP_ROLE_UAC) {
 				if (tsx->state == PJSIP_TSX_STATE_COMPLETED) {
@@ -2643,12 +2824,7 @@ static struct pjmedia_sdp_session *create_local_sdp(pjsip_inv_session *inv, stru
 		if (!ast_strlen_zero(session->endpoint->media.address)) {
 			pj_strdup2(inv->pool_prov, &local->origin.addr, session->endpoint->media.address);
 		} else {
-			pj_sockaddr localaddr;
-			char our_ip[PJ_INET6_ADDRSTRLEN];
-
-			pj_gethostip(session->endpoint->media.rtp.ipv6 ? pj_AF_INET6() : pj_AF_INET(), &localaddr);
-			pj_sockaddr_print(&localaddr, our_ip, sizeof(our_ip), 0);
-			pj_strdup2(inv->pool_prov, &local->origin.addr, our_ip);
+			pj_strdup2(inv->pool_prov, &local->origin.addr, ast_sip_get_host_ip_string(session->endpoint->media.rtp.ipv6 ? pj_AF_INET6() : pj_AF_INET()));
 		}
 	}
 
@@ -2753,13 +2929,14 @@ static pjsip_inv_callback inv_callback = {
 /*! \brief Hook for modifying outgoing messages with SDP to contain the proper address information */
 static void session_outgoing_nat_hook(pjsip_tx_data *tdata, struct ast_sip_transport *transport)
 {
+	RAII_VAR(struct ast_sip_transport_state *, transport_state, ast_sip_get_transport_state(ast_sorcery_object_get_id(transport)), ao2_cleanup);
 	struct ast_sip_nat_hook *hook = ast_sip_mod_data_get(
 		tdata->mod_data, session_module.id, MOD_DATA_NAT_HOOK);
 	struct pjmedia_sdp_session *sdp;
 	int stream;
 
 	/* SDP produced by us directly will never be multipart */
-	if (hook || !tdata->msg->body || pj_stricmp2(&tdata->msg->body->content_type.type, "application") ||
+	if (!transport_state || hook || !tdata->msg->body || pj_stricmp2(&tdata->msg->body->content_type.type, "application") ||
 		pj_stricmp2(&tdata->msg->body->content_type.subtype, "sdp") || ast_strlen_zero(transport->external_media_address)) {
 		return;
 	}
@@ -2773,7 +2950,7 @@ static void session_outgoing_nat_hook(pjsip_tx_data *tdata, struct ast_sip_trans
 		ast_copy_pj_str(host, &sdp->conn->addr, sizeof(host));
 		ast_sockaddr_parse(&addr, host, PARSE_PORT_FORBID);
 
-		if (ast_apply_ha(transport->localnet, &addr) != AST_SENSE_ALLOW) {
+		if (ast_apply_ha(transport_state->localnet, &addr) != AST_SENSE_ALLOW) {
 			pj_strdup2(tdata->pool, &sdp->conn->addr, transport->external_media_address);
 		}
 	}
