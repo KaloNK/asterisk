@@ -4868,11 +4868,7 @@ static struct callattempt *wait_for_answer(struct queue_ent *qe, struct callatte
 						const char *forward_context;
 						ast_channel_lock(o->chan);
 						forward_context = pbx_builtin_getvar_helper(o->chan, "FORWARD_CONTEXT");
-<<<<<<< HEAD
 						snprintf(tmpchan, sizeof(tmpchan), "%s@%s/n", ast_channel_call_forward(o->chan), forward_context ? forward_context : ast_channel_context(o->chan));
-=======
-						snprintf(tmpchan, sizeof(tmpchan), "%s@%s", ast_channel_call_forward(o->chan), forward_context ? forward_context : ast_channel_context(o->chan));
->>>>>>> upstream/master
 						ast_channel_unlock(o->chan);
 						stuff = tmpchan;
 						tech = "Local";
