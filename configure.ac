@@ -965,6 +965,70 @@ case "${OSARCH}" in
 	;;
 esac
 
+AC_MSG_CHECKING(for -fsanitize=address support)
+saved_sanitize_CFLAGS="${CFLAGS}"
+saved_sanitize_LDFLAGS="${LDFLAGS}"
+CFLAGS="-fsanitize=address -fno-omit-frame-pointer"
+LDFLAGS="-fsanitize=address"
+AC_COMPILE_IFELSE(
+	[AC_LANG_PROGRAM([], [int x = 1;])],
+	AC_MSG_RESULT(yes)
+	[AST_ADDRESS_SANITIZER=1],
+	[AST_ADDRESS_SANITIZER=]
+	AC_MSG_RESULT(no)
+)
+CFLAGS="${saved_sanitize_CFLAGS}"
+LDFLAGS="${saved_sanitize_LDFLAGS}"
+AC_SUBST(AST_ADDRESS_SANITIZER)
+
+AC_MSG_CHECKING(for -fsanitize=thread support)
+saved_sanitize_CFLAGS="${CFLAGS}"
+saved_sanitize_LDFLAGS="${LDFLAGS}"
+CFLAGS="-fno-omit-frame-pointer -pie -fPIE -fsanitize=thread"
+LDFLAGS="-fsanitize=thread -pie -fPIE"
+AC_COMPILE_IFELSE(
+	[AC_LANG_PROGRAM([], [int x = 1;])],
+	AC_MSG_RESULT(yes)
+	[AST_THREAD_SANITIZER=1],
+	[AST_THREAD_SANITIZER=]
+	AC_MSG_RESULT(no)
+)
+CFLAGS="${saved_sanitize_CFLAGS}"
+LDFLAGS="${saved_sanitize_LDFLAGS}"
+AC_SUBST(AST_THREAD_SANITIZER)
+
+AC_MSG_CHECKING(for -fsanitize=leak support)
+saved_sanitize_CFLAGS="${CFLAGS}"
+saved_sanitize_LDFLAGS="${LDFLAGS}"
+CFLAGS="-fno-omit-frame-pointer -fsanitize=leak"
+LDFLAGS="-fsanitize=leak"
+AC_COMPILE_IFELSE(
+	[AC_LANG_PROGRAM([], [int x = 1;])],
+	AC_MSG_RESULT(yes)
+	[AST_LEAK_SANITIZER=1],
+	[AST_LEAK_SANITIZER=]
+	AC_MSG_RESULT(no)
+)
+CFLAGS="${saved_sanitize_CFLAGS}"
+LDFLAGS="${saved_sanitize_LDFLAGS}"
+AC_SUBST(AST_LEAK_SANITIZER)
+
+AC_MSG_CHECKING(for -fsanitize=undefined support)
+saved_sanitize_CFLAGS="${CFLAGS}"
+saved_sanitize_LDFLAGS="${LDFLAGS}"
+CFLAGS="-fno-omit-frame-pointer -fsanitize=undefined"
+LDFLAGS="-fsanitize=undefined"
+AC_COMPILE_IFELSE(
+	[AC_LANG_PROGRAM([], [int x = 1;])],
+	AC_MSG_RESULT(yes)
+	[AST_UNDEFINED_SANITIZER=1],
+	[AST_UNDEFINED_SANITIZER=]
+	AC_MSG_RESULT(no)
+)
+CFLAGS="${saved_sanitize_CFLAGS}"
+LDFLAGS="${saved_sanitize_LDFLAGS}"
+AC_SUBST(AST_UNDEFINED_SANITIZER)
+
 AC_MSG_CHECKING(for -ffunction-sections support)
 saved_CFLAGS="${CFLAGS}"
 CFLAGS="${CFLAGS} -ffunction-sections"
@@ -2168,6 +2232,12 @@ fi
 if test "$PBX_OPENSSL" = "1";
 then
         AST_C_DECLARE_CHECK([OPENSSL_ECDH_AUTO], [SSL_CTX_set_ecdh_auto], [openssl/ssl.h])
+fi
+
+if test "$PBX_OPENSSL" = "1";
+then
+        AST_C_DEFINE_CHECK([SSL_OP_NO_TLSV1_1], [SSL_OP_NO_TLSv1_1], [openssl/ssl.h])
+        AST_C_DEFINE_CHECK([SSL_OP_NO_TLSV1_2], [SSL_OP_NO_TLSv1_2], [openssl/ssl.h])
 fi
 
 AST_EXT_LIB_CHECK([SRTP], [srtp], [srtp_init], [srtp/srtp.h])

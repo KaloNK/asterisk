@@ -1208,10 +1208,10 @@ struct member {
 	int paused;                          /*!< Are we paused (not accepting calls)? */
 	int queuepos;                        /*!< In what order (pertains to certain strategies) should this member be called? */
 	time_t lastcall;                     /*!< When last successful call was hungup */
+	unsigned int in_call:1;              /*!< True if member is still in call. (so lastcall is not actual) */
 	struct call_queue *lastqueue;	     /*!< Last queue we received a call */
 	unsigned int dead:1;                 /*!< Used to detect members deleted in realtime */
 	unsigned int delme:1;                /*!< Flag to delete entry on reload */
-	unsigned int call_pending:1;         /*!< TRUE if the Q is attempting to place a call to the member. */
 	char rt_uniqueid[80];                /*!< Unique id of realtime member entry */
 	unsigned int ringinuse:1;            /*!< Flag to ring queue members even if their status is 'inuse' */
 };
@@ -1647,6 +1647,10 @@ static int get_member_status(struct call_queue *q, int max_penalty, int min_pena
 			if (member->paused && (conditions & QUEUE_EMPTY_PAUSED)) {
 				ast_debug(4, "%s is unavailable because he is paused'\n", member->membername);
 				break;
+			} else if ((conditions & QUEUE_EMPTY_WRAPUP) && member->in_call && q->wrapuptime) {
+				ast_debug(4, "%s is unavailable because still in call, so we can`t check "
+					"wrapuptime (%d)\n", member->membername, q->wrapuptime);
+				break;
 			} else if ((conditions & QUEUE_EMPTY_WRAPUP) && member->lastcall && q->wrapuptime && (time(NULL) - q->wrapuptime < member->lastcall)) {
 				ast_debug(4, "%s is unavailable because it has only been %d seconds since his last call (wrapup time is %d)\n", member->membername, (int) (time(NULL) - member->lastcall), q->wrapuptime);
 				break;
@@ -1670,6 +1674,38 @@ static int get_member_status(struct call_queue *q, int max_penalty, int min_pena
 	return -1;
 }
 
+/*
+ * A "pool" of member objects that calls are currently pending on. If an
+ * agent is a member of multiple queues it's possible for that agent to be
+ * called by each of the queues at the same time. This happens because device
+ * state is slow to notify the queue app of one of it's member's being rung.
+ * This "pool" allows us to track which members are currently being rung while
+ * we wait on the device state change.
+ */
+static struct ao2_container *pending_members;
+#define MAX_CALL_ATTEMPT_BUCKETS 353
+
+static int pending_members_hash(const void *obj, const int flags)
+{
+	const struct member *object = obj;
+	const char *key = (flags & OBJ_KEY) ? obj : object->interface;
+	return ast_str_case_hash(key);
+}
+
+static int pending_members_cmp(void *obj, void *arg, int flags)
+{
+	const struct member *object_left = obj;
+	const struct member *object_right = arg;
+	const char *right_key = (flags & OBJ_KEY) ? arg : object_right->interface;
+
+	return strcasecmp(object_left->interface, right_key) ? 0 : CMP_MATCH;
+}
+
+static void pending_members_remove(struct member *mem)
+{
+	ao2_find(pending_members, mem, OBJ_POINTER | OBJ_NODATA | OBJ_UNLINK);
+}
+
 struct statechange {
 	AST_LIST_ENTRY(statechange) entry;
 	int state;
@@ -1684,6 +1720,9 @@ struct statechange {
 static int update_status(struct call_queue *q, struct member *m, const int status)
 {
 	m->status = status;
+
+	/* Whatever the status is clear the member from the pending members pool */
+	pending_members_remove(m);
 
 	if (q->maskmemberstatus) {
 		return 0;
@@ -1721,6 +1760,13 @@ static int update_status(struct call_queue *q, struct member *m, const int statu
 			<parameter name="LastCall">
 				<para>The time this member last took call, expressed in seconds since 00:00, Jan 1, 1970 UTC.</para>
 			</parameter>
+			<parameter name="InCall">
+				<para>Set to 1 if member is in call. Set to 0 after LastCall time is updated.</para>
+				<enumlist>
+					<enum name="0"/>
+					<enum name="1"/>
+				</enumlist>
+			</parameter>
 			<parameter name="Status">
 				<para>The numeric device state status of the queue member.</para>
 				<enumlist>
@@ -1753,10 +1799,11 @@ static int update_status(struct call_queue *q, struct member *m, const int statu
 		"Penalty: %d\r\n"
 		"CallsTaken: %d\r\n"
 		"LastCall: %d\r\n"
+		"InCall: %d\r\n"
 		"Status: %d\r\n"
 		"Paused: %d\r\n",
 		q->name, m->interface, m->membername, m->state_interface, m->dynamic ? "dynamic" : m->realtime ? "realtime" : "static",
-		m->penalty, m->calls, (int)m->lastcall, m->status, m->paused
+		m->penalty, m->calls, (int)m->lastcall, m->in_call, m->status, m->paused
 	);
 
 	return 0;
@@ -1793,6 +1840,9 @@ static int is_member_available(struct call_queue *q, struct member *mem)
 	}
 
 	/* Let wrapuptimes override device state availability */
+	if (q->wrapuptime && mem->in_call) {
+		available = 0; /* member is still in call, cant check wrapuptime to lastcall time */
+	}
 	if (mem->lastcall && q->wrapuptime && (time(NULL) - q->wrapuptime < mem->lastcall)) {
 		available = 0;
 	}
@@ -2158,6 +2208,7 @@ static void clear_queue(struct call_queue *q)
 		while ((mem = ao2_iterator_next(&mem_iter))) {
 			mem->calls = 0;
 			mem->lastcall = 0;
+			mem->in_call = 0;
 			ao2_ref(mem, -1);
 		}
 		ao2_iterator_destroy(&mem_iter);
@@ -2531,6 +2582,7 @@ static void member_add_to_queue(struct call_queue *queue, struct member *mem)
  */
 static void member_remove_from_queue(struct call_queue *queue, struct member *mem)
 {
+	pending_members_remove(mem);
 	ao2_lock(queue->members);
 	queue_member_follower_removal(queue, mem);
 	ao2_unlink(queue->members, mem);
@@ -3570,41 +3622,6 @@ static int member_status_available(int status)
 
 /*!
  * \internal
- * \brief Clear the member call pending flag.
- *
- * \param mem Queue member.
- *
- * \return Nothing
- */
-static void member_call_pending_clear(struct member *mem)
-{
-	ao2_lock(mem);
-	mem->call_pending = 0;
-	ao2_unlock(mem);
-}
-
-/*!
- * \internal
- * \brief Set the member call pending flag.
- *
- * \param mem Queue member.
- *
- * \retval non-zero if call pending flag was already set.
- */
-static int member_call_pending_set(struct member *mem)
-{
-	int old_pending;
-
-	ao2_lock(mem);
-	old_pending = mem->call_pending;
-	mem->call_pending = 1;
-	ao2_unlock(mem);
-
-	return old_pending;
-}
-
-/*!
- * \internal
  * \brief Determine if can ring a queue entry.
  *
  * \param qe Queue entry to check.
@@ -3624,6 +3641,12 @@ static int can_ring_entry(struct queue_ent *qe, struct callattempt *call)
 		return 0;
 	}
 
+	if (call->member->in_call && call->lastqueue && call->lastqueue->wrapuptime) {
+		ast_debug(1, "%s is in call, so not available (wrapuptime %d)\n",
+			call->interface, call->lastqueue->wrapuptime);
+		return 0;
+	}
+
 	if ((call->lastqueue && call->lastqueue->wrapuptime && (time(NULL) - call->lastcall < call->lastqueue->wrapuptime))
 		|| (!call->lastqueue && qe->parent->wrapuptime && (time(NULL) - call->lastcall < qe->parent->wrapuptime))) {
 		ast_debug(1, "Wrapuptime not yet expired on queue %s for %s\n",
@@ -3639,11 +3662,29 @@ static int can_ring_entry(struct queue_ent *qe, struct callattempt *call)
 	}
 
 	if (!call->member->ringinuse) {
-		if (member_call_pending_set(call->member)) {
-			ast_debug(1, "%s has another call pending, can't receive call\n",
-				call->interface);
+		struct member *mem;
+
+		ao2_lock(pending_members);
+
+		mem = ao2_find(pending_members, call->member, OBJ_POINTER | OBJ_NOLOCK);
+		if (mem) {
+			/*
+			 * If found that means this member is currently being attempted
+			 * from another calling thread, so stop trying from this thread
+			 */
+			ast_debug(1, "%s has another call trying, can't receive call\n",
+				  call->interface);
+			ao2_ref(mem, -1);
+			ao2_unlock(pending_members);
 			return 0;
 		}
+
+		/*
+		 * If not found add it to the container so another queue
+		 * won't attempt to call this member at the same time.
+		 */
+		ao2_link(pending_members, call->member);
+		ao2_unlock(pending_members);
 
 		/*
 		 * The queue member is available.  Get current status to be sure
@@ -3653,7 +3694,7 @@ static int can_ring_entry(struct queue_ent *qe, struct callattempt *call)
 		if (!member_status_available(get_queue_member_status(call->member))) {
 			ast_debug(1, "%s actually not available, can't receive call\n",
 				call->interface);
-			member_call_pending_clear(call->member);
+			pending_members_remove(call->member);
 			return 0;
 		}
 	}
@@ -3692,7 +3733,6 @@ static int ring_entry(struct queue_ent *qe, struct callattempt *tmp, int *busies
 		++*busies;
 		return 0;
 	}
-	ast_assert(tmp->member->ringinuse || tmp->member->call_pending);
 
 	ast_copy_string(tech, tmp->interface, sizeof(tech));
 	if ((location = strchr(tech, '/'))) {
@@ -3709,7 +3749,7 @@ static int ring_entry(struct queue_ent *qe, struct callattempt *tmp, int *busies
 		qe->linpos++;
 		ao2_unlock(qe->parent);
 
-		member_call_pending_clear(tmp->member);
+		pending_members_remove(tmp->member);
 
 		if (ast_channel_cdr(qe->chan)) {
 			ast_cdr_busy(ast_channel_cdr(qe->chan));
@@ -3791,7 +3831,7 @@ static int ring_entry(struct queue_ent *qe, struct callattempt *tmp, int *busies
 		/* Again, keep going even if there's an error */
 		ast_verb(3, "Couldn't call %s\n", tmp->interface);
 		do_hang(tmp);
-		member_call_pending_clear(tmp->member);
+		pending_members_remove(tmp->member);
 		++*busies;
 		return 0;
 	}
@@ -3852,7 +3892,6 @@ static int ring_entry(struct queue_ent *qe, struct callattempt *tmp, int *busies
 		ast_verb(3, "Called %s\n", tmp->interface);
 	}
 
-	member_call_pending_clear(tmp->member);
 	return 1;
 }
 
@@ -4730,6 +4769,11 @@ static int is_our_turn(struct queue_ent *qe)
 		res = 0;
 	}
 
+	/* Update realtime members if this is the first call and number of avalable members is 0 */
+	if (avl == 0 && qe->pos == 1) {
+		update_realtime_members(qe->parent);
+	}
+
 	return res;
 }
 
@@ -4898,6 +4942,9 @@ static int update_queue(struct call_queue *q, struct member *member, int callcom
 				time(&mem->lastcall);
 				mem->calls++;
 				mem->lastqueue = q;
+				mem->in_call = 0;
+				ast_debug(4, "Marked member %s as NOT in_call. Lastcall time: %ld \n",
+					mem->membername, (long)mem->lastcall);
 				ao2_ref(mem, -1);
 			}
 			ao2_unlock(qtmp);
@@ -4909,6 +4956,9 @@ static int update_queue(struct call_queue *q, struct member *member, int callcom
 		time(&member->lastcall);
 		member->calls++;
 		member->lastqueue = q;
+		member->in_call = 0;
+		ast_debug(4, "Marked member %s as NOT in_call. Lastcall time: %ld \n",
+			member->membername, (long)member->lastcall);
 		ao2_unlock(q);
 	}
 	ao2_lock(q);
@@ -4916,9 +4966,13 @@ static int update_queue(struct call_queue *q, struct member *member, int callcom
 	if (callcompletedinsl) {
 		q->callscompletedinsl++;
 	}
-	/* Calculate talktime using the same exponential average as holdtime code*/
-	oldtalktime = q->talktime;
-	q->talktime = (((oldtalktime << 2) - oldtalktime) + newtalktime) >> 2;
+	if (q->callscompletedinsl == 1) {
+		q->talktime = newtalktime;
+	} else {
+		/* Calculate talktime using the same exponential average as holdtime code */
+		oldtalktime = q->talktime;
+		q->talktime = (((oldtalktime << 2) - oldtalktime) + newtalktime) >> 2;
+	}
 	ao2_unlock(q);
 	return 0;
 }
@@ -5268,6 +5322,9 @@ static int try_calling(struct queue_ent *qe, const struct ast_flags opts, char *
 	struct ao2_iterator memi;
 	struct ast_datastore *datastore, *transfer_ds;
 	struct queue_end_bridge *queue_end_bridge = NULL;
+	struct ao2_iterator queue_iter; /* to iterate through all queues (for shared_lastcall)*/
+	struct member *mem;
+	struct call_queue *queuetmp;
 
 	ast_channel_lock(qe->chan);
 	datastore = ast_channel_datastore_find(qe->chan, &dialed_interface_info, NULL);
@@ -5900,6 +5957,28 @@ static int try_calling(struct queue_ent *qe, const struct ast_flags opts, char *
 			}
 		}
 		qe->handled++;
+
+		/** mark member as "in_call" in all queues */
+		if (shared_lastcall) {
+			queue_iter = ao2_iterator_init(queues, 0);
+			while ((queuetmp = ao2_t_iterator_next(&queue_iter, "Iterate through queues"))) {
+				ao2_lock(queuetmp);
+				if ((mem = ao2_find(queuetmp->members, member, OBJ_POINTER))) {
+					mem->in_call = 1;
+					ast_debug(4, "Marked member %s as in_call \n", mem->membername);
+					ao2_ref(mem, -1);
+				}
+				ao2_unlock(queuetmp);
+				queue_t_unref(queuetmp, "Done with iterator");
+			}
+			ao2_iterator_destroy(&queue_iter);
+		} else {
+			ao2_lock(qe->parent);
+			member->in_call = 1;
+			ast_debug(4, "Marked member %s as in_call \n", member->membername);
+			ao2_unlock(qe->parent);
+		}
+
 		ast_queue_log(queuename, ast_channel_uniqueid(qe->chan), member->membername, "CONNECT", "%ld|%s|%ld", (long) (time(NULL) - qe->start), ast_channel_uniqueid(peer),
 													(long)(orig - to > 0 ? (orig - to) / 1000 : 0));
 
@@ -8450,10 +8529,11 @@ static char *__queues_show(struct mansession *s, int fd, int argc, const char * 
 
 				ast_str_append(&out, 0, " (ringinuse %s)", mem->ringinuse ? "enabled" : "disabled");
 
-				ast_str_append(&out, 0, "%s%s%s (%s)",
+				ast_str_append(&out, 0, "%s%s%s%s (%s)",
 					mem->dynamic ? " (dynamic)" : "",
 					mem->realtime ? " (realtime)" : "",
 					mem->paused ? " (paused)" : "",
+					mem->in_call ? " (in call)" : "",
 					ast_devstate2str(mem->status));
 				if (mem->calls) {
 					ast_str_append(&out, 0, " has taken %d calls (last was %ld secs ago)",
@@ -8705,7 +8785,7 @@ static int manager_queues_summary(struct mansession *s, const struct message *m)
 		ao2_lock(q);
 
 		/* List queue properties */
-		if (ast_strlen_zero(queuefilter) || !strcmp(q->name, queuefilter)) {
+		if (ast_strlen_zero(queuefilter) || !strcasecmp(q->name, queuefilter)) {
 			/* Reset the necessary local variables if no queuefilter is set*/
 			qmemcount = 0;
 			qmemavail = 0;
@@ -8781,7 +8861,7 @@ static int manager_queues_status(struct mansession *s, const struct message *m)
 		ao2_lock(q);
 
 		/* List queue properties */
-		if (ast_strlen_zero(queuefilter) || !strcmp(q->name, queuefilter)) {
+		if (ast_strlen_zero(queuefilter) || !strcasecmp(q->name, queuefilter)) {
 			sl = ((q->callscompleted > 0) ? 100 * ((float)q->callscompletedinsl / (float)q->callscompleted) : 0);
 			astman_append(s, "Event: QueueParams\r\n"
 				"Queue: %s\r\n"
@@ -8812,12 +8892,14 @@ static int manager_queues_status(struct mansession *s, const struct message *m)
 						"Penalty: %d\r\n"
 						"CallsTaken: %d\r\n"
 						"LastCall: %d\r\n"
+						"IsInCall: %d\r\n"
 						"Status: %d\r\n"
 						"Paused: %d\r\n"
 						"%s"
 						"\r\n",
 						q->name, mem->membername, mem->interface, mem->state_interface, mem->dynamic ? "dynamic" : "static",
-						mem->penalty, mem->calls, (int)mem->lastcall, mem->status, mem->paused, idText);
+						mem->penalty, mem->calls, (int)mem->lastcall, mem->in_call, mem->status,
+						mem->paused, idText);
 				}
 				ao2_ref(mem, -1);
 			}
@@ -10018,6 +10100,7 @@ static int unload_module(void)
 	}
 	ao2_iterator_destroy(&q_iter);
 	devicestate_tps = ast_taskprocessor_unreference(devicestate_tps);
+	ao2_cleanup(pending_members);
 	ao2_ref(queues, -1);
 	ast_unload_realtime("queue_members");
 	return res;
@@ -10030,6 +10113,16 @@ static int load_module(void)
 	struct ast_config *member_config;
 
 	queues = ao2_container_alloc(MAX_QUEUE_BUCKETS, queue_hash_cb, queue_cmp_cb);
+	if (!queues) {
+		return AST_MODULE_LOAD_DECLINE;
+	}
+
+	pending_members = ao2_container_alloc(
+		MAX_CALL_ATTEMPT_BUCKETS, pending_members_hash, pending_members_cmp);
+	if (!pending_members) {
+		unload_module();
+		return AST_MODULE_LOAD_DECLINE;
+	}
 
 	use_weight = 0;
 

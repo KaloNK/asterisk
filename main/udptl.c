@@ -263,15 +263,14 @@ static int decode_open_type(uint8_t *buf, unsigned int limit, unsigned int *len,
 	if (decode_length(buf, limit, len, &octet_cnt) != 0)
 		return -1;
 
-	if (octet_cnt > 0) {
-		/* Make sure the buffer contains at least the number of bits requested */
-		if ((*len + octet_cnt) > limit)
-			return -1;
-
-		*p_num_octets = octet_cnt;
-		*p_object = &buf[*len];
-		*len += octet_cnt;
+	/* Make sure the buffer contains at least the number of bits requested */
+	if ((*len + octet_cnt) > limit) {
+		return -1;
 	}
+
+	*p_num_octets = octet_cnt;
+	*p_object = &buf[*len];
+	*len += octet_cnt;
 
 	return 0;
 }
@@ -725,6 +724,18 @@ struct ast_frame *ast_udptl_read(struct ast_udptl *udptl)
 
 	/* Ignore if the other side hasn't been given an address yet. */
 	if (ast_sockaddr_isnull(&udptl->them)) {
+		return &ast_null_frame;
+	}
+
+	/*
+	 * If early media isn't turned on for the channel driver, it's going to
+	 * drop this frame.  By that time though, udptl has already incremented
+	 * the expected sequence number so if the CPE re-sends, the second frame
+	 * will be dropped as a dup even though the first frame never went through.
+	 * So we drop the frame here if the channel isn't up. 'tag' is set by the
+	 * channel drivers on T38_ENABLED or T38_PEER_REINVITE.
+	 */
+	if (udptl->tag == NULL) {
 		return &ast_null_frame;
 	}
 
