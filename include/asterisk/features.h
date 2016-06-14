@@ -99,7 +99,6 @@ int ast_bridge_call_with_flags(struct ast_channel *chan, struct ast_channel *pee
  */
 int ast_bridge_add_channel(struct ast_bridge *bridge, struct ast_channel *chan,
 	struct ast_bridge_features *features, int play_tone, const char *xfersound);
-<<<<<<< HEAD
 
 
 /*! \brief Realtime Call Control datastore structure */
@@ -109,8 +108,6 @@ struct ast_bridge_combo {
 	struct ast_channel *ch1;
 	struct ast_bridge_config *config;
 };
-=======
->>>>>>> upstream/master
 
 /*! \brief Realtime Call Control datastore callback */
 struct ast_bridge_combo *ast_bridge_combo_get(struct ast_channel *chan);
