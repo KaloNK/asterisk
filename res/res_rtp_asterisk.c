@@ -484,8 +484,8 @@ static int ice_candidate_cmp(void *obj, void *arg, int flags)
 
 	if (strcmp(candidate1->foundation, candidate2->foundation) ||
 			candidate1->id != candidate2->id ||
-			ast_sockaddr_cmp(&candidate1->address, &candidate2->address) ||
-			candidate1->type != candidate1->type) {
+			candidate1->type != candidate2->type ||
+			ast_sockaddr_cmp(&candidate1->address, &candidate2->address)) {
 		return 0;
 	}
 
@@ -1285,7 +1285,7 @@ static int ast_rtp_dtls_set_configuration(struct ast_rtp_instance *instance, con
 {
 	struct ast_rtp *rtp = ast_rtp_instance_get_data(instance);
 	int res;
-#ifndef HAVE_OPENSSL_ECDH_AUTO
+#ifdef HAVE_OPENSSL_EC
 	EC_KEY *ecdh;
 #endif
 
@@ -1298,21 +1298,52 @@ static int ast_rtp_dtls_set_configuration(struct ast_rtp_instance *instance, con
 		return -1;
 	}
 
-	if (!(rtp->ssl_ctx = SSL_CTX_new(DTLSv1_method()))) {
+#if OPENSSL_VERSION_NUMBER < 0x10002000L
+	rtp->ssl_ctx = SSL_CTX_new(DTLSv1_method());
+#else
+	rtp->ssl_ctx = SSL_CTX_new(DTLS_method());
+#endif
+	if (!rtp->ssl_ctx) {
 		return -1;
 	}
 
 	SSL_CTX_set_read_ahead(rtp->ssl_ctx, 1);
 
-#ifdef HAVE_OPENSSL_ECDH_AUTO
-	SSL_CTX_set_ecdh_auto(rtp->ssl_ctx, 1);
-#else
+#ifdef HAVE_OPENSSL_EC
+
+	if (!ast_strlen_zero(dtls_cfg->pvtfile)) {
+		BIO *bio = BIO_new_file(dtls_cfg->pvtfile, "r");
+		if (bio != NULL) {
+			DH *dh = PEM_read_bio_DHparams(bio, NULL, NULL, NULL);
+			if (dh != NULL) {
+				if (SSL_CTX_set_tmp_dh(rtp->ssl_ctx, dh)) {
+					long options = SSL_OP_CIPHER_SERVER_PREFERENCE |
+						SSL_OP_SINGLE_DH_USE | SSL_OP_SINGLE_ECDH_USE;
+					options = SSL_CTX_set_options(rtp->ssl_ctx, options);
+					ast_verb(2, "DTLS DH initialized, PFS enabled\n");
+				}
+				DH_free(dh);
+			}
+			BIO_free(bio);
+		}
+	}
+	/* enables AES-128 ciphers, to get AES-256 use NID_secp384r1 */
 	ecdh = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
-	if (ecdh) {
-		SSL_CTX_set_tmp_ecdh(rtp->ssl_ctx, ecdh);
+	if (ecdh != NULL) {
+		if (SSL_CTX_set_tmp_ecdh(rtp->ssl_ctx, ecdh)) {
+			#ifndef SSL_CTRL_SET_ECDH_AUTO
+				#define SSL_CTRL_SET_ECDH_AUTO 94
+			#endif
+			/* SSL_CTX_set_ecdh_auto(rtp->ssl_ctx, on); requires OpenSSL 1.0.2 which wraps: */
+			if (SSL_CTX_ctrl(rtp->ssl_ctx, SSL_CTRL_SET_ECDH_AUTO, 1, NULL)) {
+				ast_verb(2, "DTLS ECDH initialized (automatic), faster PFS enabled\n");
+			} else {
+				ast_verb(2, "DTLS ECDH initialized (secp256r1), faster PFS enabled\n");
+		}
 		EC_KEY_free(ecdh);
 	}
-#endif
+
+#endif /* #ifdef HAVE_OPENSSL_EC */
 
 	rtp->dtls_verify = dtls_cfg->verify;
 
@@ -1334,7 +1365,7 @@ static int ast_rtp_dtls_set_configuration(struct ast_rtp_instance *instance, con
 	if (!ast_strlen_zero(dtls_cfg->certfile)) {
 		char *private = ast_strlen_zero(dtls_cfg->pvtfile) ? dtls_cfg->certfile : dtls_cfg->pvtfile;
 		BIO *certbio;
-		X509 *cert;
+		X509 *cert = NULL;
 		const EVP_MD *type;
 		unsigned int size, i;
 		unsigned char fingerprint[EVP_MAX_MD_SIZE];
@@ -1376,6 +1407,9 @@ static int ast_rtp_dtls_set_configuration(struct ast_rtp_instance *instance, con
 			ast_log(LOG_ERROR, "Could not produce fingerprint from certificate '%s' for RTP instance '%p'\n",
 				dtls_cfg->certfile, instance);
 			BIO_free_all(certbio);
+			if (cert) {
+				X509_free(cert);
+			}
 			return -1;
 		}
 
@@ -1387,6 +1421,7 @@ static int ast_rtp_dtls_set_configuration(struct ast_rtp_instance *instance, con
 		*(local_fingerprint-1) = 0;
 
 		BIO_free_all(certbio);
+		X509_free(cert);
 	}
 
 	if (!ast_strlen_zero(dtls_cfg->cipher)) {
@@ -2501,7 +2536,7 @@ static int ast_rtp_new(struct ast_rtp_instance *instance,
 
 	/* Set default parameters on the newly created RTP structure */
 	rtp->ssrc = ast_random();
-	rtp->seqno = ast_random() & 0xffff;
+	rtp->seqno = ast_random() & 0x7fff;
 	rtp->strict_rtp_state = (strictrtp ? STRICT_RTP_LEARN : STRICT_RTP_OPEN);
 	if (strictrtp) {
 		rtp_learning_seq_init(&rtp->rtp_source_learn, (uint16_t)rtp->seqno);
@@ -4131,6 +4166,7 @@ static int bridge_p2p_rtp_write(struct ast_rtp_instance *instance, unsigned int 
 	int reconstruct = ntohl(rtpheader[0]);
 	struct ast_sockaddr remote_address = { {0,} };
 	int ice;
+	unsigned int timestamp = ntohl(rtpheader[1]);
 
 	/* Get fields from packet */
 	payload = (reconstruct & 0x7f0000) >> 16;
@@ -4150,6 +4186,22 @@ static int bridge_p2p_rtp_write(struct ast_rtp_instance *instance, unsigned int 
 	/* If the payload coming in is not one of the negotiated ones then send it to the core, this will cause formats to change and the bridge to break */
 	if (ast_rtp_codecs_find_payload_code(ast_rtp_instance_get_codecs(instance1), bridged_payload) == -1) {
 		ast_debug(1, "Unsupported payload type received \n");
+		return -1;
+	}
+
+	/* If bridged peer is in dtmf, feed all packets to core until it finishes to avoid infinite dtmf */
+	if (bridged->sending_digit) {
+		ast_debug(1, "Feeding packets to core until DTMF finishes\n");
+		return -1;
+	}
+
+	/*
+	 * Even if we are no longer in dtmf, we could still be receiving
+	 * re-transmissions of the last dtmf end still.  Feed those to the
+	 * core so they can be filtered accordingly.
+	 */
+	if (rtp->last_end_timestamp == timestamp) {
+		ast_debug(1, "Feeding packet with duplicate timestamp to core\n");
 		return -1;
 	}
 
