@@ -331,7 +331,7 @@ if test "${MD5}" = "digest" ; then
    MD5="${MD5} -a md5"
 fi
 
-ACX_PTHREAD
+AX_PTHREAD
 
 AC_LANG(C)
 
@@ -392,7 +392,6 @@ AST_EXT_LIB_SETUP_OPTIONAL([COROSYNC_CFG_STATE_TRACK], [A callback only in coros
 AST_EXT_LIB_SETUP([CURSES], [curses], [curses])
 AST_EXT_LIB_SETUP([CRYPTO], [OpenSSL Cryptography], [crypto])
 AST_EXT_LIB_SETUP_OPTIONAL([OPENSSL_SRTP], [OpenSSL SRTP Extension Support], [CRYPTO], [crypto])
-AST_EXT_LIB_SETUP_OPTIONAL([OPENSSL_ECDH_AUTO], [OpenSSL Auto ECDH Support], [CRYPTO], [crypto])
 AST_EXT_LIB_SETUP([DAHDI], [DAHDI], [dahdi])
 AST_EXT_LIB_SETUP([FFMPEG], [Ffmpeg and avcodec], [avcodec])
 AST_EXT_LIB_SETUP([GSM], [External GSM], [gsm], [, use 'internal' GSM otherwise])
@@ -588,8 +587,6 @@ AC_PROG_GCC_TRADITIONAL
 AC_FUNC_MEMCMP
 AC_FUNC_MMAP
 AC_FUNC_SELECT_ARGTYPES
-AC_FUNC_SETVBUF_REVERSED
-AC_TYPE_SIGNAL
 AC_FUNC_STAT
 AC_FUNC_STRCOLL
 AC_FUNC_STRFTIME
@@ -933,6 +930,7 @@ AST_GCC_ATTRIBUTE(always_inline)
 AST_GCC_ATTRIBUTE(deprecated)
 AST_GCC_ATTRIBUTE(sentinel)
 AST_GCC_ATTRIBUTE(warn_unused_result)
+AST_GCC_ATTRIBUTE(noreturn,noreturn)
 
 # Support weak symbols on a platform specific basis.  The Mac OS X
 # (Darwin) support must be isolated from the other platforms because
@@ -1104,23 +1102,18 @@ AC_SUBST(AST_SHADOW_WARNINGS)
 
 AC_MSG_CHECKING(for -march=native support)
 if $(${CC} -march=native -S -o /dev/null -xc /dev/null > /dev/null 2>&1); then
-	if test "${CONFIG_CFLAGS}" = ""; then
-		AC_MSG_RESULT(yes)
-		AST_NATIVE_ARCH=1
-	else
-		AC_MSG_RESULT(user CFLAGS present)
-		AST_NATIVE_ARCH=
-	fi
+	AC_MSG_RESULT(yes)
+	AST_NATIVE_ARCH=1
 else
 	AC_MSG_RESULT(no)
-	AST_NATIVE_ARCH=
+	AST_NATIVE_ARCH=0
 fi
 AC_SUBST(AST_NATIVE_ARCH)
 
 
 dnl Check to see if rpath should be set in LDFLAGS
 AC_ARG_ENABLE(rpath,
-	[AC_HELP_STRING([--disable-rpath],
+	[AS_HELP_STRING([--disable-rpath],
 			[Disables rpath linker option checking])],
 	[case "${enableval}" in
 		y|ye|yes) check_rpath=yes ;;
@@ -2227,11 +2220,6 @@ if test "$PBX_OPENSSL" = "1";
 then
         AST_CHECK_OSPTK([4], [0], [0])
         AST_EXT_LIB_CHECK([OPENSSL_SRTP], [ssl], [SSL_CTX_set_tlsext_use_srtp], [openssl/ssl.h], [-lcrypto])
-fi
-
-if test "$PBX_OPENSSL" = "1";
-then
-        AST_C_DECLARE_CHECK([OPENSSL_ECDH_AUTO], [SSL_CTX_set_ecdh_auto], [openssl/ssl.h])
 fi
 
 if test "$PBX_OPENSSL" = "1";
