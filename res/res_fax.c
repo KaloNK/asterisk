@@ -615,6 +615,7 @@ static int update_modem_bits(enum ast_fax_modems *bits, const char *value)
 	}
 	return 0;
 }
+
 static char *ast_fax_caps_to_str(enum ast_fax_capabilities caps, char *buf, size_t bufsize)
 {
 	char *out = buf;
@@ -1097,8 +1098,8 @@ static void get_manager_event_info(struct ast_channel *chan, struct manager_even
 	pbx_substitute_variables_helper(chan, "${CALLERID(num)}", info->cid, sizeof(info->cid));
 }
 
-
-/* \brief Generate a string of filenames using the given prefix and separator.
+/*!
+ * \brief Generate a string of filenames using the given prefix and separator.
  * \param details the fax session details
  * \param prefix the prefix to each filename
  * \param separator the separator between filenames
@@ -1343,6 +1344,13 @@ static int generic_fax_exec(struct ast_channel *chan, struct ast_fax_session_det
 	ast_format_clear(&orig_read_format);
 	chancount = 1;
 
+	/* Make sure one or the other is set to avoid race condition */
+	if (t38negotiated) {
+		details->caps |= AST_FAX_TECH_T38;
+	} else {
+		details->caps |= AST_FAX_TECH_AUDIO;
+	}
+
 	/* create the FAX session */
 	if (!(fax = fax_session_new(details, chan, reserved, token))) {
 		ast_log(LOG_ERROR, "Can't create a FAX session, FAX attempt failed.\n");
@@ -1364,26 +1372,20 @@ static int generic_fax_exec(struct ast_channel *chan, struct ast_fax_session_det
 	report_fax_status(chan, details, "Allocating Resources");
 
 	if (details->caps & AST_FAX_TECH_AUDIO) {
-		expected_frametype = AST_FRAME_VOICE;;
+		expected_frametype = AST_FRAME_VOICE;
 		ast_format_set(&expected_framesubclass.format, AST_FORMAT_SLINEAR, 0);
 		ast_format_copy(&orig_write_format, ast_channel_writeformat(chan));
 		if (ast_set_write_format_by_id(chan, AST_FORMAT_SLINEAR) < 0) {
 			ast_log(LOG_ERROR, "channel '%s' failed to set write format to signed linear'.\n", ast_channel_name(chan));
- 			ao2_lock(faxregistry.container);
- 			ao2_unlink(faxregistry.container, fax);
- 			ao2_unlock(faxregistry.container);
- 			ao2_ref(fax, -1);
-			ast_channel_unlock(chan);
+			ao2_unlink(faxregistry.container, fax);
+			ao2_ref(fax, -1);
 			return -1;
 		}
 		ast_format_copy(&orig_read_format, ast_channel_readformat(chan));
 		if (ast_set_read_format_by_id(chan, AST_FORMAT_SLINEAR) < 0) {
 			ast_log(LOG_ERROR, "channel '%s' failed to set read format to signed linear.\n", ast_channel_name(chan));
- 			ao2_lock(faxregistry.container);
- 			ao2_unlink(faxregistry.container, fax);
- 			ao2_unlock(faxregistry.container);
- 			ao2_ref(fax, -1);
-			ast_channel_unlock(chan);
+			ao2_unlink(faxregistry.container, fax);
+			ao2_ref(fax, -1);
 			return -1;
 		}
 		if (fax->smoother) {
@@ -1559,9 +1561,7 @@ static int generic_fax_exec(struct ast_channel *chan, struct ast_fax_session_det
 	}
 
 	if (fax) {
-		ao2_lock(faxregistry.container);
 		ao2_unlink(faxregistry.container, fax);
-		ao2_unlock(faxregistry.container);
 		ao2_ref(fax, -1);
 	}
 
@@ -2507,18 +2507,14 @@ static int sendfax_exec(struct ast_channel *chan, const char *data)
 static void destroy_v21_sessions(struct fax_gateway *gateway)
 {
 	if (gateway->chan_v21_session) {
-		ao2_lock(faxregistry.container);
 		ao2_unlink(faxregistry.container, gateway->chan_v21_session);
-		ao2_unlock(faxregistry.container);
 
 		ao2_ref(gateway->chan_v21_session, -1);
 		gateway->chan_v21_session = NULL;
 	}
 
 	if (gateway->peer_v21_session) {
-		ao2_lock(faxregistry.container);
 		ao2_unlink(faxregistry.container, gateway->peer_v21_session);
-		ao2_unlock(faxregistry.container);
 
 		ao2_ref(gateway->peer_v21_session, -1);
 		gateway->peer_v21_session = NULL;
@@ -2536,9 +2532,7 @@ static void destroy_gateway(void *data)
 		fax_session_release(gateway->s, gateway->token);
 		gateway->token = NULL;
 
-		ao2_lock(faxregistry.container);
 		ao2_unlink(faxregistry.container, gateway->s);
-		ao2_unlock(faxregistry.container);
 
 		ao2_ref(gateway->s, -1);
 		gateway->s = NULL;
@@ -2554,11 +2548,8 @@ static struct ast_fax_session *fax_v21_session_new (struct ast_channel *chan) {
 	}
 
 	v21_details->caps = AST_FAX_TECH_V21_DETECT;
-	if (!(v21_session = fax_session_new(v21_details, chan, NULL, NULL))) {
-		ao2_ref(v21_details, -1);
-		return NULL;
-	}
-
+	v21_session = fax_session_new(v21_details, chan, NULL, NULL);
+	ao2_ref(v21_details, -1);
 	return v21_session;
 }
 
@@ -2593,14 +2584,21 @@ static struct fax_gateway *fax_gateway_new(struct ast_channel *chan, struct ast_
 	return gateway;
 }
 
-/*! \brief Create a fax session and start T.30<->T.38 gateway mode
+/*!
+ * \brief Create a fax session and start T.30<->T.38 gateway mode
+ *
  * \param gateway a fax gateway object
  * \param details fax session details
  * \param chan active channel
- * \return 0 on error 1 on success*/
+ *
+ * \pre chan is locked on entry
+ *
+ * \return 0 on error 1 on success
+ */
 static int fax_gateway_start(struct fax_gateway *gateway, struct ast_fax_session_details *details, struct ast_channel *chan)
 {
 	struct ast_fax_session *s;
+	int start_res;
 
 	/* create the FAX session */
 	if (!(s = fax_session_new(details, chan, gateway->s, gateway->token))) {
@@ -2621,7 +2619,10 @@ static int fax_gateway_start(struct fax_gateway *gateway, struct ast_fax_session
 	gateway->s = s;
 	gateway->token = NULL;
 
-	if (gateway->s->tech->start_session(gateway->s) < 0) {
+	ast_channel_unlock(chan);
+	start_res = gateway->s->tech->start_session(gateway->s);
+	ast_channel_lock(chan);
+	if (start_res < 0) {
 		ast_string_field_set(details, result, "FAILED");
 		ast_string_field_set(details, resultstr, "error starting gateway session");
 		ast_string_field_set(details, error, "INIT_ERROR");
@@ -2637,6 +2638,7 @@ static int fax_gateway_start(struct fax_gateway *gateway, struct ast_fax_session
 	return 0;
 }
 
+/*! \pre chan is locked on entry */
 static struct ast_frame *fax_gateway_request_t38(struct fax_gateway *gateway, struct ast_channel *chan, struct ast_frame *f)
 {
 	struct ast_frame *fp;
@@ -2675,6 +2677,7 @@ static struct ast_frame *fax_gateway_request_t38(struct fax_gateway *gateway, st
 	return fp;
 }
 
+/*! \pre chan is locked on entry */
 static struct ast_frame *fax_gateway_detect_v21(struct fax_gateway *gateway, struct ast_channel *chan, struct ast_channel *peer, struct ast_channel *active, struct ast_frame *f)
 {
 	struct ast_channel *other = (active == chan) ? peer : chan;
@@ -2690,8 +2693,14 @@ static struct ast_frame *fax_gateway_detect_v21(struct fax_gateway *gateway, str
 	}
 
 	if (gateway->detected_v21) {
+		enum ast_t38_state state_other;
+
 		destroy_v21_sessions(gateway);
-		if (ast_channel_get_t38_state(other) == T38_STATE_UNKNOWN) {
+
+		ast_channel_unlock(chan);
+		state_other = ast_channel_get_t38_state(other);
+		ast_channel_lock(chan);
+		if (state_other == T38_STATE_UNKNOWN) {
 			ast_debug(1, "detected v21 preamble from %s\n", ast_channel_name(active));
 			return fax_gateway_request_t38(gateway, chan, f);
 		} else {
@@ -2702,21 +2711,29 @@ static struct ast_frame *fax_gateway_detect_v21(struct fax_gateway *gateway, str
 	return f;
 }
 
-static int fax_gateway_indicate_t38(struct ast_channel *chan, struct ast_channel *active, struct ast_control_t38_parameters *control_params)
+/*! \pre chan is locked on entry */
+static void fax_gateway_indicate_t38(struct ast_channel *chan, struct ast_channel *active, struct ast_control_t38_parameters *control_params)
 {
 	if (active == chan) {
-		return ast_indicate_data(chan, AST_CONTROL_T38_PARAMETERS, control_params, sizeof(*control_params));
+		ast_channel_unlock(chan);
+		ast_indicate_data(chan, AST_CONTROL_T38_PARAMETERS, control_params, sizeof(*control_params));
+		ast_channel_lock(chan);
 	} else {
-		return ast_queue_control_data(chan, AST_CONTROL_T38_PARAMETERS, control_params, sizeof(*control_params));
+		ast_queue_control_data(chan, AST_CONTROL_T38_PARAMETERS, control_params, sizeof(*control_params));
 	}
 }
 
-/*! \brief T38 Gateway Negotiate t38 parameters
+/*!
+ * \brief T38 Gateway Negotiate t38 parameters
+ *
  * \param gateway gateway object
  * \param chan channel running the gateway
  * \param peer channel im bridged too
  * \param active channel the frame originated on
  * \param f the control frame to process
+ *
+ * \pre chan is locked on entry
+ *
  * \return processed control frame or null frame
  */
 static struct ast_frame *fax_gateway_detect_t38(struct fax_gateway *gateway, struct ast_channel *chan, struct ast_channel *peer, struct ast_channel *active, struct ast_frame *f)
@@ -2724,6 +2741,7 @@ static struct ast_frame *fax_gateway_detect_t38(struct fax_gateway *gateway, str
 	struct ast_control_t38_parameters *control_params = f->data.ptr;
 	struct ast_channel *other = (active == chan) ? peer : chan;
 	struct ast_fax_session_details *details;
+	enum ast_t38_state state_other;
 
 	if (f->datalen != sizeof(struct ast_control_t38_parameters)) {
 		/* invalaid AST_CONTROL_T38_PARAMETERS frame, we can't
@@ -2746,9 +2764,11 @@ static struct ast_frame *fax_gateway_detect_t38(struct fax_gateway *gateway, str
 	}
 
 	if (control_params->request_response == AST_T38_REQUEST_NEGOTIATE) {
-		enum ast_t38_state state = ast_channel_get_t38_state(other);
+		ast_channel_unlock(chan);
+		state_other = ast_channel_get_t38_state(other);
+		ast_channel_lock(chan);
 
-		if (state == T38_STATE_UNKNOWN) {
+		if (state_other == T38_STATE_UNKNOWN) {
 			/* we detected a request to negotiate T.38 and the
 			 * other channel appears to support T.38, we'll pass
 			 * the request through and only step in if the other
@@ -2760,7 +2780,7 @@ static struct ast_frame *fax_gateway_detect_t38(struct fax_gateway *gateway, str
 			details->gateway_timeout = FAX_GATEWAY_TIMEOUT;
 			ao2_ref(details, -1);
 			return f;
-		} else if (state == T38_STATE_UNAVAILABLE || state == T38_STATE_REJECTED) {
+		} else if (state_other == T38_STATE_UNAVAILABLE || state_other == T38_STATE_REJECTED) {
 			/* the other channel does not support T.38, we need to
 			 * step in here */
 			ast_debug(1, "%s is attempting to negotiate T.38 but %s does not support it\n", ast_channel_name(active), ast_channel_name(other));
@@ -2835,7 +2855,10 @@ static struct ast_frame *fax_gateway_detect_t38(struct fax_gateway *gateway, str
 		/* our request to negotiate T.38 was refused, if the other
 		 * channel supports T.38, they might still reinvite and save
 		 * the day.  Otherwise disable the gateway. */
-		if (ast_channel_get_t38_state(other) == T38_STATE_UNKNOWN) {
+		ast_channel_unlock(chan);
+		state_other = ast_channel_get_t38_state(other);
+		ast_channel_lock(chan);
+		if (state_other == T38_STATE_UNKNOWN) {
 			gateway->t38_state = T38_STATE_UNAVAILABLE;
 		} else {
 			ast_framehook_detach(chan, details->gateway_id);
@@ -2937,7 +2960,8 @@ static struct ast_frame *fax_gateway_detect_t38(struct fax_gateway *gateway, str
 
 /*! \brief Destroy the gateway data structure when the framehook is detached
  * \param data framehook data (gateway data)*/
-static void fax_gateway_framehook_destroy(void *data) {
+static void fax_gateway_framehook_destroy(void *data)
+{
 	struct fax_gateway *gateway = data;
 
 	if (gateway->s) {
@@ -2958,7 +2982,8 @@ static void fax_gateway_framehook_destroy(void *data) {
 	ao2_ref(gateway, -1);
 }
 
-/*! \brief T.30<->T.38 gateway framehook.
+/*!
+ * \brief T.30<->T.38 gateway framehook.
  *
  * Intercept packets on bridged channels and determine if a T.38 gateway is
  * required. If a gateway is required, start a gateway and handle T.38
@@ -2969,12 +2994,20 @@ static void fax_gateway_framehook_destroy(void *data) {
  * \param event framehook event
  * \param data framehook data (struct fax_gateway *)
  *
+ * \pre chan is locked on entry
+ *
  * \return processed frame or NULL when f is NULL or a null frame
  */
-static struct ast_frame *fax_gateway_framehook(struct ast_channel *chan, struct ast_frame *f, enum ast_framehook_event event, void *data) {
+static struct ast_frame *fax_gateway_framehook(struct ast_channel *chan, struct ast_frame *f, enum ast_framehook_event event, void *data)
+{
 	struct fax_gateway *gateway = data;
-	struct ast_channel *peer, *active;
-	struct ast_fax_session_details *details;
+	struct ast_channel *active;
+	RAII_VAR(struct ast_fax_session_details *, details, NULL, ao2_cleanup);
+	RAII_VAR(struct ast_channel *, peer, NULL, ao2_cleanup);
+	RAII_VAR(struct ast_channel *, chan_ref, chan, ao2_cleanup);
+
+	/* Ref bump channel for when we have to unlock it */
+	ao2_ref(chan_ref, 1);
 
 	if (gateway->s) {
 		details = gateway->s->details;
@@ -2993,39 +3026,48 @@ static struct ast_frame *fax_gateway_framehook(struct ast_channel *chan, struct 
 
 		if (gateway->bridged) {
 			ast_set_read_format(chan, &gateway->chan_read_format);
-			ast_set_read_format(chan, &gateway->chan_write_format);
+			ast_set_write_format(chan, &gateway->chan_write_format);
 
-			if ((peer = ast_bridged_channel(chan))) {
+			peer = ast_bridged_channel(chan);
+			if (peer) {
+				ao2_ref(peer, +1);
+				ast_channel_unlock(chan);
 				ast_set_read_format(peer, &gateway->peer_read_format);
-				ast_set_read_format(peer, &gateway->peer_write_format);
+				ast_set_write_format(peer, &gateway->peer_write_format);
 				ast_channel_make_compatible(chan, peer);
+				ast_channel_lock(chan);
 			}
 		}
-
-		ao2_ref(details, -1);
 		return NULL;
 	}
 
 	if (!f || (event == AST_FRAMEHOOK_EVENT_ATTACHED)) {
-		ao2_ref(details, -1);
 		return NULL;
 	};
 
 	/* this frame was generated by the fax gateway, pass it on */
 	if (ast_test_flag(f, AST_FAX_FRFLAG_GATEWAY)) {
-		ao2_ref(details, -1);
 		return f;
 	}
 
-	if (!(peer = ast_bridged_channel(chan))) {
-		/* not bridged, don't do anything */
-		ao2_ref(details, -1);
+	/* If we aren't bridged or we don't have a peer, don't do anything */
+	peer = ast_bridged_channel(chan);
+	if (!peer) {
 		return f;
 	}
+	ao2_ref(peer, +1);
 
-	if (!gateway->bridged && peer) {
+	if (!gateway->bridged) {
+		enum ast_t38_state state_chan;
+		enum ast_t38_state state_peer;
+
+		ast_channel_unlock(chan);
+		state_chan = ast_channel_get_t38_state(chan);
+		state_peer = ast_channel_get_t38_state(peer);
+		ast_channel_lock(chan);
+
 		/* don't start a gateway if neither channel can handle T.38 */
-		if (ast_channel_get_t38_state(chan) == T38_STATE_UNAVAILABLE && ast_channel_get_t38_state(peer) == T38_STATE_UNAVAILABLE) {
+		if (state_chan == T38_STATE_UNAVAILABLE && state_peer == T38_STATE_UNAVAILABLE) {
 			ast_debug(1, "not starting gateway for %s and %s; neither channel supports T.38\n", ast_channel_name(chan), ast_channel_name(peer));
 			ast_framehook_detach(chan, gateway->framehook);
 			details->gateway_id = -1;
@@ -3034,7 +3076,6 @@ static struct ast_frame *fax_gateway_framehook(struct ast_channel *chan, struct 
 			ast_string_field_set(details, resultstr, "neither channel supports T.38");
 			ast_string_field_set(details, error, "T38_NEG_ERROR");
 			set_channel_variables(chan, details);
-			ao2_ref(details, -1);
 			return f;
 		}
 
@@ -3042,13 +3083,16 @@ static struct ast_frame *fax_gateway_framehook(struct ast_channel *chan, struct 
 			gateway->timeout_start = ast_tvnow();
 		}
 
+		ast_channel_unlock(chan);
+		ast_channel_lock_both(chan, peer);
+
 		/* we are bridged, change r/w formats to SLIN for v21 preamble
 		 * detection and T.30 */
 		ast_format_copy(&gateway->chan_read_format, ast_channel_readformat(chan));
-		ast_format_copy(&gateway->chan_write_format, ast_channel_readformat(chan));
+		ast_format_copy(&gateway->chan_write_format, ast_channel_writeformat(chan));
 
 		ast_format_copy(&gateway->peer_read_format, ast_channel_readformat(peer));
-		ast_format_copy(&gateway->peer_write_format, ast_channel_readformat(peer));
+		ast_format_copy(&gateway->peer_write_format, ast_channel_writeformat(peer));
 
 		ast_set_read_format_by_id(chan, AST_FORMAT_SLINEAR);
 		ast_set_write_format_by_id(chan, AST_FORMAT_SLINEAR);
@@ -3056,7 +3100,8 @@ static struct ast_frame *fax_gateway_framehook(struct ast_channel *chan, struct 
 		ast_set_read_format_by_id(peer, AST_FORMAT_SLINEAR);
 		ast_set_write_format_by_id(peer, AST_FORMAT_SLINEAR);
 
-		ast_channel_make_compatible(chan, peer);
+		ast_channel_unlock(peer);
+
 		gateway->bridged = 1;
 		if (!(gateway->peer_v21_session = fax_v21_session_new(peer))) {
 			ast_log(LOG_ERROR, "Can't create V21 session on chan %s for T.38 gateway session\n", ast_channel_name(peer));
@@ -3075,7 +3120,6 @@ static struct ast_frame *fax_gateway_framehook(struct ast_channel *chan, struct 
 			ast_string_field_build(details, resultstr, "no fax activity after %d ms", details->gateway_timeout);
 			ast_string_field_set(details, error, "TIMEOUT");
 			set_channel_variables(chan, details);
-			ao2_ref(details, -1);
 			return f;
 		}
 	}
@@ -3089,7 +3133,6 @@ static struct ast_frame *fax_gateway_framehook(struct ast_channel *chan, struct 
 		case AST_FORMAT_ULAW:
 			break;
 		default:
-			ao2_ref(details, -1);
 			return f;
 		}
 		break;
@@ -3097,16 +3140,13 @@ static struct ast_frame *fax_gateway_framehook(struct ast_channel *chan, struct 
 		if (f->subclass.integer == AST_MODEM_T38) {
 			break;
 		}
-		ao2_ref(details, -1);
 		return f;
 	case AST_FRAME_CONTROL:
 		if (f->subclass.integer == AST_CONTROL_T38_PARAMETERS) {
 			break;
 		}
-		ao2_ref(details, -1);
 		return f;
 	default:
-		ao2_ref(details, -1);
 		return f;
 	}
 
@@ -3120,20 +3160,17 @@ static struct ast_frame *fax_gateway_framehook(struct ast_channel *chan, struct 
 		break;
 	default:
 		ast_log(LOG_WARNING, "unhandled framehook event %u\n", event);
-		ao2_ref(details, -1);
 		return f;
 	}
 
 	/* handle control frames */
 	if (f->frametype == AST_FRAME_CONTROL && f->subclass.integer == AST_CONTROL_T38_PARAMETERS) {
-		ao2_ref(details, -1);
 		return fax_gateway_detect_t38(gateway, chan, peer, active, f);
 	}
 
 	if (!gateway->detected_v21 && gateway->t38_state == T38_STATE_UNAVAILABLE && f->frametype == AST_FRAME_VOICE) {
 		/* not in gateway mode and have not detected v21 yet, listen
 		 * for v21 */
-		ao2_ref(details, -1);
 		return fax_gateway_detect_v21(gateway, chan, peer, active, f);
 	}
 
@@ -3146,7 +3183,6 @@ static struct ast_frame *fax_gateway_framehook(struct ast_channel *chan, struct 
 			&& (readtrans = ast_channel_readtrans(active))) {
 			if ((f = ast_translate(readtrans, f, 1)) == NULL) {
 				f = &ast_null_frame;
-				ao2_ref(details, -1);
 				return f;
 			}
 			/* XXX we ignore the return value here, perhaps we should
@@ -3160,7 +3196,6 @@ static struct ast_frame *fax_gateway_framehook(struct ast_channel *chan, struct 
 		}
 
 		f = &ast_null_frame;
-		ao2_ref(details, -1);
 		return f;
 	}
 
@@ -3176,16 +3211,12 @@ static struct ast_frame *fax_gateway_framehook(struct ast_channel *chan, struct 
 			};
 			ast_format_set(&silence_frame.subclass.format, AST_FORMAT_SLINEAR, 0);
 			memset(silence_buf, 0, sizeof(silence_buf));
-
-			ao2_ref(details, -1);
 			return ast_frisolate(&silence_frame);
 		} else {
-			ao2_ref(details, -1);
 			return &ast_null_frame;
 		}
 	}
 
-	ao2_ref(details, -1);
 	return f;
 }
 
@@ -3204,9 +3235,9 @@ static int fax_gateway_attach(struct ast_channel *chan, struct ast_fax_session_d
 		.destroy_cb = fax_gateway_framehook_destroy,
 	};
 
-    	if (global_fax_debug) {
-        	details->option.debug = AST_FAX_OPTFLAG_TRUE;
-    	}
+	if (global_fax_debug) {
+		details->option.debug = AST_FAX_OPTFLAG_TRUE;
+	}
 
 	ast_string_field_set(details, result, "SUCCESS");
 	ast_string_field_set(details, resultstr, "gateway operation started successfully");
@@ -3292,7 +3323,8 @@ static struct fax_detect *fax_detect_new(struct ast_channel *chan, int timeout, 
 
 /*! \brief Deref the faxdetect data structure when the faxdetect framehook is detached
  * \param data framehook data (faxdetect data)*/
-static void fax_detect_framehook_destroy(void *data) {
+static void fax_detect_framehook_destroy(void *data)
+{
 	struct fax_detect *faxdetect = data;
 
 	ao2_ref(faxdetect, -1);
@@ -3309,12 +3341,17 @@ static void fax_detect_framehook_destroy(void *data) {
  *
  * \return processed frame or NULL when f is NULL or a null frame
  */
-static struct ast_frame *fax_detect_framehook(struct ast_channel *chan, struct ast_frame *f, enum ast_framehook_event event, void *data) {
+static struct ast_frame *fax_detect_framehook(struct ast_channel *chan, struct ast_frame *f, enum ast_framehook_event event, void *data)
+{
 	struct fax_detect *faxdetect = data;
 	struct ast_fax_session_details *details;
 	struct ast_control_t38_parameters *control_params;
 	struct ast_channel *peer;
+	RAII_VAR(struct ast_channel *, chan_ref, chan, ao2_cleanup);
 	int result = 0;
+
+	/* Ref bump the channel for when we have to unlock it */
+	ao2_ref(chan, 1);
 
 	details = faxdetect->details;
 
@@ -3338,8 +3375,13 @@ static struct ast_frame *fax_detect_framehook(struct ast_channel *chan, struct a
 	case AST_FRAMEHOOK_EVENT_DETACHED:
 		/* restore audio formats when we are detached */
 		ast_set_read_format(chan, &faxdetect->orig_format);
-		if ((peer = ast_bridged_channel(chan))) {
+		peer = ast_bridged_channel(chan);
+		if (peer) {
+			ao2_ref(peer, +1);
+			ast_channel_unlock(chan);
 			ast_channel_make_compatible(chan, peer);
+			ast_channel_lock(chan);
+			ao2_ref(peer, -1);
 		}
 		return NULL;
 	case AST_FRAMEHOOK_EVENT_READ:
@@ -4072,7 +4114,9 @@ static int acf_faxopt_write(struct ast_channel *chan, const char *cmd, char *dat
 				ast_log(LOG_WARNING, "Attempt to attach a T.38 gateway on channel (%s) with gateway already running.\n", ast_channel_name(chan));
 			}
 		} else if (ast_false(val)) {
+			ast_channel_lock(chan);
 			ast_framehook_detach(chan, details->gateway_id);
+			ast_channel_unlock(chan);
 			details->gateway_id = -1;
 		} else {
 			ast_log(LOG_WARNING, "Unsupported value '%s' passed to FAXOPT(%s).\n", value, data);
@@ -4117,7 +4161,9 @@ static int acf_faxopt_write(struct ast_channel *chan, const char *cmd, char *dat
 				ast_log(LOG_WARNING, "Attempt to attach a FAX detect on channel (%s) with FAX detect already running.\n", ast_channel_name(chan));
 			}
 		} else if (ast_false(val)) {
+			ast_channel_lock(chan);
 			ast_framehook_detach(chan, details->faxdetect_id);
+			ast_channel_unlock(chan);
 			details->faxdetect_id = -1;
 		} else {
 			ast_log(LOG_WARNING, "Unsupported value '%s' passed to FAXOPT(%s).\n", value, data);
