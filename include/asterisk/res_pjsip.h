@@ -256,6 +256,8 @@ struct ast_sip_contact {
 	int via_port;
 	/*! Content of the Call-ID header in REGISTER request */
 	AST_STRING_FIELD_EXTENDED(call_id);
+	/*! The name of the endpoint that added the contact */
+	AST_STRING_FIELD_EXTENDED(endpoint_name);
 };
 
 #define CONTACT_STATUS "contact_status"
@@ -269,7 +271,6 @@ enum ast_sip_contact_status_type {
 	UNKNOWN,
 	CREATED,
 	REMOVED,
-	UPDATED,
 };
 
 /*!
@@ -292,6 +293,8 @@ struct ast_sip_contact_status {
 	char *aor;
 	/*! The original contact's URI */
 	char *uri;
+	/*! TRUE if the contact was refreshed. e.g., re-registered */
+	unsigned int refresh:1;
 };
 
 /*!
@@ -501,6 +504,8 @@ struct ast_sip_endpoint_subscription_configuration {
 	unsigned int minexpiry;
 	/*! Message waiting configuration */
 	struct ast_sip_mwi_configuration mwi;
+	/* Context for SUBSCRIBE requests */
+	char context[AST_MAX_CONTEXT];
 };
 
 /*!
@@ -740,10 +745,16 @@ struct ast_sip_endpoint {
 	unsigned int usereqphone;
 	/*! Do we send messages for connected line updates for unanswered incoming calls immediately to this endpoint? */
 	unsigned int rpid_immediate;
-	/* Access control list */
+	/*! Access control list */
 	struct ast_acl_list *acl;
-	/* Restrict what IPs are allowed in the Contact header (for registration) */
+	/*! Restrict what IPs are allowed in the Contact header (for registration) */
 	struct ast_acl_list *contact_acl;
+	/*! The number of seconds into call to disable fax detection.  (0 = disabled) */
+	unsigned int faxdetect_timeout;
+	/*! Override the user on the outgoing Contact header with this value. */
+	char *contact_user;
+	/*! Do we allow an asymmetric RTP codec? */
+	unsigned int asymmetric_rtp_codec;
 };
 
 /*!
@@ -984,6 +995,16 @@ void ast_sip_unregister_endpoint_identifier(struct ast_sip_endpoint_identifier *
  * \retval non-NULL The newly allocated endpoint
  */
 void *ast_sip_endpoint_alloc(const char *name);
+
+/*!
+ * \brief Change state of a persistent endpoint.
+ *
+ * \param endpoint The SIP endpoint name to change state.
+ * \param state The new state
+ * \retval 0 Success
+ * \retval -1 Endpoint not found
+ */
+int ast_sip_persistent_endpoint_update_state(const char *endpoint_name, enum ast_endpoint_state state);
 
 /*!
  * \brief Get a pointer to the PJSIP endpoint.
@@ -1345,6 +1366,16 @@ struct ast_taskprocessor *ast_sip_create_serializer_group_named(const char *name
  * \retval NULL on error.
  */
 struct ast_taskprocessor *ast_sip_get_distributor_serializer(pjsip_rx_data *rdata);
+
+/*!
+ * \brief Record the task's serializer name on the tdata structure.
+ * \since 13.15.0
+ *
+ * \param tdata The outgoing message.
+ *
+ * \retval PJ_SUCCESS.
+ */
+pj_status_t ast_sip_record_request_serializer(pjsip_tx_data *tdata);
 
 /*!
  * \brief Set a serializer on a SIP dialog so requests and responses are automatically serialized
@@ -2300,6 +2331,16 @@ int ast_sip_format_endpoint_ami(struct ast_sip_endpoint *endpoint,
 				struct ast_sip_ami *ami, int *count);
 
 /*!
+ * \brief Formats the contact and sends over AMI.
+ *
+ * \param obj a pointer an ast_sip_contact_wrapper structure
+ * \param arg a pointer to an ast_sip_ami structure
+ * \param flags ignored
+ * \retval 0 Success, otherwise non-zero on error
+ */
+int ast_sip_format_contact_ami(void *obj, void *arg, int flags);
+
+/*!
  * \brief Format auth details for AMI.
  *
  * \param auths an auth array
@@ -2444,6 +2485,64 @@ int ast_sip_register_supplement(struct ast_sip_supplement *supplement);
  * \param supplement The supplement to unregister
  */
 void ast_sip_unregister_supplement(struct ast_sip_supplement *supplement);
+
+/*!
+ * \brief Retrieve the global MWI taskprocessor high water alert trigger level.
+ *
+ * \since 13.12.0
+ *
+ * \retval the system MWI taskprocessor high water alert trigger level
+ */
+unsigned int ast_sip_get_mwi_tps_queue_high(void);
+
+/*!
+ * \brief Retrieve the global MWI taskprocessor low water clear alert level.
+ *
+ * \since 13.12.0
+ *
+ * \retval the system MWI taskprocessor low water clear alert level
+ */
+int ast_sip_get_mwi_tps_queue_low(void);
+
+/*!
+ * \brief Retrieve the global setting 'disable sending unsolicited mwi on startup'.
+ * \since 13.12.0
+ *
+ * \retval non zero if disable.
+ */
+unsigned int ast_sip_get_mwi_disable_initial_unsolicited(void);
+
+/*!
+ * \brief Retrieve the global setting 'ignore_uri_user_options'.
+ * \since 13.12.0
+ *
+ * \retval non zero if ignore the user field options.
+ */
+unsigned int ast_sip_get_ignore_uri_user_options(void);
+
+/*!
+ * \brief Truncate the URI user field options string if enabled.
+ * \since 13.12.0
+ *
+ * \param str URI user field string to truncate if enabled
+ *
+ * \details
+ * We need to be able to handle URI's looking like
+ * "sip:1235557890;phone-context=national@x.x.x.x;user=phone"
+ *
+ * Where the URI user field is:
+ * "1235557890;phone-context=national"
+ *
+ * When truncated the string will become:
+ * "1235557890"
+ */
+#define AST_SIP_USER_OPTIONS_TRUNCATE_CHECK(str)				\
+	do {														\
+		char *__semi = strchr((str), ';');						\
+		if (__semi && ast_sip_get_ignore_uri_user_options()) {	\
+			*__semi = '\0';										\
+		}														\
+	} while (0)
 
 /*!
  * \brief Retrieve the system debug setting (yes|no|host).

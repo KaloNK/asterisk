@@ -1036,6 +1036,8 @@ static char listen_control_restart_key[12];
 static char listen_control_stop_key[12];
 
 /* custom password sounds */
+static char vm_login[80] = "vm-login";
+static char vm_newuser[80] = "vm-newuser";
 static char vm_password[80] = "vm-password";
 static char vm_newpassword[80] = "vm-newpassword";
 static char vm_passchanged[80] = "vm-passchanged";
@@ -3263,7 +3265,8 @@ void mm_lsub(MAILSTREAM * stream, int delim, char *mailbox, long attributes)
 void mm_status(MAILSTREAM * stream, char *mailbox, MAILSTATUS * status)
 {
 	struct ast_str *str;
-	if (!DEBUG_ATLEAST(5) || !(str = ast_str_create(MAX_OBJECT_FIELD))) {
+
+	if (!DEBUG_ATLEAST(5) || !(str = ast_str_create(256))) {
 	    return;
 	}
 
@@ -10405,7 +10408,7 @@ static int vm_instructions(struct ast_channel *chan, struct ast_vm_user *vmu, st
 }
 
 
-static int vm_newuser(struct ast_channel *chan, struct ast_vm_user *vmu, struct vm_state *vms, char *fmtc, signed char record_gain)
+static int vm_newuser_setup(struct ast_channel *chan, struct ast_vm_user *vmu, struct vm_state *vms, char *fmtc, signed char record_gain)
 {
 	int cmd = 0;
 	int duration = 0;
@@ -10995,7 +10998,7 @@ static int vm_authenticate(struct ast_channel *chan, char *mailbox, int mailbox_
 	adsi_begin(chan, &useadsi);
 	if (!skipuser && useadsi)
 		adsi_login(chan);
-	if (!silent && !skipuser && ast_streamfile(chan, "vm-login", ast_channel_language(chan))) {
+	if (!silent && !skipuser && ast_streamfile(chan, vm_login, ast_channel_language(chan))) {
 		ast_log(AST_LOG_WARNING, "Couldn't stream login file\n");
 		return -1;
 	}
@@ -11110,7 +11113,7 @@ static int vm_authenticate(struct ast_channel *chan, char *mailbox, int mailbox_
 		return -1;
 	}
 	if (vmu && !skipuser) {
-		memcpy(res_vmu, vmu, sizeof(struct ast_vm_user));
+		*res_vmu = *vmu;
 	}
 	return 0;
 }
@@ -11126,7 +11129,6 @@ static int play_message_by_id_helper(struct ast_channel *chan,
 	/* Found the msg, so play it back */
 
 	make_file(vms->fn, sizeof(vms->fn), vms->curdir, vms->curmsg);
-	make_file(vms->fn, sizeof(vms->fn), vms->curdir, vms->curmsg);
 
 #ifdef IMAP_STORAGE
 	/*IMAP storage stores any prepended message from a forward
@@ -11136,6 +11138,8 @@ static int play_message_by_id_helper(struct ast_channel *chan,
 		wait_file(chan, vms, vms->introfn);
 	}
 #endif
+	RETRIEVE(vms->curdir,vms->curmsg,vmu->mailbox, vmu->context);
+
 	if ((wait_file(chan, vms, vms->fn)) < 0) {
 		ast_log(AST_LOG_WARNING, "Playback of message %s failed\n", vms->fn);
 	} else {
@@ -11147,7 +11151,7 @@ static int play_message_by_id_helper(struct ast_channel *chan,
 		ast_mutex_unlock(&vms->lock);
 #endif
 	}
-
+	DISPOSE(vms->curdir, vms->curmsg);
 	return 0;
 }
 
@@ -11271,8 +11275,8 @@ static int vm_execmain(struct ast_channel *chan, const char *data)
 	int box;
 	int useadsi = 0;
 	int skipuser = 0;
-	struct vm_state vms;
-	struct ast_vm_user *vmu = NULL, vmus;
+	struct vm_state vms = {{0}};
+	struct ast_vm_user *vmu = NULL, vmus = {{0}};
 	char *context = NULL;
 	int silentexit = 0;
 	struct ast_flags flags = { 0 };
@@ -11285,11 +11289,7 @@ static int vm_execmain(struct ast_channel *chan, const char *data)
 #endif
 
 	/* Add the vm_state to the active list and keep it active */
-	memset(&vms, 0, sizeof(vms));
-
 	vms.lastmsg = -1;
-
-	memset(&vmus, 0, sizeof(vmus));
 
 	ast_test_suite_event_notify("START", "Message: vm_execmain started");
 	if (ast_channel_state(chan) != AST_STATE_UP) {
@@ -11492,9 +11492,9 @@ static int vm_execmain(struct ast_channel *chan, const char *data)
 	/* Check to see if this is a new user */
 	if (!strcasecmp(vmu->mailbox, vmu->password) && 
 		(ast_test_flag(vmu, VM_FORCENAME | VM_FORCEGREET))) {
-		if (ast_play_and_wait(chan, "vm-newuser") == -1)
+		if (ast_play_and_wait(chan, vm_newuser) == -1)
 			ast_log(AST_LOG_WARNING, "Couldn't stream new user file\n");
-		cmd = vm_newuser(chan, vmu, &vms, vmfmts, record_gain);
+		cmd = vm_newuser_setup(chan, vmu, &vms, vmfmts, record_gain);
 		if ((cmd == 't') || (cmd == '#')) {
 			/* Timeout */
 			ast_test_suite_event_notify("TIMEOUT", "Message: response from user timed out");
@@ -12227,6 +12227,7 @@ static int append_mailbox(const char *context, const char *box, const char *data
 	return 0;
 }
 
+#ifdef TEST_FRAMEWORK
 AST_TEST_DEFINE(test_voicemail_vmuser)
 {
 	int res = 0;
@@ -12414,6 +12415,7 @@ AST_TEST_DEFINE(test_voicemail_vmuser)
 	free_user(vmu);
 	return res ? AST_TEST_FAIL : AST_TEST_PASS;
 }
+#endif
 
 static int vm_box_exists(struct ast_channel *chan, const char *data) 
 {
@@ -12447,6 +12449,7 @@ static int vm_box_exists(struct ast_channel *chan, const char *data)
 		context++;
 	}
 
+	memset(&svm, 0, sizeof(svm));
 	vmu = find_user(&svm, context, args.mbox);
 	if (vmu) {
 		pbx_builtin_setvar_helper(chan, "VMBOXEXISTSSTATUS", "SUCCESS");
@@ -12478,6 +12481,7 @@ static int acf_mailbox_exists(struct ast_channel *chan, const char *cmd, char *a
 		ast_log(AST_LOG_WARNING, "MAILBOX_EXISTS is deprecated.  Please use ${VM_INFO(%s,exists)} instead.\n", args);
 	}
 
+	memset(&svm, 0, sizeof(svm));
 	vmu = find_user(&svm, ast_strlen_zero(arg.context) ? "default" : arg.context, arg.mbox);
 	ast_copy_string(buf, vmu ? "1" : "0", len);
 	free_user(vmu);
@@ -12579,7 +12583,7 @@ static struct ast_custom_function vm_info_acf = {
 static int vmauthenticate(struct ast_channel *chan, const char *data)
 {
 	char *s, *user = NULL, *context = NULL, mailbox[AST_MAX_EXTENSION] = "";
-	struct ast_vm_user vmus;
+	struct ast_vm_user vmus = {{0}};
 	char *options = NULL;
 	int silent = 0, skipuser = 0;
 	int res = -1;
@@ -12663,11 +12667,9 @@ static char *complete_voicemail_show_users(const char *line, const char *word, i
 	struct ast_vm_user *vmu;
 	const char *context = "";
 
-	/* 0 - show; 1 - voicemail; 2 - users; 3 - for; 4 - <context> */
+	/* 0 - voicemail; 1 - show; 2 - users; 3 - for; 4 - <context> */
 	if (pos > 4)
 		return NULL;
-	if (pos == 3)
-		return (state == 0) ? ast_strdup("for") : NULL;
 	wordlen = strlen(word);
 	AST_LIST_TRAVERSE(&users, vmu, list) {
 		if (!strncasecmp(word, vmu->context, wordlen)) {
@@ -12690,7 +12692,7 @@ static char *handle_voicemail_show_users(struct ast_cli_entry *e, int cmd, struc
 
 	switch (cmd) {
 	case CLI_INIT:
-		e->command = "voicemail show users";
+		e->command = "voicemail show users [for]";
 		e->usage =
 			"Usage: voicemail show users [for <context>]\n"
 			"       Lists all mailboxes currently set up\n";
@@ -13450,6 +13452,8 @@ static int actual_load_config(int reload, struct ast_config *cfg, struct ast_con
 	int x;
 	unsigned int tmpadsi[4];
 	char secretfn[PATH_MAX] = "";
+	long tps_queue_low;
+	long tps_queue_high;
 
 #ifdef IMAP_STORAGE
 	ast_copy_string(imapparentfolder, "\0", sizeof(imapparentfolder));
@@ -13907,6 +13911,10 @@ static int actual_load_config(int reload, struct ast_config *cfg, struct ast_con
 		}
 
 		/* load password sounds configuration */
+		if ((val = ast_variable_retrieve(cfg, "general", "vm-login")))
+			ast_copy_string(vm_login, val, sizeof(vm_login));
+		if ((val = ast_variable_retrieve(cfg, "general", "vm-newuser")))
+			ast_copy_string(vm_newuser, val, sizeof(vm_newuser));
 		if ((val = ast_variable_retrieve(cfg, "general", "vm-password")))
 			ast_copy_string(vm_password, val, sizeof(vm_password));
 		if ((val = ast_variable_retrieve(cfg, "general", "vm-newpassword")))
@@ -14023,6 +14031,25 @@ static int actual_load_config(int reload, struct ast_config *cfg, struct ast_con
 		}
 		if ((val = ast_variable_retrieve(cfg, "general", "pagerbody"))) {
 			pagerbody = ast_strdup(substitute_escapes(val));
+		}
+
+		tps_queue_high = AST_TASKPROCESSOR_HIGH_WATER_LEVEL;
+		if ((val = ast_variable_retrieve(cfg, "general", "tps_queue_high"))) {
+			if (sscanf(val, "%30ld", &tps_queue_high) != 1 || tps_queue_high <= 0) {
+				ast_log(AST_LOG_WARNING, "Invalid the taskprocessor high water alert trigger level '%s'\n", val);
+				tps_queue_high = AST_TASKPROCESSOR_HIGH_WATER_LEVEL;
+			}
+		}
+		tps_queue_low = -1;
+		if ((val = ast_variable_retrieve(cfg, "general", "tps_queue_low"))) {
+			if (sscanf(val, "%30ld", &tps_queue_low) != 1 ||
+				tps_queue_low < -1 || tps_queue_high < tps_queue_low) {
+				ast_log(AST_LOG_WARNING, "Invalid the taskprocessor low water clear alert level '%s'\n", val);
+				tps_queue_low = -1;
+			}
+		}
+		if (ast_taskprocessor_alert_set_levels(mwi_subscription_tps, tps_queue_low, tps_queue_high)) {
+			ast_log(AST_LOG_WARNING, "Failed to set alert levels for voicemail taskprocessor.\n");
 		}
 
 		/* load mailboxes from users.conf */
@@ -14290,7 +14317,7 @@ AST_TEST_DEFINE(test_voicemail_vmsayname)
 				ast_log(AST_LOG_WARNING, "Failed to make test directory\n");
 				goto exit_vmsayname_test;
 			}
-			snprintf(dir, sizeof(dir), "%s/sounds/beep.gsm", ast_config_AST_VAR_DIR);
+			snprintf(dir, sizeof(dir), "%s/sounds/beep.gsm", ast_config_AST_DATA_DIR);
 			snprintf(dir2, sizeof(dir2), "%s%s/%s/greet.gsm", VM_SPOOL_DIR, TEST_CONTEXT, TEST_EXTENSION);
 			/* we're not going to hear the sound anyway, just use a valid gsm audio file */
 			if ((res = symlink(dir, dir2))) {
@@ -14536,8 +14563,8 @@ AST_TEST_DEFINE(test_voicemail_notify_endl)
 		break;
 	}
 
-	snprintf(attach, sizeof(attach), "%s/sounds/en/tt-weasels", ast_config_AST_VAR_DIR);
-	snprintf(attach2, sizeof(attach2), "%s/sounds/en/tt-somethingwrong", ast_config_AST_VAR_DIR);
+	snprintf(attach, sizeof(attach), "%s/sounds/en/tt-weasels", ast_config_AST_DATA_DIR);
+	snprintf(attach2, sizeof(attach2), "%s/sounds/en/tt-somethingwrong", ast_config_AST_DATA_DIR);
 
 	if (!(vmu = find_user(&vmus, testcontext, testmailbox)) &&
 		!(vmu = find_or_create(testcontext, testmailbox))) {

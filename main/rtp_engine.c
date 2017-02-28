@@ -102,6 +102,9 @@
 					and sending this report.</para>
 				</parameter>
 			</syntax>
+			<see-also>
+				<ref type="managerEvent">RTCPReceived</ref>
+			</see-also>
 		</managerEventInstance>
 	</managerEvent>
 	<managerEvent language="en_US" name="RTCPReceived">
@@ -131,6 +134,9 @@
 				<xi:include xpointer="xpointer(/docs/managerEvent[@name='RTCPSent']/managerEventInstance/syntax/parameter[@name='SentOctets'])" />
 				<xi:include xpointer="xpointer(/docs/managerEvent[@name='RTCPSent']/managerEventInstance/syntax/parameter[contains(@name, 'ReportX')])" />
 			</syntax>
+			<see-also>
+				<ref type="managerEvent">RTCPSent</ref>
+			</see-also>
 		</managerEventInstance>
 	</managerEvent>
  ***/
@@ -139,23 +145,36 @@
 
 ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 
-#include <math.h>
+#include <math.h>                       /* for sqrt, MAX */
+#include <sched.h>                      /* for sched_yield */
+#include <sys/time.h>                   /* for timeval */
+#include <time.h>                       /* for time_t */
 
-#include "asterisk/channel.h"
-#include "asterisk/frame.h"
-#include "asterisk/module.h"
-#include "asterisk/rtp_engine.h"
+#include "asterisk/_private.h"          /* for ast_rtp_engine_init prototype */
+#include "asterisk/astobj2.h"           /* for ao2_cleanup, ao2_ref, etc */
+#include "asterisk/channel.h"           /* for ast_channel_name, etc */
+#include "asterisk/codec.h"             /* for ast_codec_media_type2str, etc */
+#include "asterisk/format.h"            /* for ast_format_cmp, etc */
+#include "asterisk/format_cache.h"      /* for ast_format_adpcm, etc */
+#include "asterisk/format_cap.h"        /* for ast_format_cap_alloc, etc */
+#include "asterisk/json.h"              /* for ast_json_ref, etc */
+#include "asterisk/linkedlists.h"       /* for ast_rtp_engine::<anonymous>, etc */
+#include "asterisk/lock.h"              /* for ast_rwlock_unlock, etc */
+#include "asterisk/logger.h"            /* for ast_log, ast_debug, etc */
 #include "asterisk/manager.h"
-#include "asterisk/options.h"
-#include "asterisk/astobj2.h"
-#include "asterisk/pbx.h"
-#include "asterisk/translate.h"
-#include "asterisk/netsock2.h"
-#include "asterisk/_private.h"
-#include "asterisk/framehook.h"
-#include "asterisk/stasis.h"
-#include "asterisk/json.h"
-#include "asterisk/stasis_channels.h"
+#include "asterisk/module.h"            /* for ast_module_unref, etc */
+#include "asterisk/netsock2.h"          /* for ast_sockaddr_copy, etc */
+#include "asterisk/options.h"           /* for ast_option_rtpptdynamic */
+#include "asterisk/pbx.h"               /* for pbx_builtin_setvar_helper */
+#include "asterisk/res_srtp.h"          /* for ast_srtp_res */
+#include "asterisk/rtp_engine.h"        /* for ast_rtp_codecs, etc */
+#include "asterisk/stasis.h"            /* for stasis_message_data, etc */
+#include "asterisk/stasis_channels.h"   /* for ast_channel_stage_snapshot, etc */
+#include "asterisk/strings.h"           /* for ast_str_append, etc */
+#include "asterisk/time.h"              /* for ast_tvdiff_ms, ast_tvnow */
+#include "asterisk/translate.h"         /* for ast_translate_available_formats */
+#include "asterisk/utils.h"             /* for ast_free, ast_strdup, etc */
+#include "asterisk/vector.h"            /* for AST_VECTOR_GET, etc */
 
 struct ast_srtp_res *res_srtp = NULL;
 struct ast_srtp_policy_res *res_srtp_policy = NULL;
@@ -737,6 +756,7 @@ int ast_rtp_codecs_payloads_set_rtpmap_type_rate(struct ast_rtp_codecs *codecs, 
 		} else {
 			new_type->format = t->payload_type.format;
 		}
+
 		if (new_type->format) {
 			/* SDP parsing automatically increases the reference count */
 			new_type->format = ast_format_parse_sdp_fmtp(new_type->format, "");
@@ -1374,16 +1394,16 @@ void ast_rtp_instance_set_stats_vars(struct ast_channel *chan, struct ast_rtp_in
 {
 	char quality_buf[AST_MAX_USER_FIELD];
 	char *quality;
-	struct ast_channel *bridge = ast_channel_bridge_peer(chan);
+	struct ast_channel *bridge;
 
-	ast_channel_lock(chan);
-	ast_channel_stage_snapshot(chan);
-	ast_channel_unlock(chan);
+	bridge = ast_channel_bridge_peer(chan);
 	if (bridge) {
-		ast_channel_lock(bridge);
+		ast_channel_lock_both(chan, bridge);
 		ast_channel_stage_snapshot(bridge);
-		ast_channel_unlock(bridge);
+	} else {
+		ast_channel_lock(chan);
 	}
+	ast_channel_stage_snapshot(chan);
 
 	quality = ast_rtp_instance_get_quality(instance, AST_RTP_INSTANCE_STAT_FIELD_QUALITY,
 		quality_buf, sizeof(quality_buf));
@@ -1421,11 +1441,9 @@ void ast_rtp_instance_set_stats_vars(struct ast_channel *chan, struct ast_rtp_in
 		}
 	}
 
-	ast_channel_lock(chan);
 	ast_channel_stage_snapshot_done(chan);
 	ast_channel_unlock(chan);
 	if (bridge) {
-		ast_channel_lock(bridge);
 		ast_channel_stage_snapshot_done(bridge);
 		ast_channel_unlock(bridge);
 		ast_channel_unref(bridge);
@@ -1773,7 +1791,11 @@ static void add_static_payload(int map, struct ast_format *format, int rtp_code)
 	int x;
 	struct ast_rtp_payload_type *type;
 
-	ast_assert(map < ARRAY_LEN(static_RTP_PT));
+	/*
+	 * ARRAY_LEN's result is cast to an int so 'map' is not autocast to a size_t,
+	 * which if negative would cause an assertion.
+	 */
+	ast_assert(map < (int)ARRAY_LEN(static_RTP_PT));
 
 	ast_rwlock_wrlock(&static_RTP_PT_lock);
 	if (map < 0) {
@@ -1784,6 +1806,49 @@ static void add_static_payload(int map, struct ast_format *format, int rtp_code)
 				break;
 			}
 		}
+
+		/* http://www.iana.org/assignments/rtp-parameters
+		 * RFC 3551, Section 3: "[...] applications which need to define more
+		 * than 32 dynamic payload types MAY bind codes below 96, in which case
+		 * it is RECOMMENDED that unassigned payload type numbers be used
+		 * first". Updated by RFC 5761, Section 4: "[...] values in the range
+		 * 64-95 MUST NOT be used [to avoid conflicts with RTCP]". Summaries:
+		 * https://tools.ietf.org/html/draft-roach-mmusic-unified-plan#section-3.2.1.2
+		 * https://tools.ietf.org/html/draft-wu-avtcore-dynamic-pt-usage#section-3
+		 */
+		if (map < 0) {
+			for (x = MAX(ast_option_rtpptdynamic, 35); x <= AST_RTP_PT_LAST_REASSIGN; ++x) {
+				if (!static_RTP_PT[x]) {
+					map = x;
+					break;
+				}
+			}
+		}
+		/* Yet, reusing mappings below 35 is not supported in Asterisk because
+		 * when Compact Headers are activated, no rtpmap is send for those below
+		 * 35. If you want to use 35 and below
+		 * A) do not use Compact Headers,
+		 * B) remove that code in chan_sip/res_pjsip, or
+		 * C) add a flag that this RTP Payload Type got reassigned dynamically
+		 *    and requires a rtpmap even with Compact Headers enabled.
+		 */
+		if (map < 0) {
+			for (x = MAX(ast_option_rtpptdynamic, 20); x < 35; ++x) {
+				if (!static_RTP_PT[x]) {
+					map = x;
+					break;
+				}
+			}
+		}
+		if (map < 0) {
+			for (x = MAX(ast_option_rtpptdynamic, 0); x < 20; ++x) {
+				if (!static_RTP_PT[x]) {
+					map = x;
+					break;
+				}
+			}
+		}
+
 		if (map < 0) {
 			if (format) {
 				ast_log(LOG_WARNING, "No Dynamic RTP mapping available for format %s\n",
@@ -1815,14 +1880,10 @@ static void add_static_payload(int map, struct ast_format *format, int rtp_code)
 
 int ast_rtp_engine_load_format(struct ast_format *format)
 {
-	char *codec_name = ast_strdupa(ast_format_get_name(format));
-
-	codec_name = ast_str_to_upper(codec_name);
-
 	set_next_mime_type(format,
 		0,
 		ast_codec_media_type2str(ast_format_get_type(format)),
-		codec_name,
+		ast_format_get_codec_name(format),
 		ast_format_get_sample_rate(format));
 	add_static_payload(-1, format, 0);
 
@@ -1924,7 +1985,7 @@ static struct ast_manager_event_blob *rtcp_report_to_ami(struct stasis_message *
 	if (type == AST_RTP_RTCP_SR) {
 		ast_str_append(&packet_string, 0, "SentNTP: %lu.%06lu\r\n",
 			(unsigned long)payload->report->sender_information.ntp_timestamp.tv_sec,
-			(unsigned long)payload->report->sender_information.ntp_timestamp.tv_usec * 4096);
+			(unsigned long)payload->report->sender_information.ntp_timestamp.tv_usec);
 		ast_str_append(&packet_string, 0, "SentRTP: %u\r\n",
 				payload->report->sender_information.rtp_timestamp);
 		ast_str_append(&packet_string, 0, "SentPackets: %u\r\n",

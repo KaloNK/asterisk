@@ -613,7 +613,7 @@ static struct ast_module *load_dynamic_module(const char *resource_in, unsigned 
 
 #endif
 
-void ast_module_shutdown(void)
+int modules_shutdown(void)
 {
 	struct ast_module *mod;
 	int somethingchanged = 1, final = 0;
@@ -663,7 +663,10 @@ void ast_module_shutdown(void)
 		}
 	} while (somethingchanged && !final);
 
+	final = AST_DLLIST_EMPTY(&module_list);
 	AST_DLLIST_UNLOCK(&module_list);
+
+	return !final;
 }
 
 int ast_unload_resource(const char *resource_name, enum ast_module_unload_mode force)
@@ -897,6 +900,7 @@ enum ast_module_reload_result ast_module_reload(const char *name)
 		res = AST_MODULE_RELOAD_IN_PROGRESS;
 		goto module_reload_exit;
 	}
+	ast_sd_notify("RELOAD=1");
 	ast_lastreloadtime = ast_tvnow();
 
 	if (ast_opt_lock_confdir) {
@@ -910,9 +914,8 @@ enum ast_module_reload_result ast_module_reload(const char *name)
 		}
 		if (res != AST_LOCK_SUCCESS) {
 			ast_log(AST_LOG_WARNING, "Cannot grab lock on %s\n", ast_config_AST_CONFIG_DIR);
-			ast_mutex_unlock(&reloadlock);
 			res = AST_MODULE_RELOAD_ERROR;
-			goto module_reload_exit;
+			goto module_reload_done;
 		}
 	}
 
@@ -929,8 +932,7 @@ enum ast_module_reload_result ast_module_reload(const char *name)
 		if (ast_opt_lock_confdir) {
 			ast_unlock_path(ast_config_AST_CONFIG_DIR);
 		}
-		ast_mutex_unlock(&reloadlock);
-		goto module_reload_exit;
+		goto module_reload_done;
 	}
 
 	AST_DLLIST_LOCK(&module_list);
@@ -972,7 +974,9 @@ enum ast_module_reload_result ast_module_reload(const char *name)
 	if (ast_opt_lock_confdir) {
 		ast_unlock_path(ast_config_AST_CONFIG_DIR);
 	}
+module_reload_done:
 	ast_mutex_unlock(&reloadlock);
+	ast_sd_notify("READY=1");
 
 module_reload_exit:
 	publish_reload_message(name, res);

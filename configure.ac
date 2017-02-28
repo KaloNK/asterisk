@@ -135,6 +135,27 @@ if test ${prefix} = ${ac_default_prefix} || test ${prefix} = 'NONE'; then
      fi
 fi
 
+#
+# The following code for detecting lib64 was taken from Fedora's
+# /usr/share/config.site with a modification to check that the
+# /usr/lib64 directory actually exists.  This prevents libdir from
+# being set to /usr/lib64 on 64-bit systems that still use /usr/lib.
+#
+if test "$prefix" = /usr ||\
+     { test "$prefix" = NONE && test "$ac_default_prefix" = /usr ; }
+then
+     for i in x86_64 ppc64 s390x aarch64; do
+        if test $host_cpu = $i; then
+           if test "$libdir" = '${exec_prefix}/lib' &&\
+              { test -d "${exec_prefix}/lib64" || test -d "${ac_default_prefix}/lib64" ; } ; then
+              libdir='${exec_prefix}/lib64'
+              AC_MSG_NOTICE([ Setting libdir=${libdir} ])
+           fi
+           break
+        fi
+     done
+fi
+
 BUILD_PLATFORM=${build}
 BUILD_CPU=${build_cpu}
 BUILD_VENDOR=${build_vendor}
@@ -178,7 +199,7 @@ case "${host_os}" in
      OSARCH=cygwin
      PBX_WINARCH=1
      ;;
-     linux-gnueabi* |  linux-gnuspe)
+     linux-gnu*)
      OSARCH=linux-gnu
      ;;
      kfreebsd*-gnu)
@@ -264,6 +285,7 @@ AC_SUBST(GNU_LD)
 
 AC_PATH_PROG([BISON], [bison], :)
 AC_PATH_PROG([CMP], [cmp], :)
+AC_PATH_PROG([CAT], [cat], :)
 AC_PATH_PROG([FLEX], [flex], :)
 AC_PATH_PROG([GREP], [grep], :)
 AC_PATH_PROG([PYTHON], [python], :)
@@ -282,18 +304,35 @@ AC_PATH_PROG([CATDVI], [catdvi], :)
 AC_PATH_PROG([KPATHSEA], [kpsewhich], :)
 AC_PATH_PROG([XMLLINT], [xmllint], :)
 AC_PATH_PROG([XMLSTARLET], [xmlstarlet], :)
+AC_PATH_PROG([BASH], [bash], :)
 AC_PATH_PROG([GIT], [git], :)
 AC_PATH_PROG([ALEMBIC], [alembic], :)
+AC_PATH_PROG([BZIP2], [bzip2], :)
+AC_PATH_PROG([TAR], [tar], :)
+AC_PATH_PROG([PATCH], [patch], :)
+AC_PATH_PROG([SED], [sed], :)
+AC_PATH_PROG([NM], [nm], :)
+
 if test "${WGET}" != ":" ; then
   DOWNLOAD=${WGET}
+  DOWNLOAD_TO_STDOUT="${WGET} -O-"
+  DOWNLOAD_TIMEOUT='--timeout=$1'
 else if test "${CURL}" != ":" ; then
   DOWNLOAD="${CURL} -O --progress-bar -w \"%{url_effective}\n\""
+  DOWNLOAD_TO_STDOUT="${CURL} -L --progress-bar"
+  DOWNLOAD_TIMEOUT='--max-time $(or $2,$1)'
 else
   AC_PATH_PROG([FETCH], [fetch], [:])
   DOWNLOAD=${FETCH}
+  DOWNLOAD_TO_STDOUT="${FETCH} -o-"
+  DOWNLOAD_TIMEOUT='--timeout=$(or $2,$1)'
 fi
 fi
+
 AC_SUBST(DOWNLOAD)
+AC_SUBST(DOWNLOAD_TO_STDOUT)
+AC_SUBST(DOWNLOAD_TIMEOUT)
+
 AC_PATH_PROG([LDCONFIG], [ldconfig], :)
 AC_PATH_PROG([SHA1SUM], [sha1sum], $ac_aux_dir/build_tools/sha1sum-sh)
 AC_PATH_PROG([OPENSSL], [openssl], :)
@@ -341,6 +380,20 @@ else
 fi
 AC_SUBST(PBX_FLEX)
 
+if test "x${XMLSTARLET}" = "x:" ; then
+	PBX_XMLSTARLET=0
+else
+	PBX_XMLSTARLET=1
+fi
+AC_SUBST(PBX_XMLSTARLET)
+
+if test "x${BASH}" = "x:" ; then
+	PBX_BASH=0
+else
+	PBX_BASH=1
+fi
+AC_SUBST(PBX_BASH)
+
 AC_CHECK_TOOL([SOXMIX], [soxmix], [:])
 if test "${SOXMIX}" != ":" ; then
 	AC_DEFINE([HAVE_SOXMIX], 1, [Define to 1 if your system has soxmix application.])
@@ -352,7 +405,7 @@ if test "${MD5}" = "digest" ; then
    MD5="${MD5} -a md5"
 fi
 
-ACX_PTHREAD
+AX_PTHREAD
 
 AC_LANG(C)
 
@@ -376,6 +429,9 @@ AC_SUBST(NOISY_BUILD)
 AC_SUBST(AST_DEVMODE)
 AC_SUBST(AST_DEVMODE_STRICT)
 
+AST_OPTION_ONLY([sounds-cache], [SOUNDS_CACHE_DIR], [cached sound tarfiles], [])
+AST_OPTION_ONLY([externals-cache], [EXTERNALS_CACHE_DIR], [cached external module tarfiles], [])
+
 AST_CODE_COVERAGE=no
 AC_ARG_ENABLE([coverage],
 	[AS_HELP_STRING([--enable-coverage],
@@ -389,6 +445,19 @@ AC_SUBST(AST_CODE_COVERAGE)
 
 AST_CHECK_RAII()
 AST_CHECK_STRSEP_ARRAY_BOUNDS()
+
+PJPROJECT_BUNDLED=no
+AH_TEMPLATE(m4_bpatsubst([[HAVE_PJPROJECT_BUNDLED]], [(.*)]), [Define to 1 when using the bundled pjproject.])
+
+AC_ARG_WITH([pjproject-bundled],
+	[AS_HELP_STRING([--with-pjproject-bundled],
+		[Use bundled pjproject libraries])],
+	[case "${withval}" in
+	      n|no) PJPROJECT_BUNDLED=no ;;
+	      *) PJPROJECT_BUNDLED=yes ;;
+	esac])
+
+THIRD_PARTY_CONFIGURE()
 
 # AST_EXT_LIB_SETUP is used to tell configure to handle variables for
 # various packages.
@@ -415,7 +484,6 @@ AST_EXT_LIB_SETUP([CRYPT], [password and data encryption], [crypt])
 AST_EXT_LIB_SETUP([CRYPTO], [OpenSSL Cryptography], [crypto])
 AST_EXT_LIB_SETUP_OPTIONAL([OPENSSL_SRTP], [OpenSSL SRTP Extension Support], [CRYPTO], [crypto])
 AST_EXT_LIB_SETUP_OPTIONAL([OPENSSL_EC], [OpenSSL Elliptic Curve Support], [CRYPTO], [crypto])
-AST_EXT_LIB_SETUP_OPTIONAL([OPENSSL_ECDH_AUTO], [OpenSSL Auto ECDH Support], [CRYPTO], [crypto])
 AST_EXT_LIB_SETUP([DAHDI], [DAHDI], [dahdi])
 AST_EXT_LIB_SETUP([FFMPEG], [Ffmpeg and avcodec], [avcodec])
 AST_EXT_LIB_SETUP([GSM], [External GSM], [gsm], [, use 'internal' GSM otherwise])
@@ -438,6 +506,7 @@ AST_EXT_LIB_SETUP([KQUEUE], [kqueue support], [kqueue])
 AST_EXT_LIB_SETUP([LDAP], [OpenLDAP], [ldap])
 AST_LIBCURL_CHECK_CONFIG([], [7.10.1])
 AST_EXT_LIB_SETUP([LIBEDIT], [NetBSD Editline library], [libedit], [, use 'internal' Editline otherwise])
+AST_EXT_LIB_SETUP_OPTIONAL([LIBEDIT_IS_UNICODE], [Libedit compiled for unicode], [LIBEDIT], [libedit])
 AST_EXT_LIB_SETUP([LIBXML2], [LibXML2], [libxml2])
 AST_EXT_LIB_SETUP([LIBXSLT], [LibXSLT], [libxslt])
 AST_EXT_LIB_SETUP_OPTIONAL([LIBXSLT_CLEANUP], [LibXSLT Library Cleanup Function], [LIBXSLT], [libxslt])
@@ -458,28 +527,8 @@ AST_EXT_LIB_SETUP([OSPTK], [OSP Toolkit], [osptk])
 AST_EXT_LIB_SETUP([OSS], [Open Sound System], [oss])
 AST_EXT_LIB_SETUP([PGSQL], [PostgreSQL], [postgres])
 
+if test "x${PBX_PJPROJECT}" != "x1" ; then
 AST_EXT_LIB_SETUP([PJPROJECT], [PJPROJECT], [pjproject])
-PJPROJECT_BUNDLED=no
-AH_TEMPLATE(m4_bpatsubst([[HAVE_PJPROJECT_BUNDLED]], [(.*)]), [Define to 1 when using the bundled pjproject.])
-
-AC_ARG_WITH([pjproject-bundled],
-	[AS_HELP_STRING([--with-pjproject-bundled],
-		[Use bundled pjproject libraries])],
-	[case "${enableval}" in
-	      n|no) PJPROJECT_BUNDLED=no ;;
-	      *) PJPROJECT_BUNDLED=yes ;;
-	esac])
-AC_SUBST(PJPROJECT_BUNDLED)
-
-if test "$PJPROJECT_BUNDLED" = "yes" -a "${ac_mandatory_list#*PJPROJECT*}" != "$ac_mandatory_list" ; then
-   AC_MSG_ERROR(--with-pjproject and --with-pjproject-bundled can't both be specified)
-fi
-
-if test "$PJPROJECT_BUNDLED" = "yes" ; then
-   ac_mandatory_list="$ac_mandatory_list PJPROJECT"
-   PJPROJECT_DIR="${ac_top_build_prefix}third-party/pjproject"
-fi
-
 AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_DLG_CREATE_UAS_AND_INC_LOCK], [PJSIP Dialog Create UAS with Incremented Lock], [PJPROJECT], [pjsip])
 AST_EXT_LIB_SETUP_OPTIONAL([PJ_TRANSACTION_GRP_LOCK], [PJSIP Transaction Group Lock Support], [PJPROJECT], [pjsip])
 AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_REPLACE_MEDIA_STREAM], [PJSIP Media Stream Replacement Support], [PJPROJECT], [pjsip])
@@ -487,6 +536,11 @@ AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_GET_DEST_INFO], [pjsip_get_dest_info support],
 AST_EXT_LIB_SETUP_OPTIONAL([PJ_SSL_CERT_LOAD_FROM_FILES2], [pj_ssl_cert_load_from_files2 support], [PJPROJECT], [pjsip])
 AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_EXTERNAL_RESOLVER], [PJSIP External Resolver Support], [PJPROJECT], [pjsip])
 AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_TLS_TRANSPORT_PROTO], [PJSIP TLS Transport proto field support], [PJPROJECT], [pjsip])
+AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_EVSUB_GRP_LOCK], [PJSIP EVSUB Group Lock support], [PJPROJECT], [pjsip])
+AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_INV_SESSION_REF], [PJSIP INVITE Session Reference Count support], [PJPROJECT], [pjsip])
+AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_AUTH_CLT_DEINIT], [pjsip_auth_clt_deinit support], [PJPROJECT], [pjsip])
+AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_EVSUB_SET_UAS_TIMEOUT], [PJSIP EVSUB Set UAS Timeout support], [PJPROJECT], [pjsip])
+fi
 
 AST_EXT_LIB_SETUP([POPT], [popt], [popt])
 AST_EXT_LIB_SETUP([PORTAUDIO], [PortAudio], [portaudio])
@@ -520,7 +574,6 @@ AST_EXT_LIB_SETUP([RADIUS], [Radius Client], [radius])
 AST_EXT_LIB_SETUP([RESAMPLE], [LIBRESAMPLE], [resample])
 AST_EXT_LIB_SETUP([SDL], [Sdl], [sdl])
 AST_EXT_LIB_SETUP([SDL_IMAGE], [Sdl Image], [SDL_image])
-AST_OPTION_ONLY([sounds-cache], [SOUNDS_CACHE_DIR], [cached sound tarfiles], [])
 AST_EXT_LIB_SETUP([SPANDSP], [SPANDSP], [spandsp])
 AST_EXT_LIB_SETUP([SS7], [ISDN SS7], [ss7])
 AST_EXT_LIB_SETUP([SPEEX], [Speex], [speex])
@@ -532,6 +585,7 @@ AST_EXT_LIB_SETUP([SQLITE3], [SQLite], [sqlite3])
 AST_EXT_LIB_SETUP([SRTP], [Secure RTP], [srtp])
 AST_EXT_LIB_SETUP_OPTIONAL([SRTP_SHUTDOWN], [SRTP Library Shutdown Function], [SRTP], [srtp])
 AST_EXT_LIB_SETUP([OPENSSL], [OpenSSL Secure Sockets Layer], [ssl])
+AST_EXT_LIB_SETUP_OPTIONAL([RT], [Realtime functions], [rt])
 AST_EXT_LIB_SETUP([SUPPSERV], [mISDN Supplemental Services], [suppserv])
 AST_EXT_LIB_SETUP([FREETDS], [FreeTDS], [tds])
 AST_EXT_LIB_SETUP([TERMCAP], [Termcap], [termcap])
@@ -602,6 +656,9 @@ AST_EXT_LIB_CHECK([JANSSON], [jansson], [json_dumps], [jansson.h])
 if test "x$JANSSON_LIB" == "x"; then
   AC_MSG_ERROR([*** JSON support not found (this typically means the libjansson development package is missing)])
 fi
+
+# See if clock_gettime is in librt
+AST_EXT_LIB_CHECK([RT], [rt], [clock_gettime])
 
 AST_EXT_TOOL_CHECK([LIBXML2], [xml2-config], , ,
         [#include <libxml/tree.h>
@@ -682,8 +739,6 @@ AC_PROG_GCC_TRADITIONAL
 AC_FUNC_MEMCMP
 AC_FUNC_MMAP
 AC_FUNC_SELECT_ARGTYPES
-AC_FUNC_SETVBUF_REVERSED
-AC_TYPE_SIGNAL
 AC_FUNC_STAT
 AC_FUNC_STRCOLL
 AC_FUNC_STRFTIME
@@ -1074,6 +1129,7 @@ AST_GCC_ATTRIBUTE(warn_unused_result)
 AST_GCC_ATTRIBUTE(may_alias)
 AST_GCC_ATTRIBUTE(constructor)
 AST_GCC_ATTRIBUTE(destructor)
+AST_GCC_ATTRIBUTE(noreturn,noreturn)
 
 AC_MSG_CHECKING(for -fsanitize=address support)
 saved_sanitize_CFLAGS="${CFLAGS}"
@@ -1084,7 +1140,7 @@ AC_COMPILE_IFELSE(
 	[AC_LANG_PROGRAM([], [int x = 1;])],
 	AC_MSG_RESULT(yes)
 	[AST_ADDRESS_SANITIZER=1],
-	[AST_ADDRESS_SANITIZER=]
+	[AST_ADDRESS_SANITIZER=0]
 	AC_MSG_RESULT(no)
 )
 CFLAGS="${saved_sanitize_CFLAGS}"
@@ -1100,7 +1156,7 @@ AC_COMPILE_IFELSE(
 	[AC_LANG_PROGRAM([], [int x = 1;])],
 	AC_MSG_RESULT(yes)
 	[AST_THREAD_SANITIZER=1],
-	[AST_THREAD_SANITIZER=]
+	[AST_THREAD_SANITIZER=0]
 	AC_MSG_RESULT(no)
 )
 CFLAGS="${saved_sanitize_CFLAGS}"
@@ -1214,23 +1270,18 @@ AC_SUBST(AST_SHADOW_WARNINGS)
 
 AC_MSG_CHECKING(for -march=native support)
 if $(${CC} -march=native -S -o /dev/null -xc /dev/null > /dev/null 2>&1); then
-	if test "${CONFIG_CFLAGS}" = ""; then
-		AC_MSG_RESULT(yes)
-		AST_NATIVE_ARCH=1
-	else
-		AC_MSG_RESULT(user CFLAGS present)
-		AST_NATIVE_ARCH=
-	fi
+	AC_MSG_RESULT(yes)
+	AST_NATIVE_ARCH=1
 else
 	AC_MSG_RESULT(no)
-	AST_NATIVE_ARCH=
+	AST_NATIVE_ARCH=0
 fi
 AC_SUBST(AST_NATIVE_ARCH)
 
 
 dnl Check to see if rpath should be set in LDFLAGS
 AC_ARG_ENABLE(rpath,
-	[AC_HELP_STRING([--disable-rpath],
+	[AS_HELP_STRING([--disable-rpath],
 			[Disables rpath linker option checking])],
 	[case "${enableval}" in
 		y|ye|yes) check_rpath=yes ;;
@@ -1502,11 +1553,14 @@ if test "${USE_LIBEDIT}" != "no"; then
    if test "${LIBEDIT_SYSTEM}" = "yes"; then
       AST_PKG_CONFIG_CHECK(LIBEDIT, libedit)
       if test "$PBX_LIBEDIT" = "1"; then
-	 LIBEDIT_INTERNAL="no"
+      LIBEDIT_INTERNAL="no"
       fi
    fi
    if test "${LIBEDIT_INTERNAL}" = "yes"; then
       PBX_LIBEDIT=1
+      LIBEDIT_IS_UNICODE=no
+   else
+      AST_C_COMPILE_CHECK([LIBEDIT_IS_UNICODE], [el_rfunc_t *callback;], [histedit.h], [], [Testing for libedit unicode support])
    fi
 fi
 
@@ -2167,9 +2221,7 @@ if test "${PG_CONFIG}" != No; then
 fi
 
 if test "$USE_PJPROJECT" != "no" ; then
-   if test "$PJPROJECT_BUNDLED" = "yes" ; then
-       PJPROJECT_CONFIGURE([$PJPROJECT_DIR])
-   else
+   if test "$PJPROJECT_BUNDLED" = "no" ; then
       AST_PKG_CONFIG_CHECK([PJPROJECT], [libpjproject])
 
       AST_EXT_LIB_CHECK([PJSIP_DLG_CREATE_UAS_AND_INC_LOCK], [pjsip], [pjsip_dlg_create_uas_and_inc_lock], [pjsip.h], [$PJPROJECT_LIBS], [$PJPROJECT_CFLAGS])
@@ -2184,7 +2236,7 @@ if test "$USE_PJPROJECT" != "no" ; then
       CPPFLAGS="${saved_cppflags}"
 
       AST_EXT_LIB_CHECK([PJSIP_GET_DEST_INFO], [pjsip], [pjsip_get_dest_info], [pjsip.h], [$PJPROJECT_LIB], [$PJPROJECT_CFLAGS])
-      AST_EXT_LIB_CHECK([PJ_SSL_CERT_LOAD_FROM_FILES2], [pj], [pjsip/include/pjsip/sip_util.h], [pjlib.h], [$PJPROJECT_LIB], [$PJPROJECT_CFLAGS])
+      AST_EXT_LIB_CHECK([PJ_SSL_CERT_LOAD_FROM_FILES2], [pj], [pj_ssl_cert_load_from_files2], [pjlib.h], [$PJPROJECT_LIB], [$PJPROJECT_CFLAGS])
       AST_EXT_LIB_CHECK([PJSIP_EXTERNAL_RESOLVER], [pjsip], [pjsip_endpt_set_ext_resolver], [pjsip.h], [$PJPROJECT_LIBS], [$PJPROJECT_CFLAGS])
 
       saved_cppflags="${CPPFLAGS}"
@@ -2194,6 +2246,11 @@ if test "$USE_PJPROJECT" != "no" ; then
       AST_C_COMPILE_CHECK([PJSIP_TLS_TRANSPORT_PROTO], [struct pjsip_tls_setting setting; int proto; proto = setting.proto;], [pjsip.h])
       LIBS="${saved_libs}"
       CPPFLAGS="${saved_cppflags}"
+
+      AST_EXT_LIB_CHECK([PJSIP_EVSUB_GRP_LOCK], [pjsip], [pjsip_evsub_add_ref], [pjsip.h], [$PJPROJECT_LIB], [$PJPROJECT_CFLAGS])
+      AST_EXT_LIB_CHECK([PJSIP_INV_SESSION_REF], [pjsip], [pjsip_inv_add_ref], [pjsip.h], [$PJPROJECT_LIB], [$PJPROJECT_CFLAGS])
+      AST_EXT_LIB_CHECK([PJSIP_AUTH_CLT_DEINIT], [pjsip], [pjsip_auth_clt_deinit], [pjsip.h], [$PJPROJECT_LIB], [$PJPROJECT_CFLAGS])
+      AST_EXT_LIB_CHECK([PJSIP_EVSUB_SET_UAS_TIMEOUT], [pjsip], [pjsip_evsub_set_uas_timeout], [pjsip.h], [$PJPROJECT_LIB], [$PJPROJECT_CFLAGS])
    fi
 fi
 
@@ -2397,11 +2454,6 @@ fi
 
 if test "$PBX_OPENSSL" = "1";
 then
-        AST_C_DECLARE_CHECK([OPENSSL_ECDH_AUTO], [SSL_CTX_set_ecdh_auto], [openssl/ssl.h])
-fi
-
-if test "$PBX_OPENSSL" = "1";
-then
         AST_C_DEFINE_CHECK([SSL_OP_NO_TLSV1_1], [SSL_OP_NO_TLSv1_1], [openssl/ssl.h])
         AST_C_DEFINE_CHECK([SSL_OP_NO_TLSV1_2], [SSL_OP_NO_TLSv1_2], [openssl/ssl.h])
 fi
@@ -2591,6 +2643,11 @@ fi
 AC_SUBST([GENERIC_ODBC_LIB])
 AC_SUBST([GENERIC_ODBC_INCLUDE])
 AC_SUBST([PBX_GENERIC_ODBC])
+
+AC_SUBST([PBX_SYSTEMD])
+AC_SUBST([SYSTEMD_LIB])
+AC_SUBST([SYSTEMD_INCLUDE])
+AST_PKG_CONFIG_CHECK([SYSTEMD], [libsystemd])
 
 PBX_SYSLOG=0
 

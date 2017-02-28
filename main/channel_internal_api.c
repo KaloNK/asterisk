@@ -1248,14 +1248,9 @@ int ast_channel_alert_write(struct ast_channel *chan)
 	return write(chan->alertpipe[1], &blah, sizeof(blah)) != sizeof(blah);
 }
 
-ast_alert_status_t ast_channel_internal_alert_read(struct ast_channel *chan)
+static int channel_internal_alert_check_nonblock(struct ast_channel *chan)
 {
 	int flags;
-	char blah;
-
-	if (!ast_channel_internal_alert_readable(chan)) {
-		return AST_ALERT_NOT_READABLE;
-	}
 
 	flags = fcntl(chan->alertpipe[0], F_GETFL);
 	/* For some odd reason, the alertpipe occasionally loses nonblocking status,
@@ -1264,9 +1259,62 @@ ast_alert_status_t ast_channel_internal_alert_read(struct ast_channel *chan)
 		ast_log(LOG_ERROR, "Alertpipe on channel %s lost O_NONBLOCK?!!\n", ast_channel_name(chan));
 		if (fcntl(chan->alertpipe[0], F_SETFL, flags | O_NONBLOCK) < 0) {
 			ast_log(LOG_WARNING, "Unable to set alertpipe nonblocking! (%d: %s)\n", errno, strerror(errno));
-			return AST_ALERT_READ_FATAL;
+			return -1;
 		}
 	}
+	return 0;
+}
+
+ast_alert_status_t ast_channel_internal_alert_flush(struct ast_channel *chan)
+{
+	int bytes_read;
+	char blah[100];
+
+	if (!ast_channel_internal_alert_readable(chan)) {
+		return AST_ALERT_NOT_READABLE;
+	}
+	if (channel_internal_alert_check_nonblock(chan)) {
+		return AST_ALERT_READ_FATAL;
+	}
+
+	/* Read the alertpipe until it is exhausted. */
+	for (;;) {
+		bytes_read = read(chan->alertpipe[0], blah, sizeof(blah));
+		if (bytes_read < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				/*
+				 * Would block so nothing left to read.
+				 * This is the normal loop exit.
+				 */
+				break;
+			}
+			ast_log(LOG_WARNING, "read() failed flushing alertpipe: %s\n",
+				strerror(errno));
+			return AST_ALERT_READ_FAIL;
+		}
+		if (!bytes_read) {
+			/* Read nothing so we are done */
+			break;
+		}
+	}
+
+	return AST_ALERT_READ_SUCCESS;
+}
+
+ast_alert_status_t ast_channel_internal_alert_read(struct ast_channel *chan)
+{
+	char blah;
+
+	if (!ast_channel_internal_alert_readable(chan)) {
+		return AST_ALERT_NOT_READABLE;
+	}
+	if (channel_internal_alert_check_nonblock(chan)) {
+		return AST_ALERT_READ_FATAL;
+	}
+
 	if (read(chan->alertpipe[0], &blah, sizeof(blah)) < 0) {
 		if (errno != EINTR && errno != EAGAIN) {
 			ast_log(LOG_WARNING, "read() failed: %s\n", strerror(errno));
@@ -1484,6 +1532,7 @@ static int pvt_cause_cmp_fn(void *obj, void *vstr, int flags)
 struct ast_channel *__ast_channel_internal_alloc(void (*destructor)(void *obj), const struct ast_assigned_ids *assignedids, const struct ast_channel *requestor, const char *file, int line, const char *function)
 {
 	struct ast_channel *tmp;
+
 #if defined(REF_DEBUG)
 	tmp = __ao2_alloc_debug(sizeof(*tmp), destructor,
 		AO2_ALLOC_OPT_LOCK_MUTEX, "", file, line, function, 1);
@@ -1674,4 +1723,26 @@ int ast_channel_internal_setup_topics(struct ast_channel *chan)
 	}
 
 	return 0;
+}
+
+AST_THREADSTORAGE(channel_errno);
+
+void ast_channel_internal_errno_set(enum ast_channel_error error)
+{
+	enum ast_channel_error *error_code = ast_threadstorage_get(&channel_errno, sizeof(*error_code));
+	if (!error_code) {
+		return;
+	}
+
+	*error_code = error;
+}
+
+enum ast_channel_error ast_channel_internal_errno(void)
+{
+	enum ast_channel_error *error_code = ast_threadstorage_get(&channel_errno, sizeof(*error_code));
+	if (!error_code) {
+		return AST_CHANNEL_ERROR_UNKNOWN;
+	}
+
+	return *error_code;
 }

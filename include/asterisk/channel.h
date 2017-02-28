@@ -2006,6 +2006,21 @@ int ast_prod(struct ast_channel *chan);
 int ast_set_read_format_path(struct ast_channel *chan, struct ast_format *raw_format, struct ast_format *core_format);
 
 /*!
+ * \brief Set specific write path on channel.
+ * \since 13.13.0
+ *
+ * \param chan Channel to setup write path.
+ * \param core_format What the core wants to write.
+ * \param raw_format Raw write format.
+ *
+ * \pre chan is locked
+ *
+ * \retval 0 on success.
+ * \retval -1 on error.
+ */
+int ast_set_write_format_path(struct ast_channel *chan, struct ast_format *core_format, struct ast_format *raw_format);
+
+/*!
  * \brief Sets read format on channel chan from capabilities
  * Set read format for channel to whichever component of "format" is best.
  * \param chan channel to change
@@ -2572,7 +2587,11 @@ static inline int ast_fdisset(struct pollfd *pfds, int fd, int maximum, int *sta
 	return 0;
 }
 
-/*! \brief Retrieves the current T38 state of a channel */
+/*!
+ * \brief Retrieves the current T38 state of a channel
+ *
+ * \note Absolutely _NO_ channel locks should be held before calling this function.
+ */
 static inline enum ast_t38_state ast_channel_get_t38_state(struct ast_channel *chan)
 {
 	enum ast_t38_state state = T38_STATE_UNAVAILABLE;
@@ -4213,6 +4232,7 @@ typedef enum {
 } ast_alert_status_t;
 int ast_channel_alert_write(struct ast_channel *chan);
 int ast_channel_alert_writable(struct ast_channel *chan);
+ast_alert_status_t ast_channel_internal_alert_flush(struct ast_channel *chan);
 ast_alert_status_t ast_channel_internal_alert_read(struct ast_channel *chan);
 int ast_channel_internal_alert_readable(struct ast_channel *chan);
 void ast_channel_internal_alertpipe_clear(struct ast_channel *chan);
@@ -4667,5 +4687,34 @@ int ast_channel_feature_hooks_append(struct ast_channel *chan, struct ast_bridge
  * \retval -1 on failure
  */
 int ast_channel_feature_hooks_replace(struct ast_channel *chan, struct ast_bridge_features *features);
+
+enum ast_channel_error {
+	/* Unable to determine what error occurred. */
+	AST_CHANNEL_ERROR_UNKNOWN,
+	/* Channel with this ID already exists */
+	AST_CHANNEL_ERROR_ID_EXISTS,
+};
+
+/*!
+ * \brief Get error code for latest channel operation.
+ */
+enum ast_channel_error ast_channel_errno(void);
+
+/*!
+ * \brief Am I currently running an intercept dialplan routine.
+ * \since 13.14.0
+ *
+ * \details
+ * A dialplan intercept routine is equivalent to an interrupt
+ * routine.  As such, the routine must be done quickly and you
+ * do not have access to the media stream.  These restrictions
+ * are necessary because the media stream is the responsibility
+ * of some other code and interfering with or delaying that
+ * processing is bad.
+ *
+ * \retval 0 Not in an intercept routine.
+ * \retval 1 In an intercept routine.
+ */
+int ast_channel_get_intercept_mode(void);
 
 #endif /* _ASTERISK_CHANNEL_H */

@@ -44,6 +44,7 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 #include "asterisk/netsock2.h"
 #include "asterisk/channel.h"
 #include "asterisk/acl.h"
+#include "asterisk/utils.h"
 
 #include "asterisk/res_pjsip.h"
 #include "asterisk/res_pjsip_session.h"
@@ -51,11 +52,8 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 /*! \brief The number of seconds after receiving a T.38 re-invite before automatically rejecting it */
 #define T38_AUTOMATIC_REJECTION_SECONDS 5
 
-/*! \brief Address for IPv4 UDPTL */
-static struct ast_sockaddr address_ipv4;
-
-/*! \brief Address for IPv6 UDPTL */
-static struct ast_sockaddr address_ipv6;
+/*! \brief Address for UDPTL */
+static struct ast_sockaddr address;
 
 /*! \brief T.38 state information */
 struct t38_state {
@@ -259,8 +257,7 @@ static int t38_initialize_session(struct ast_sip_session *session, struct ast_si
 		return 0;
 	}
 
-	if (!(session_media->udptl = ast_udptl_new_with_bindaddr(NULL, NULL, 0,
-		session->endpoint->media.t38.ipv6 ? &address_ipv6 : &address_ipv4))) {
+	if (!(session_media->udptl = ast_udptl_new_with_bindaddr(NULL, NULL, 0, &address))) {
 		return -1;
 	}
 
@@ -361,7 +358,9 @@ static int t38_interpret_parameters(void *obj)
 			ast_udptl_set_local_max_ifp(session_media->udptl, state->our_parms.max_ifp);
 			t38_change_state(data->session, session_media, state, T38_ENABLED);
 			ast_sip_session_resume_reinvite(data->session);
-		} else if (data->session->t38state != T38_ENABLED) {
+		} else if ((data->session->t38state != T38_ENABLED) ||
+				((data->session->t38state == T38_ENABLED) &&
+                                (parameters->request_response == AST_T38_REQUEST_NEGOTIATE))) {
 			if (t38_initialize_session(data->session, session_media)) {
 				break;
 			}
@@ -499,25 +498,27 @@ static void t38_attach_framehook(struct ast_sip_session *session)
 		return;
 	}
 
-	/* Skip attaching the framehook if the T.38 datastore already exists for the channel */
 	ast_channel_lock(session->channel);
-	if ((datastore = ast_channel_datastore_find(session->channel, &t38_framehook_datastore, NULL))) {
+
+	/* Skip attaching the framehook if the T.38 datastore already exists for the channel */
+	datastore = ast_channel_datastore_find(session->channel, &t38_framehook_datastore,
+		NULL);
+	if (datastore) {
 		ast_channel_unlock(session->channel);
 		return;
 	}
-	ast_channel_unlock(session->channel);
 
 	framehook_id = ast_framehook_attach(session->channel, &hook);
 	if (framehook_id < 0) {
-		ast_log(LOG_WARNING, "Could not attach T.38 Frame hook to channel, T.38 will be unavailable on '%s'\n",
+		ast_log(LOG_WARNING, "Could not attach T.38 Frame hook, T.38 will be unavailable on '%s'\n",
 			ast_channel_name(session->channel));
+		ast_channel_unlock(session->channel);
 		return;
 	}
 
-	ast_channel_lock(session->channel);
 	datastore = ast_datastore_alloc(&t38_framehook_datastore, NULL);
 	if (!datastore) {
-		ast_log(LOG_ERROR, "Could not attach T.38 Frame hook to channel, T.38 will be unavailable on '%s'\n",
+		ast_log(LOG_ERROR, "Could not alloc T.38 Frame hook datastore, T.38 will be unavailable on '%s'\n",
 			ast_channel_name(session->channel));
 		ast_framehook_detach(session->channel, framehook_id);
 		ast_channel_unlock(session->channel);
@@ -918,8 +919,11 @@ static int load_module(void)
 {
 	CHECK_PJSIP_SESSION_MODULE_LOADED();
 
-	ast_sockaddr_parse(&address_ipv4, "0.0.0.0", 0);
-	ast_sockaddr_parse(&address_ipv6, "::", 0);
+	if (ast_check_ipv6()) {
+		ast_sockaddr_parse(&address, "::", 0);
+	} else {
+		ast_sockaddr_parse(&address, "0.0.0.0", 0);
+	}
 
 	if (ast_sip_session_register_supplement(&t38_supplement)) {
 		ast_log(LOG_ERROR, "Unable to register T.38 session supplement\n");
