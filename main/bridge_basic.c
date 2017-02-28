@@ -29,8 +29,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include "asterisk/channel.h"
 #include "asterisk/utils.h"
 #include "asterisk/linkedlists.h"
@@ -3088,7 +3086,9 @@ static int attach_framehook(struct attended_transfer_properties *props, struct a
 	ao2_ref(props, +1);
 	target_interface.data = props;
 
+	ast_channel_lock(channel);
 	props->target_framehook_id = ast_framehook_attach(channel, &target_interface);
+	ast_channel_unlock(channel);
 	if (props->target_framehook_id == -1) {
 		ao2_ref(props, -1);
 		return -1;

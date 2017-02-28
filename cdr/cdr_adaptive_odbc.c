@@ -40,8 +40,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include <sys/types.h>
 #include <time.h>
 
@@ -408,6 +406,7 @@ static int odbc_log(struct ast_cdr *cdr)
 	AST_LIST_TRAVERSE(&odbc_tables, tableptr, list) {
 		separator = "";
 
+		quoted = 0;
 		if (tableptr->quoted_identifiers != '\0'){
 			quoted = 1;
 		}

@@ -33,8 +33,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include <unistd.h>
 #include <fcntl.h>
 
@@ -48,6 +46,7 @@ ASTERISK_REGISTER_FILE()
 #include "asterisk/stasis_channels.h"
 #include "asterisk/stasis_endpoints.h"
 #include "asterisk/stringfields.h"
+#include "asterisk/stream.h"
 #include "asterisk/test.h"
 
 /*!
@@ -223,6 +222,8 @@ struct ast_channel {
 	struct stasis_cp_single *topics;		/*!< Topic for all channel's events */
 	struct stasis_forward *endpoint_forward;	/*!< Subscription for event forwarding to endpoint's topic */
 	struct stasis_forward *endpoint_cache_forward; /*!< Subscription for cache updates to endpoint's topic */
+	struct ast_stream_topology *stream_topology; /*!< Stream topology */
+	struct ast_stream *default_streams[AST_MEDIA_TYPE_END]; /*!< Default streams indexed by media type */
 };
 
 /*! \brief The monotonically increasing integer counter for channel uniqueids */
@@ -827,10 +828,57 @@ struct ast_format_cap *ast_channel_nativeformats(const struct ast_channel *chan)
 {
 	return chan->nativeformats;
 }
-void ast_channel_nativeformats_set(struct ast_channel *chan, struct ast_format_cap *value)
+
+static void channel_set_default_streams(struct ast_channel *chan)
 {
-	ao2_replace(chan->nativeformats, value);
+	enum ast_media_type type;
+
+	ast_assert(chan != NULL);
+
+	for (type = AST_MEDIA_TYPE_UNKNOWN; type < AST_MEDIA_TYPE_END; type++) {
+		if (chan->stream_topology) {
+			chan->default_streams[type] =
+				ast_stream_topology_get_first_stream_by_type(chan->stream_topology, type);
+		} else {
+			chan->default_streams[type] = NULL;
+		}
+	}
 }
+
+void ast_channel_internal_set_stream_topology(struct ast_channel *chan,
+	struct ast_stream_topology *topology)
+{
+	ast_stream_topology_free(chan->stream_topology);
+	chan->stream_topology = topology;
+	channel_set_default_streams(chan);
+}
+
+void ast_channel_nativeformats_set(struct ast_channel *chan,
+	struct ast_format_cap *value)
+{
+	ast_assert(chan != NULL);
+
+	ao2_replace(chan->nativeformats, value);
+
+	/* If chan->stream_topology is NULL, the channel is being destroyed
+	 * and topology is destroyed.
+	 */
+	if (!chan->stream_topology) {
+		return;
+	}
+
+	if (!chan->tech || !(chan->tech->properties & AST_CHAN_TP_MULTISTREAM) || !value) {
+		struct ast_stream_topology *new_topology;
+
+		if (!value) {
+			new_topology = ast_stream_topology_alloc();
+		} else {
+			new_topology = ast_stream_topology_create_from_format_cap(value);
+		}
+		ast_channel_internal_set_stream_topology(chan, new_topology);
+	}
+}
+
 struct ast_framehook_list *ast_channel_framehooks(const struct ast_channel *chan)
 {
 	return chan->framehooks;
@@ -1240,14 +1288,9 @@ int ast_channel_alert_write(struct ast_channel *chan)
 	return write(chan->alertpipe[1], &blah, sizeof(blah)) != sizeof(blah);
 }
 
-ast_alert_status_t ast_channel_internal_alert_read(struct ast_channel *chan)
+static int channel_internal_alert_check_nonblock(struct ast_channel *chan)
 {
 	int flags;
-	char blah;
-
-	if (!ast_channel_internal_alert_readable(chan)) {
-		return AST_ALERT_NOT_READABLE;
-	}
 
 	flags = fcntl(chan->alertpipe[0], F_GETFL);
 	/* For some odd reason, the alertpipe occasionally loses nonblocking status,
@@ -1256,9 +1299,62 @@ ast_alert_status_t ast_channel_internal_alert_read(struct ast_channel *chan)
 		ast_log(LOG_ERROR, "Alertpipe on channel %s lost O_NONBLOCK?!!\n", ast_channel_name(chan));
 		if (fcntl(chan->alertpipe[0], F_SETFL, flags | O_NONBLOCK) < 0) {
 			ast_log(LOG_WARNING, "Unable to set alertpipe nonblocking! (%d: %s)\n", errno, strerror(errno));
-			return AST_ALERT_READ_FATAL;
+			return -1;
 		}
 	}
+	return 0;
+}
+
+ast_alert_status_t ast_channel_internal_alert_flush(struct ast_channel *chan)
+{
+	int bytes_read;
+	char blah[100];
+
+	if (!ast_channel_internal_alert_readable(chan)) {
+		return AST_ALERT_NOT_READABLE;
+	}
+	if (channel_internal_alert_check_nonblock(chan)) {
+		return AST_ALERT_READ_FATAL;
+	}
+
+	/* Read the alertpipe until it is exhausted. */
+	for (;;) {
+		bytes_read = read(chan->alertpipe[0], blah, sizeof(blah));
+		if (bytes_read < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				/*
+				 * Would block so nothing left to read.
+				 * This is the normal loop exit.
+				 */
+				break;
+			}
+			ast_log(LOG_WARNING, "read() failed flushing alertpipe: %s\n",
+				strerror(errno));
+			return AST_ALERT_READ_FAIL;
+		}
+		if (!bytes_read) {
+			/* Read nothing so we are done */
+			break;
+		}
+	}
+
+	return AST_ALERT_READ_SUCCESS;
+}
+
+ast_alert_status_t ast_channel_internal_alert_read(struct ast_channel *chan)
+{
+	char blah;
+
+	if (!ast_channel_internal_alert_readable(chan)) {
+		return AST_ALERT_NOT_READABLE;
+	}
+	if (channel_internal_alert_check_nonblock(chan)) {
+		return AST_ALERT_READ_FATAL;
+	}
+
 	if (read(chan->alertpipe[0], &blah, sizeof(blah)) < 0) {
 		if (errno != EINTR && errno != EAGAIN) {
 			ast_log(LOG_WARNING, "read() failed: %s\n", strerror(errno));
@@ -1591,6 +1687,8 @@ void ast_channel_internal_cleanup(struct ast_channel *chan)
 
 	stasis_cp_single_unsubscribe(chan->topics);
 	chan->topics = NULL;
+
+	ast_channel_internal_set_stream_topology(chan, NULL);
 }
 
 void ast_channel_internal_finalize(struct ast_channel *chan)
@@ -1660,4 +1758,84 @@ int ast_channel_internal_setup_topics(struct ast_channel *chan)
 	}
 
 	return 0;
+}
+
+AST_THREADSTORAGE(channel_errno);
+
+void ast_channel_internal_errno_set(enum ast_channel_error error)
+{
+	enum ast_channel_error *error_code = ast_threadstorage_get(&channel_errno, sizeof(*error_code));
+	if (!error_code) {
+		return;
+	}
+
+	*error_code = error;
+}
+
+enum ast_channel_error ast_channel_internal_errno(void)
+{
+	enum ast_channel_error *error_code = ast_threadstorage_get(&channel_errno, sizeof(*error_code));
+	if (!error_code) {
+		return AST_CHANNEL_ERROR_UNKNOWN;
+	}
+
+	return *error_code;
+}
+
+struct ast_stream_topology *ast_channel_get_stream_topology(
+	const struct ast_channel *chan)
+{
+	ast_assert(chan != NULL);
+
+	return chan->stream_topology;
+}
+
+struct ast_stream_topology *ast_channel_set_stream_topology(struct ast_channel *chan,
+	struct ast_stream_topology *topology)
+{
+	struct ast_stream_topology *new_topology;
+
+	ast_assert(chan != NULL);
+
+	/* A non-MULTISTREAM channel can't manipulate topology directly */
+	ast_assert(chan->tech != NULL && (chan->tech->properties & AST_CHAN_TP_MULTISTREAM));
+
+	/* Unless the channel is being destroyed, we always want a topology on
+	 * it even if its empty.
+	 */
+	if (!topology) {
+		new_topology = ast_stream_topology_alloc();
+	} else {
+		new_topology = topology;
+	}
+
+	if (new_topology) {
+		ast_channel_internal_set_stream_topology(chan, new_topology);
+	}
+
+	return new_topology;
+}
+
+struct ast_stream *ast_channel_get_default_stream(struct ast_channel *chan,
+	enum ast_media_type type)
+{
+	ast_assert(chan != NULL);
+	ast_assert(type < AST_MEDIA_TYPE_END);
+
+	return chan->default_streams[type];
+}
+
+void ast_channel_internal_swap_stream_topology(struct ast_channel *chan1,
+	struct ast_channel *chan2)
+{
+	struct ast_stream_topology *tmp_topology;
+
+	ast_assert(chan1 != NULL && chan2 != NULL);
+
+	tmp_topology = chan1->stream_topology;
+	chan1->stream_topology = chan2->stream_topology;
+	chan2->stream_topology = tmp_topology;
+
+	channel_set_default_streams(chan1);
+	channel_set_default_streams(chan2);
 }

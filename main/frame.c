@@ -29,8 +29,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include "asterisk/_private.h"
 #include "asterisk/lock.h"
 #include "asterisk/frame.h"
@@ -84,9 +82,9 @@ static struct ast_frame *ast_frame_header_new(void)
 	if ((frames = ast_threadstorage_get(&frame_cache, sizeof(*frames)))) {
 		if ((f = AST_LIST_REMOVE_HEAD(&frames->list, frame_list))) {
 			size_t mallocd_len = f->mallocd_hdr_len;
+
 			memset(f, 0, sizeof(*f));
 			f->mallocd_hdr_len = mallocd_len;
-			f->mallocd = AST_MALLOCD_HDR;
 			frames->size--;
 			return f;
 		}
@@ -141,12 +139,12 @@ static void __frame_free(struct ast_frame *fr, int cache)
 #endif
 
 	if (fr->mallocd & AST_MALLOCD_DATA) {
-		if (fr->data.ptr)
+		if (fr->data.ptr) {
 			ast_free(fr->data.ptr - fr->offset);
+		}
 	}
 	if (fr->mallocd & AST_MALLOCD_SRC) {
-		if (fr->src)
-			ast_free((void *) fr->src);
+		ast_free((void *) fr->src);
 	}
 	if (fr->mallocd & AST_MALLOCD_HDR) {
 		if ((fr->frametype == AST_FRAME_VOICE) || (fr->frametype == AST_FRAME_VIDEO) ||
@@ -208,14 +206,14 @@ struct ast_frame *ast_frisolate(struct ast_frame *fr)
 			return NULL;
 		}
 		out->frametype = fr->frametype;
+		out->subclass = fr->subclass;
 		if ((fr->frametype == AST_FRAME_VOICE) || (fr->frametype == AST_FRAME_VIDEO) ||
 			(fr->frametype == AST_FRAME_IMAGE)) {
-			out->subclass.format = ao2_bump(fr->subclass.format);
-		} else {
-			memcpy(&out->subclass, &fr->subclass, sizeof(out->subclass));
+			ao2_bump(out->subclass.format);
 		}
 		out->datalen = fr->datalen;
 		out->samples = fr->samples;
+		out->mallocd = AST_MALLOCD_HDR;
 		out->offset = fr->offset;
 		/* Copy the timing data */
 		ast_copy_flags(out, fr, AST_FLAGS_ALL);
@@ -224,50 +222,68 @@ struct ast_frame *ast_frisolate(struct ast_frame *fr)
 			out->len = fr->len;
 			out->seqno = fr->seqno;
 		}
+		out->stream_num = fr->stream_num;
 	} else {
 		out = fr;
 	}
 
-	if (!(fr->mallocd & AST_MALLOCD_SRC) && fr->src) {
-		if (!(out->src = ast_strdup(fr->src))) {
-			if (out != fr) {
-				ast_free(out);
+	if (fr->src) {
+		/* The original frame has a source string */
+		if (!(fr->mallocd & AST_MALLOCD_SRC)) {
+			/*
+			 * The original frame has a non-malloced source string.
+			 *
+			 * Duplicate the string and put it into the isolated frame
+			 * which may also be the original frame.
+			 */
+			newdata = ast_strdup(fr->src);
+			if (!newdata) {
+				if (out != fr) {
+					ast_frame_free(out, 0);
+				}
+				return NULL;
 			}
-			return NULL;
+			out->src = newdata;
+			out->mallocd |= AST_MALLOCD_SRC;
+		} else if (out != fr) {
+			/* Steal the source string from the original frame. */
+			out->src = fr->src;
+			fr->src = NULL;
+			fr->mallocd &= ~AST_MALLOCD_SRC;
+			out->mallocd |= AST_MALLOCD_SRC;
 		}
-	} else {
-		out->src = fr->src;
-		fr->src = NULL;
-		fr->mallocd &= ~AST_MALLOCD_SRC;
 	}
 
 	if (!(fr->mallocd & AST_MALLOCD_DATA))  {
+		/* The original frame has a non-malloced data buffer. */
 		if (!fr->datalen) {
+			/* Actually it's just an int so we can simply copy it. */
 			out->data.uint32 = fr->data.uint32;
-			out->mallocd = AST_MALLOCD_HDR | AST_MALLOCD_SRC;
 			return out;
 		}
-		if (!(newdata = ast_malloc(fr->datalen + AST_FRIENDLY_OFFSET))) {
-			if (out->src != fr->src) {
-				ast_free((void *) out->src);
-			}
+		/*
+		 * Duplicate the data buffer and put it into the isolated frame
+		 * which may also be the original frame.
+		 */
+		newdata = ast_malloc(fr->datalen + AST_FRIENDLY_OFFSET);
+		if (!newdata) {
 			if (out != fr) {
-				ast_free(out);
+				ast_frame_free(out, 0);
 			}
 			return NULL;
 		}
 		newdata += AST_FRIENDLY_OFFSET;
 		out->offset = AST_FRIENDLY_OFFSET;
-		out->datalen = fr->datalen;
 		memcpy(newdata, fr->data.ptr, fr->datalen);
 		out->data.ptr = newdata;
-	} else {
+		out->mallocd |= AST_MALLOCD_DATA;
+	} else if (out != fr) {
+		/* Steal the data buffer from the original frame. */
 		out->data = fr->data;
 		memset(&fr->data, 0, sizeof(fr->data));
 		fr->mallocd &= ~AST_MALLOCD_DATA;
+		out->mallocd |= AST_MALLOCD_DATA;
 	}
-
-	out->mallocd = AST_MALLOCD_HDR | AST_MALLOCD_SRC | AST_MALLOCD_DATA;
 
 	return out;
 }
@@ -355,6 +371,7 @@ struct ast_frame *ast_frdup(const struct ast_frame *f)
 	out->ts = f->ts;
 	out->len = f->len;
 	out->seqno = f->seqno;
+	out->stream_num = f->stream_num;
 	return out;
 }
 
@@ -535,6 +552,8 @@ void ast_frame_subclass2str(struct ast_frame *f, char *subclass, size_t slen, ch
 			break;
 		}
 		break;
+	case AST_FRAME_RTCP:
+		ast_copy_string(subclass, "RTCP", slen);
 	default:
 		ast_copy_string(subclass, "Unknown Subclass", slen);
 		break;
@@ -586,6 +605,9 @@ void ast_frame_type2str(enum ast_frame_type frame_type, char *ftype, size_t len)
 	case AST_FRAME_VIDEO:
 		ast_copy_string(ftype, "Video", len);
 		break;
+	case AST_FRAME_RTCP:
+		ast_copy_string(ftype, "RTCP", len);
+		break;
 	default:
 		snprintf(ftype, len, "Unknown Frametype '%u'", frame_type);
 		break;
@@ -621,6 +643,9 @@ void ast_frame_dump(const char *name, struct ast_frame *f, char *prefix)
 		return;
 	}
 	if (f->frametype == AST_FRAME_VIDEO) {
+		return;
+	}
+	if (f->frametype == AST_FRAME_RTCP) {
 		return;
 	}
 

@@ -127,12 +127,16 @@ enum ast_frame_type {
 	 * directly into bridges.
 	 */
 	AST_FRAME_BRIDGE_ACTION_SYNC,
+	/*! RTCP feedback */
+	AST_FRAME_RTCP,
 };
 #define AST_FRAME_DTMF AST_FRAME_DTMF_END
 
 enum {
 	/*! This frame contains valid timing information */
 	AST_FRFLAG_HAS_TIMING_INFO = (1 << 0),
+	/*! This frame has been requeued */
+	AST_FRFLAG_REQUEUED = (1 << 1),
 };
 
 struct ast_frame_subclass {
@@ -177,6 +181,8 @@ struct ast_frame {
 	long len;
 	/*! Sequence number */
 	int seqno;
+	/*! Stream number the frame originated from */
+	int stream_num;
 };
 
 /*!

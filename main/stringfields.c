@@ -25,8 +25,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include "asterisk/stringfields.h"
 #include "asterisk/utils.h"
 
@@ -60,11 +58,7 @@ static size_t optimal_alloc_size(size_t size)
 static void *calloc_wrapper(unsigned int num_structs, size_t struct_size,
 	const char *file, int lineno, const char *func)
 {
-#if defined(__AST_DEBUG_MALLOC)
 	return __ast_calloc(num_structs, struct_size, file, lineno, func);
-#else
-	return ast_calloc(num_structs, struct_size);
-#endif
 }
 
 /*! \brief add a new block to the pool.

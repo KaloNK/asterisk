@@ -99,6 +99,10 @@ export WGET_EXTRA_ARGS
 export LDCONFIG
 export LDCONFIG_FLAGS
 export PYTHON
+export TAR
+export PATCH
+export SED
+export NM
 
 # makeopts is required unless the goal is clean or distclean
 ifeq ($(findstring clean,$(MAKECMDGOALS)),)
@@ -178,11 +182,6 @@ OTHER_SUBDIR_CFLAGS="-I$(ASTTOPDIR)/include"
 # Create OPTIONS variable, but probably we can assign directly to ASTCFLAGS
 OPTIONS=
 
-ifeq ($(OSARCH),linux-gnu)
-  # flag to tell 'ldconfig' to only process specified directories
-  LDCONFIG_FLAGS=-n
-endif
-
 ifeq ($(findstring -save-temps,$(_ASTCFLAGS) $(ASTCFLAGS)),)
   ifeq ($(findstring -pipe,$(_ASTCFLAGS) $(ASTCFLAGS)),)
     _ASTCFLAGS+=-pipe
@@ -218,8 +217,6 @@ ifeq ($(OSARCH),FreeBSD)
   # -V is understood by BSD Make, not by GNU make.
   BSDVERSION=$(shell make -V OSVERSION -f /usr/share/mk/bsd.port.subdir.mk)
   _ASTCFLAGS+=$(shell if test $(BSDVERSION) -lt 500016 ; then echo "-D_THREAD_SAFE"; fi)
-  # flag to tell 'ldconfig' to only process specified directories
-  LDCONFIG_FLAGS=-m
 endif
 
 ifeq ($(OSARCH),NetBSD)
@@ -491,7 +488,7 @@ doc/core-en_US.xml: makeopts .lastclean $(XML_core_en_US)
 	@printf "Building Documentation For: "
 	@echo "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" > $@
 	@echo "<!DOCTYPE docs SYSTEM \"appdocsxml.dtd\">" >> $@
-	@echo "<?xml-stylesheet type=\"text/xsl\" href=\"appdocsxml.xslt\"?>" > $@
+	@echo "<?xml-stylesheet type=\"text/xsl\" href=\"appdocsxml.xslt\"?>" >> $@
 	@echo "<docs xmlns:xi=\"http://www.w3.org/2001/XInclude\">" >> $@
 	@for x in $(MOD_SUBDIRS); do \
 		printf "$$x " ; \
@@ -515,7 +512,7 @@ else
 	@printf "Building Documentation For: "
 	@echo "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" > $@
 	@echo "<!DOCTYPE docs SYSTEM \"appdocsxml.dtd\">" >> $@
-	@echo "<?xml-stylesheet type=\"text/xsl\" href=\"appdocsxml.xslt\"?>" > $@
+	@echo "<?xml-stylesheet type=\"text/xsl\" href=\"appdocsxml.xslt\"?>" >> $@
 	@echo "<docs xmlns:xi=\"http://www.w3.org/2001/XInclude\">" >> $@
 	@for x in $(MOD_SUBDIRS); do \
 		printf "$$x " ; \
@@ -618,9 +615,10 @@ $(SUBDIRS_INSTALL):
 
 NEWMODS:=$(foreach d,$(MOD_SUBDIRS),$(notdir $(wildcard $(d)/*.so)))
 OLDMODS=$(filter-out $(NEWMODS) $(notdir $(DESTDIR)$(ASTMODDIR)),$(notdir $(wildcard $(DESTDIR)$(ASTMODDIR)/*.so)))
+BADMODS=$(strip $(filter-out $(shell ./build_tools/list_valid_installed_externals),$(OLDMODS)))
 
 oldmodcheck:
-	@if [ -n "$(OLDMODS)" ]; then \
+	@if [ -n "$(BADMODS)" ]; then \
 		echo " WARNING WARNING WARNING" ;\
 		echo "" ;\
 		echo " Your Asterisk modules directory, located at" ;\
@@ -630,12 +628,29 @@ oldmodcheck:
 		echo " modules are compatible with this version before" ;\
 		echo " attempting to run Asterisk." ;\
 		echo "" ;\
-		for f in $(OLDMODS); do \
+		for f in $(BADMODS); do \
 			echo "    $$f" ;\
 		done ;\
 		echo "" ;\
 		echo " WARNING WARNING WARNING" ;\
 	fi
+
+ld-cache-update:
+ifneq ($(LDCONFIG),)
+	@if [ $${EUID} -eq 0 ] ; then \
+		$(LDCONFIG) "$(DESTDIR)$(ASTLIBDIR)/" ; \
+	else \
+		echo " WARNING WARNING WARNING" ;\
+		echo "" ;\
+		echo " You cannot rebuild the system linker cache unless you are root. " ;\
+		echo " You MUST do one of the follwing..." ;\
+		echo "  * Re-run 'make install' as root. " ;\
+		echo "  * Run 'ldconfig $(DESTDIR)$(ASTLIBDIR)' as root. " ;\
+		echo "  * Run asterisk with 'LD_LIBRARY_PATH=$(DESTDIR)$(ASTLIBDIR) asterisk' " ;\
+		echo "" ;\
+		echo " WARNING WARNING WARNING" ;\
+	fi
+endif
 
 badshell:
 ifneq ($(filter ~%,$(DESTDIR)),)
@@ -675,6 +690,7 @@ install: badshell bininstall datafiles
 	@echo " + doxygen installed on your local system    +"
 	@echo " +-------------------------------------------+"
 	@$(MAKE) -s oldmodcheck
+	@$(MAKE) -s ld-cache-update
 
 isntall: install
 
@@ -824,7 +840,7 @@ install-logrotate:
 	rm -f contrib/scripts/asterisk.logrotate.tmp
 
 config:
-	if [ -f /etc/redhat-release -o -f /etc/fedora-release ]; then \
+	@if [ -f /etc/redhat-release -o -f /etc/fedora-release ]; then \
 		./build_tools/install_subst contrib/init.d/rc.redhat.asterisk  "$(DESTDIR)/etc/rc.d/init.d/asterisk"; \
 		if [ ! -f "$(DESTDIR)/etc/sysconfig/asterisk" ] ; then \
 			$(INSTALL) -m 644 contrib/init.d/etc_default_asterisk "$(DESTDIR)/etc/sysconfig/asterisk" ; \
@@ -907,6 +923,9 @@ ifeq ($(HAVE_DAHDI),1)
 	rm -f $(DESTDIR)$(DAHDI_UDEV_HOOK_DIR)/40-asterisk
 endif
 	$(MAKE) -C sounds uninstall
+ifneq ($(LDCONFIG),)
+	$(LDCONFIG) || :
+endif
 
 uninstall: _uninstall
 	@echo " +--------- Asterisk Uninstall Complete -----+"
@@ -980,7 +999,7 @@ menuselect/nmenuselect: menuselect/makeopts .lastclean
 menuselect/makeopts: makeopts .lastclean
 	+$(MAKE_MENUSELECT) makeopts
 
-menuselect-tree: $(foreach dir,$(filter-out main,$(MOD_SUBDIRS)),$(wildcard $(dir)/*.c) $(wildcard $(dir)/*.cc)) build_tools/cflags.xml build_tools/cflags-devmode.xml sounds/sounds.xml build_tools/embed_modules.xml utils/utils.xml agi/agi.xml configure makeopts
+menuselect-tree: $(foreach dir,$(filter-out main,$(MOD_SUBDIRS)),$(wildcard $(dir)/*.c) $(wildcard $(dir)/*.cc) $(wildcard $(dir)/*.xml)) build_tools/cflags.xml build_tools/cflags-devmode.xml sounds/sounds.xml build_tools/embed_modules.xml utils/utils.xml agi/agi.xml configure makeopts
 	@echo "Generating input for menuselect ..."
 	@echo "<?xml version=\"1.0\"?>" > $@
 	@echo >> $@
@@ -1037,6 +1056,7 @@ check-alembic: makeopts
 .PHONY: ari-stubs
 .PHONY: basic-pbx
 .PHONY: check-alembic
+.PHONY: ld-cache-update
 .PHONY: $(SUBDIRS_INSTALL)
 .PHONY: $(SUBDIRS_DIST_CLEAN)
 .PHONY: $(SUBDIRS_CLEAN)

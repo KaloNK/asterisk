@@ -664,11 +664,38 @@ struct ast_channel_tech {
 	/*! \brief Answer the channel */
 	int (* const answer)(struct ast_channel *chan);
 
-	/*! \brief Read a frame, in standard format (see frame.h) */
+	/*!
+	 * \brief Read a frame (or chain of frames from the same stream), in standard format (see frame.h)
+	 *
+	 * \param chan channel to read frames from
+	 *
+	 * \retval non-NULL on success
+	 * \retval NULL on failure
+	 *
+	 * \note Each media frame from this callback will have the stream_num of it changed to the default
+	 *       stream num based on the type of media returned. As a result a multistream capable channel
+	 *       should not implement this callback.
+	 */
 	struct ast_frame * (* const read)(struct ast_channel *chan);
+
+	/*!
+	 * \brief Read a frame (or chain of frames from the same stream), in standard format (see frame.h), with stream num
+	 *
+	 * \param chan channel to read frames from
+	 *
+	 * \retval non-NULL on success
+	 * \retval NULL on failure
+	 *
+	 * \note Each media frame from this callback should contain a stream_num value which is set to the
+	 *       stream that the media frame originated from.
+	 */
+	struct ast_frame * (* const read_stream)(struct ast_channel *chan);
 
 	/*! \brief Write a frame, in standard format (see frame.h) */
 	int (* const write)(struct ast_channel *chan, struct ast_frame *frame);
+
+	/*! \brief Write a frame on a specific stream, in standard format (see frame.h) */
+	int (* const write_stream)(struct ast_channel *chan, int stream_num, struct ast_frame *frame);
 
 	/*! \brief Display or transmit text */
 	int (* const send_text)(struct ast_channel *chan, const char *text);
@@ -884,6 +911,10 @@ enum {
 	 * world
 	 */
 	AST_CHAN_TP_INTERNAL = (1 << 2),
+	/*!
+	 * \brief Channels with this particular technology support multiple simultaneous streams
+	 */
+	AST_CHAN_TP_MULTISTREAM = (1 << 3),
 };
 
 /*! \brief ast_channel flags */
@@ -1922,12 +1953,35 @@ int ast_waitfor_n_fd(int *fds, int n, int *ms, int *exception);
 
 /*!
  * \brief Reads a frame
+ *
  * \param chan channel to read a frame from
+ *
  * \return Returns a frame, or NULL on error.  If it returns NULL, you
  * best just stop reading frames and assume the channel has been
  * disconnected.
+ *
+ * \note This function will filter frames received from the channel so
+ *       that only frames from the default stream for each media type
+ *       are returned. All other media frames from other streams will
+ *       be absorbed internally and a NULL frame returned instead.
  */
 struct ast_frame *ast_read(struct ast_channel *chan);
+
+/*!
+ * \brief Reads a frame, but does not filter to just the default streams
+ *
+ * \param chan channel to read a frame from
+ *
+ * \return Returns a frame, or NULL on error.  If it returns NULL, you
+ * best just stop reading frames and assume the channel has been
+ * disconnected.
+ *
+ * \note This function will not perform any filtering and will return
+ *       media frames from all streams on the channel. To determine which
+ *       stream a frame originated from the stream_num on it can be
+ *       examined.
+ */
+struct ast_frame *ast_read_stream(struct ast_channel *chan);
 
 /*!
  * \brief Reads a frame, returning AST_FRAME_NULL frame if audio.
@@ -1967,6 +2021,18 @@ int ast_write_video(struct ast_channel *chan, struct ast_frame *frame);
  */
 int ast_write_text(struct ast_channel *chan, struct ast_frame *frame);
 
+/*!
+ * \brief Write a frame to a stream
+ * This function writes the given frame to the indicated stream on the channel.
+ * \param chan destination channel of the frame
+ * \param stream_num destination stream on the channel
+ * \param frame frame that will be written
+ * \return It returns 0 on success, -1 on failure.
+ * \note If -1 is provided as the stream number and a media frame is provided the
+ *       function will write to the default stream of the type of media.
+ */
+int ast_write_stream(struct ast_channel *chan, int stream_num, struct ast_frame *frame);
+
 /*! \brief Send empty audio to prime a channel driver */
 int ast_prod(struct ast_channel *chan);
 
@@ -1984,6 +2050,21 @@ int ast_prod(struct ast_channel *chan);
  * \retval -1 on error.
  */
 int ast_set_read_format_path(struct ast_channel *chan, struct ast_format *raw_format, struct ast_format *core_format);
+
+/*!
+ * \brief Set specific write path on channel.
+ * \since 13.13.0
+ *
+ * \param chan Channel to setup write path.
+ * \param core_format What the core wants to write.
+ * \param raw_format Raw write format.
+ *
+ * \pre chan is locked
+ *
+ * \retval 0 on success.
+ * \retval -1 on error.
+ */
+int ast_set_write_format_path(struct ast_channel *chan, struct ast_format *core_format, struct ast_format *raw_format);
 
 /*!
  * \brief Sets read format on channel chan from capabilities
@@ -2018,6 +2099,16 @@ int ast_set_write_format_from_cap(struct ast_channel *chan, struct ast_format_ca
  * \return Returns 0 on success, -1 on failure
  */
 int ast_set_write_format(struct ast_channel *chan, struct ast_format *format);
+
+/*!
+ * \brief Sets write format for a channel.
+ * All internal data will than be handled in an interleaved format. (needed by binaural opus)
+ *
+ * \param chan channel to change
+ * \param format format to set for writing
+ * \return Returns 0 on success, -1 on failure
+ */
+int ast_set_write_format_interleaved_stereo(struct ast_channel *chan, struct ast_format *format);
 
 /*!
  * \brief Sends text to a channel
@@ -2552,7 +2643,11 @@ static inline int ast_fdisset(struct pollfd *pfds, int fd, int maximum, int *sta
 	return 0;
 }
 
-/*! \brief Retrieves the current T38 state of a channel */
+/*!
+ * \brief Retrieves the current T38 state of a channel
+ *
+ * \note Absolutely _NO_ channel locks should be held before calling this function.
+ */
 static inline enum ast_t38_state ast_channel_get_t38_state(struct ast_channel *chan)
 {
 	enum ast_t38_state state = T38_STATE_UNAVAILABLE;
@@ -4193,6 +4288,7 @@ typedef enum {
 } ast_alert_status_t;
 int ast_channel_alert_write(struct ast_channel *chan);
 int ast_channel_alert_writable(struct ast_channel *chan);
+ast_alert_status_t ast_channel_internal_alert_flush(struct ast_channel *chan);
 ast_alert_status_t ast_channel_internal_alert_read(struct ast_channel *chan);
 int ast_channel_internal_alert_readable(struct ast_channel *chan);
 void ast_channel_internal_alertpipe_clear(struct ast_channel *chan);
@@ -4327,6 +4423,36 @@ void ast_channel_set_manager_vars(size_t varc, char **vars);
  * \return \c NULL on error
  */
 struct varshead *ast_channel_get_manager_vars(struct ast_channel *chan);
+
+/*!
+ * \since 14.2.0
+ * \brief Return whether or not any ARI variables have been set
+ *
+ * \retval 0 if no ARI variables are expected
+ * \retval 1 if ARI variables are expected
+ */
+int ast_channel_has_ari_vars(void);
+
+/*!
+ * \since 14.2.0
+ * \brief Sets the variables to be stored in the \a ari_vars field of all
+ * snapshots.
+ * \param varc Number of variable names.
+ * \param vars Array of variable names.
+ */
+void ast_channel_set_ari_vars(size_t varc, char **vars);
+
+/*!
+ * \since 14.2.0
+ * \brief Gets the variables for a given channel, as specified by ast_channel_set_ari_vars().
+ *
+ * The returned variable list is an AO2 object, so ao2_cleanup() to free it.
+ *
+ * \param chan Channel to get variables for.
+ * \return List of channel variables.
+ * \return \c NULL on error
+ */
+struct varshead *ast_channel_get_ari_vars(struct ast_channel *chan);
 
 /*!
  * \since 12
@@ -4647,5 +4773,77 @@ int ast_channel_feature_hooks_append(struct ast_channel *chan, struct ast_bridge
  * \retval -1 on failure
  */
 int ast_channel_feature_hooks_replace(struct ast_channel *chan, struct ast_bridge_features *features);
+
+enum ast_channel_error {
+	/* Unable to determine what error occurred. */
+	AST_CHANNEL_ERROR_UNKNOWN,
+	/* Channel with this ID already exists */
+	AST_CHANNEL_ERROR_ID_EXISTS,
+};
+
+/*!
+ * \brief Get error code for latest channel operation.
+ */
+enum ast_channel_error ast_channel_errno(void);
+
+/*!
+ * \brief Am I currently running an intercept dialplan routine.
+ * \since 13.14.0
+ *
+ * \details
+ * A dialplan intercept routine is equivalent to an interrupt
+ * routine.  As such, the routine must be done quickly and you
+ * do not have access to the media stream.  These restrictions
+ * are necessary because the media stream is the responsibility
+ * of some other code and interfering with or delaying that
+ * processing is bad.
+ *
+ * \retval 0 Not in an intercept routine.
+ * \retval 1 In an intercept routine.
+ */
+int ast_channel_get_intercept_mode(void);
+
+/*!
+ * \brief Retrieve the topology of streams on a channel
+ *
+ * \param chan The channel to get the stream topology of
+ *
+ * \pre chan is locked
+ *
+ * \retval non-NULL success
+ * \retval NULL failure
+ */
+struct ast_stream_topology *ast_channel_get_stream_topology(
+	const struct ast_channel *chan);
+
+/*!
+ * \brief Set the topology of streams on a channel
+ *
+ * \param chan The channel to set the stream topology on
+ * \param topology The stream topology to set
+ *
+ * \pre chan is locked
+ *
+ * \note If topology is NULL a new empty topology will be created
+ * and returned.
+ *
+ * \retval non-NULL Success
+ * \retval NULL failure
+ */
+struct ast_stream_topology *ast_channel_set_stream_topology(
+	struct ast_channel *chan, struct ast_stream_topology *topology);
+
+/*!
+ * \brief Retrieve the default stream of a specific media type on a channel
+ *
+ * \param channel The channel to get the stream from
+ * \param type The media type of the default stream
+ *
+ * \pre chan is locked
+ *
+ * \retval non-NULL success
+ * \retval NULL failure
+ */
+struct ast_stream *ast_channel_get_default_stream(struct ast_channel *chan, enum ast_media_type type);
 
 #endif /* _ASTERISK_CHANNEL_H */

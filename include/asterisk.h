@@ -36,6 +36,15 @@
 #define AST_FILE_MODE 0666
 #endif
 
+/* Make sure PATH_MAX is defined on platforms (HURD) that don't define it.
+ * Also be sure to handle the case of a path larger than PATH_MAX
+ * (err safely) in the code.
+ */
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+
 #define DEFAULT_LANGUAGE "en"
 
 #define DEFAULT_SAMPLE_RATE 8000
@@ -152,84 +161,10 @@ int ast_shutting_down(void);
  */
 int ast_shutdown_final(void);
 
-#if !defined(LOW_MEMORY)
-/*!
- * \brief Register the version of a source code file with the core.
- * \param file the source file name
- * \return nothing
- *
- * This function should not be called directly, but instead the
- * ASTERISK_REGISTER_FILE macro should be used to register a file with the core.
- */
-void __ast_register_file(const char *file);
-
-/*!
- * \brief Unregister a source code file from the core.
- * \param file the source file name
- * \return nothing
- *
- * This function should not be called directly, but instead the
- * ASTERISK_REGISTER_FILE macro should be used to automatically unregister
- * the file when the module is unloaded.
- */
-void __ast_unregister_file(const char *file);
-
-/*!
- * \brief Complete a source file name
- * \param partial The partial name of the file to look up.
- * \param n The n-th match to return.
- *
- * \retval NULL if there is no match for partial at the n-th position
- * \retval Matching source file name
- *
- * \note A matching source file is allocataed on the heap, and must be
- * free'd by the caller.
- */
-char *ast_complete_source_filename(const char *partial, int n);
-
-/*!
- * \brief Register/unregister a source code file with the core.
- *
- * This macro will place a file-scope constructor and destructor into the
- * source of the module using it; this will cause the file to be
- * registered with the Asterisk core (and unregistered) at the appropriate
- * times.
- *
- * Example:
- *
- * \code
- * ASTERISK_REGISTER_FILE()
- * \endcode
- */
 #ifdef MTX_PROFILE
 #define	HAVE_MTX_PROFILE	/* used in lock.h */
-#define ASTERISK_REGISTER_FILE() \
-	static int mtx_prof = -1;       /* profile mutex */	\
-	static void __attribute__((constructor)) __register_file_version(void) \
-	{ \
-		mtx_prof = ast_add_profile("mtx_lock_" __FILE__, 0);	\
-		__ast_register_file(__FILE__); \
-	} \
-	static void __attribute__((destructor)) __unregister_file_version(void) \
-	{ \
-		__ast_unregister_file(__FILE__); \
-	}
-#else /* !MTX_PROFILE */
-#define ASTERISK_REGISTER_FILE() \
-	static void __attribute__((constructor)) __register_file_version(void) \
-	{ \
-		__ast_register_file(__FILE__); \
-	} \
-	static void __attribute__((destructor)) __unregister_file_version(void) \
-	{ \
-		__ast_unregister_file(__FILE__); \
-	}
-#endif /* !MTX_PROFILE */
-#else /* LOW_MEMORY */
-#define ASTERISK_REGISTER_FILE()
-#endif /* LOW_MEMORY */
+#endif /* MTX_PROFILE */
 
-#if !defined(LOW_MEMORY)
 /*!
  * \brief support for event profiling
  *
@@ -248,11 +183,6 @@ char *ast_complete_source_filename(const char *partial, int n);
 int ast_add_profile(const char *, uint64_t scale);
 int64_t ast_profile(int, int64_t);
 int64_t ast_mark(int, int start1_stop0);
-#else /* LOW_MEMORY */
-#define ast_add_profile(a, b) 0
-#define ast_profile(a, b) do { } while (0)
-#define ast_mark(a, b) do { } while (0)
-#endif /* LOW_MEMORY */
 
 /*! \brief
  * Definition of various structures that many asterisk files need,
@@ -286,6 +216,17 @@ struct ast_module;
 /* Internal/forward declaration, AST_MODULE_SELF should be used instead. */
 struct ast_module *AST_MODULE_SELF_SYM(void);
 
+#else
+
+#error "Externally compiled modules must declare AST_MODULE_SELF_SYM."
+
 #endif
+
+/*!
+ * \brief Retrieve the PBX UUID
+ * \param pbx_uuid A buffer of at least AST_UUID_STR_LEN (36 + 1) size to receive the UUID
+ * \param length The buffer length
+ */
+int ast_pbx_uuid_get(char *pbx_uuid, int length);
 
 #endif /* _ASTERISK_H */

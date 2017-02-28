@@ -30,8 +30,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include <regex.h>
 
 #include "asterisk/module.h"
@@ -187,6 +185,10 @@ static void sorcery_memory_retrieve_regex(const struct ast_sorcery *sorcery, voi
 		.container = objects,
 		.regex = &expression,
 	};
+
+	if (ast_strlen_zero(regex)) {
+		regex = ".";
+	}
 
 	if (regcomp(&expression, regex, REG_EXTENDED | REG_NOSUB)) {
 		return;

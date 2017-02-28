@@ -29,8 +29,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include "asterisk/logger.h"
 #include "asterisk/format.h"
 #include "asterisk/format_cache.h"
@@ -218,6 +216,11 @@ struct ast_format *ast_format_siren7;
 struct ast_format *ast_format_opus;
 
 /*!
+ * \brief Built-in cached codec2 format.
+ */
+struct ast_format *ast_format_codec2;
+
+/*!
  * \brief Built-in cached t140 format.
  */
 struct ast_format *ast_format_t140;
@@ -231,6 +234,14 @@ struct ast_format *ast_format_t140_red;
  * \brief Built-in "null" format.
  */
 struct ast_format *ast_format_none;
+
+/*!
+ * \brief Built-in "silk" format
+ */
+struct ast_format *ast_format_silk8;
+struct ast_format *ast_format_silk12;
+struct ast_format *ast_format_silk16;
+struct ast_format *ast_format_silk24;
 
 /*! \brief Number of buckets to use for the media format cache (should be prime for performance reasons) */
 #define CACHE_BUCKETS 53
@@ -320,6 +331,7 @@ static void format_cache_shutdown(void)
 	ao2_replace(ast_format_testlaw, NULL);
 	ao2_replace(ast_format_g719, NULL);
 	ao2_replace(ast_format_opus, NULL);
+	ao2_replace(ast_format_codec2, NULL);
 	ao2_replace(ast_format_jpeg, NULL);
 	ao2_replace(ast_format_png, NULL);
 	ao2_replace(ast_format_h261, NULL);
@@ -331,6 +343,10 @@ static void format_cache_shutdown(void)
 	ao2_replace(ast_format_t140_red, NULL);
 	ao2_replace(ast_format_t140, NULL);
 	ao2_replace(ast_format_none, NULL);
+	ao2_replace(ast_format_silk8, NULL);
+	ao2_replace(ast_format_silk12, NULL);
+	ao2_replace(ast_format_silk16, NULL);
+	ao2_replace(ast_format_silk24, NULL);
 }
 
 int ast_format_cache_init(void)
@@ -348,7 +364,9 @@ int ast_format_cache_init(void)
 
 static void set_cached_format(const char *name, struct ast_format *format)
 {
-	if (!strcmp(name, "g723")) {
+	if (!strcmp(name, "codec2")) {
+		ao2_replace(ast_format_codec2, format);
+	} else if (!strcmp(name, "g723")) {
 		ao2_replace(ast_format_g723, format);
 	} else if (!strcmp(name, "ulaw")) {
 		ao2_replace(ast_format_ulaw, format);
@@ -426,6 +444,14 @@ static void set_cached_format(const char *name, struct ast_format *format)
 		ao2_replace(ast_format_t140, format);
 	} else if (!strcmp(name, "none")) {
 		ao2_replace(ast_format_none, format);
+	} else if (!strcmp(name, "silk8")) {
+		ao2_replace(ast_format_silk8, format);
+	} else if (!strcmp(name, "silk12")) {
+		ao2_replace(ast_format_silk12, format);
+	} else if (!strcmp(name, "silk16")) {
+		ao2_replace(ast_format_silk16, format);
+	} else if (!strcmp(name, "silk24")) {
+		ao2_replace(ast_format_silk24, format);
 	}
 }
 

@@ -29,13 +29,14 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include <termios.h>
 #include <sys/ioctl.h>
 
 #include "asterisk/io.h"
 #include "asterisk/utils.h"
+#ifdef HAVE_SYSTEMD
+#include <systemd/sd-daemon.h>
+#endif
 
 #ifdef DEBUG_IO
 #define DEBUG DEBUG_M
@@ -384,3 +385,10 @@ int ast_get_termcols(int fd)
 	return cols;
 }
 
+int ast_sd_notify(const char *state) {
+#ifdef HAVE_SYSTEMD
+	return sd_notify(0, state);
+#else
+	return 0;
+#endif
+}

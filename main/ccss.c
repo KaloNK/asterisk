@@ -36,8 +36,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include "asterisk/astobj2.h"
 #include "asterisk/strings.h"
 #include "asterisk/ccss.h"
@@ -682,11 +680,7 @@ void ast_cc_default_config_params(struct ast_cc_config_params *params)
 
 struct ast_cc_config_params *__ast_cc_config_params_init(const char *file, int line, const char *function)
 {
-#if defined(__AST_DEBUG_MALLOC)
 	struct ast_cc_config_params *params = __ast_malloc(sizeof(*params), file, line, function);
-#else
-	struct ast_cc_config_params *params = ast_malloc(sizeof(*params));
-#endif
 
 	if (!params) {
 		return NULL;
@@ -4572,11 +4566,9 @@ static char *complete_core_id(const char *line, const char *word, int pos, int s
 
 static char *handle_cc_kill(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a)
 {
-	static const char * const option[] = { "core", "all", NULL };
-
 	switch (cmd) {
 	case CLI_INIT:
-		e->command = "cc cancel";
+		e->command = "cc cancel [core|all]";
 		e->usage =
 			"Usage: cc cancel can be used in two ways.\n"
 			"       1. 'cc cancel core [core ID]' will cancel the CC transaction with\n"
@@ -4584,10 +4576,7 @@ static char *handle_cc_kill(struct ast_cli_entry *e, int cmd, struct ast_cli_arg
 			"       2. 'cc cancel all' will cancel all active CC transactions.\n";
 		return NULL;
 	case CLI_GENERATE:
-		if (a->pos == 2) {
-			return ast_cli_complete(a->word, option, a->n);
-		}
-		if (a->pos == 3) {
+		if (a->pos == 3 && !strcasecmp(a->argv[2], "core")) {
 			return complete_core_id(a->line, a->word, a->pos, a->n);
 		}
 		return NULL;

@@ -33,6 +33,7 @@ enum ast_media_type {
 	AST_MEDIA_TYPE_VIDEO,
 	AST_MEDIA_TYPE_IMAGE,
 	AST_MEDIA_TYPE_TEXT,
+	AST_MEDIA_TYPE_END,
 };
 
 struct ast_module;
@@ -77,8 +78,6 @@ struct ast_codec {
 	unsigned int smooth;
 	/*! \brief The module that registered this codec */
 	struct ast_module *mod;
-	/*! \brief A format name for a default sane format using this codec */
-	const char *format_name;
 };
 
 /*!

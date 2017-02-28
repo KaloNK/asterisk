@@ -32,8 +32,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include <signal.h>
 
 #include "asterisk/heap.h"
@@ -1543,8 +1541,13 @@ static void testsuite_notify_feature_success(struct ast_channel *chan, const cha
 {
 #ifdef TEST_FRAMEWORK
 	char *feature = "unknown";
-	struct ast_featuremap_config *featuremap = ast_get_chan_featuremap_config(chan);
-	struct ast_features_xfer_config *xfer = ast_get_chan_features_xfer_config(chan);
+	struct ast_featuremap_config *featuremap;
+	struct ast_features_xfer_config *xfer;
+
+	ast_channel_lock(chan);
+	featuremap = ast_get_chan_featuremap_config(chan);
+	xfer = ast_get_chan_features_xfer_config(chan);
+	ast_channel_unlock(chan);
 
 	if (featuremap) {
 		if (!strcmp(dtmf, featuremap->blindxfer)) {
@@ -2766,6 +2769,9 @@ int bridge_channel_internal_join(struct ast_bridge_channel *bridge_channel)
 	bridge_channel_internal_pull(bridge_channel);
 	bridge_channel_settle_owed_events(bridge_channel->bridge, bridge_channel);
 	bridge_reconfigured(bridge_channel->bridge, 1);
+
+	/* Remove ourselves if we are the video source */
+	ast_bridge_remove_video_src(bridge_channel->bridge, bridge_channel->chan);
 
 	ast_bridge_unlock(bridge_channel->bridge);
 

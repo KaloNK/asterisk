@@ -31,8 +31,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include "asterisk/module.h"
 #include "asterisk/channel.h"
 #include "asterisk/pbx.h"
@@ -371,6 +369,9 @@ static void print_frame(struct ast_frame *frame)
 			ast_verbose("SubClass: %d\n", frame->subclass.integer);
 		}
 		ast_verbose("Bytes: %d\n", frame->datalen);
+		break;
+	case AST_FRAME_RTCP:
+		ast_verbose("FrameType: RTCP\n");
 		break;
 	case AST_FRAME_NULL:
 		ast_verbose("FrameType: NULL\n");

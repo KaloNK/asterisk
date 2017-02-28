@@ -93,6 +93,7 @@ clean:
 	rm -f db1-ast/.*.d
 	@$(MAKE) -C db1-ast clean
 
+
 md5.c: $(ASTTOPDIR)/main/md5.c
 	$(ECHO_PREFIX) echo "   [CP] $(subst $(ASTTOPDIR)/,,$<) -> $@"
 	$(CMD_PREFIX) cp "$<" "$@"
@@ -203,6 +204,9 @@ astdb2sqlite3: db1-ast/libdb1.a
 astdb2bdb: LIBS+=$(SQLITE3_LIB)
 astdb2bdb: _ASTCFLAGS+=$(SQLITE3_INCLUDE)
 astdb2bdb: db1-ast/libdb1.a
+
+conf_bridge_binaural_hrir_importer: LIBS+=$(SNDFILE_LIB)
+conf_bridge_binaural_hrir_importer.o: _ASTCFLAGS+=$(SNDFILE_INCLUDE)
 
 ifneq ($(wildcard .*.d),)
    include .*.d

@@ -40,8 +40,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 /* When we include logger.h again it will trample on some stuff in syslog.h, but
  * nothing we care about in here. */
 #include <syslog.h>
@@ -479,6 +477,7 @@ static void make_components(struct logchannel *chan)
 		 * with calculating the ast_verb_sys_level value.
 		 */
 		chan->verbosity = -1;
+		logmask |= (1 << __LOG_VERBOSE);
 	} else {
 		chan->verbosity = verb_level;
 	}
@@ -663,7 +662,8 @@ static int init_logger_chain(const char *altconf)
 			return -1;
 		}
 		chan->type = LOGTYPE_CONSOLE;
-		chan->logmask = __LOG_WARNING | __LOG_NOTICE | __LOG_ERROR;
+		chan->logmask = (1 << __LOG_WARNING) | (1 << __LOG_NOTICE) | (1 << __LOG_ERROR)
+			| (1 << __LOG_VERBOSE);
 		memcpy(&chan->formatter, &logformatter_default, sizeof(chan->formatter));
 
 		AST_RWLIST_INSERT_HEAD(&logchannels, chan, list);
@@ -1570,7 +1570,7 @@ static void logger_print_normal(struct logmsg *logmsg)
 				break;
 			}
 		}
-	} else if (logmsg->level != __LOG_VERBOSE) {
+	} else if (logmsg->level != __LOG_VERBOSE || option_verbose >= logmsg->sublevel) {
 		fputs(logmsg->message, stdout);
 	}
 
@@ -1762,13 +1762,7 @@ void ast_callid_strnprint(char *buffer, size_t buffer_size, ast_callid callid)
 
 ast_callid ast_create_callid(void)
 {
-	ast_callid call;
-
-	call = ast_atomic_fetchadd_int(&next_unique_callid, +1);
-#ifdef TEST_FRAMEWORK
-	ast_debug(3, "CALL_ID [C-%08x] created by thread.\n", call);
-#endif
-	return call;
+	return ast_atomic_fetchadd_int(&next_unique_callid, +1);
 }
 
 ast_callid ast_read_threadstorage_callid(void)
@@ -1778,7 +1772,6 @@ ast_callid ast_read_threadstorage_callid(void)
 	callid = ast_threadstorage_get(&unique_callid, sizeof(*callid));
 
 	return callid ? *callid : 0;
-
 }
 
 int ast_callid_threadassoc_change(ast_callid callid)
@@ -1786,23 +1779,10 @@ int ast_callid_threadassoc_change(ast_callid callid)
 	ast_callid *id = ast_threadstorage_get(&unique_callid, sizeof(*id));
 
 	if (!id) {
-		ast_log(LOG_ERROR, "Failed to allocate thread storage.\n");
 		return -1;
 	}
 
-	if (*id && (*id != callid)) {
-#ifdef TEST_FRAMEWORK
-		ast_debug(3, "CALL_ID [C-%08x] being removed from thread.\n", *id);
-#endif
-		*id = 0;
-	}
-
-	if (!(*id) && callid) {
-		*id = callid;
-#ifdef TEST_FRAMEWORK
-		ast_debug(3, "CALL_ID [C-%08x] bound to thread.\n", callid);
-#endif
-	}
+	*id = callid;
 
 	return 0;
 }
@@ -1812,21 +1792,17 @@ int ast_callid_threadassoc_add(ast_callid callid)
 	ast_callid *pointing;
 
 	pointing = ast_threadstorage_get(&unique_callid, sizeof(*pointing));
-	if (!(pointing)) {
-		ast_log(LOG_ERROR, "Failed to allocate thread storage.\n");
+	if (!pointing) {
 		return -1;
 	}
 
-	if (!(*pointing)) {
-		*pointing = callid;
-#ifdef TEST_FRAMEWORK
-		ast_debug(3, "CALL_ID [C-%08x] bound to thread.\n", callid);
-#endif
-	} else {
-		ast_log(LOG_WARNING, "Attempted to ast_callid_threadassoc_add on thread already associated with a callid.\n");
+	if (*pointing) {
+		ast_log(LOG_ERROR, "ast_callid_threadassoc_add(C-%08x) on thread "
+			"already associated with callid [C-%08x].\n", callid, *pointing);
 		return 1;
 	}
 
+	*pointing = callid;
 	return 0;
 }
 
@@ -1835,21 +1811,16 @@ int ast_callid_threadassoc_remove(void)
 	ast_callid *pointing;
 
 	pointing = ast_threadstorage_get(&unique_callid, sizeof(*pointing));
-	if (!(pointing)) {
-		ast_log(LOG_ERROR, "Failed to allocate thread storage.\n");
+	if (!pointing) {
 		return -1;
 	}
 
-	if (!(*pointing)) {
-		ast_log(LOG_ERROR, "Tried to clean callid thread storage with no callid in thread storage.\n");
-		return -1;
-	} else {
-#ifdef TEST_FRAMEWORK
-		ast_debug(3, "CALL_ID [C-%08x] being removed from thread.\n", *pointing);
-#endif
+	if (*pointing) {
 		*pointing = 0;
 		return 0;
 	}
+
+	return -1;
 }
 
 int ast_callid_threadstorage_auto(ast_callid *callid)
@@ -1893,6 +1864,10 @@ static void __attribute__((format(printf, 7, 0))) ast_log_full(int level, int su
 	struct timeval now = ast_tvnow();
 	int res = 0;
 	char datestring[256];
+
+	if (level == __LOG_VERBOSE && ast_opt_remote && ast_opt_exec) {
+		return;
+	}
 
 	if (!(buf = ast_str_thread_get(&log_buf, LOG_BUF_INIT_SIZE)))
 		return;

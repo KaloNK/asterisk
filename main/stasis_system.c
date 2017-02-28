@@ -29,8 +29,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include "asterisk/astobj2.h"
 #include "asterisk/stasis.h"
 #include "asterisk/stasis_system.h"
@@ -115,6 +113,7 @@ STASIS_MESSAGE_TYPE_DEFN(ast_cc_failure_type,
 STASIS_MESSAGE_TYPE_DEFN(ast_cc_monitorfailed_type,
 	.to_ami = cc_monitorfailed_to_ami,
 	);
+STASIS_MESSAGE_TYPE_DEFN(ast_cluster_discovery_type);
 
 void ast_system_publish_registry(const char *channeltype, const char *username, const char *domain, const char *status, const char *cause)
 {
@@ -362,6 +361,7 @@ static void stasis_system_cleanup(void)
 	STASIS_MESSAGE_TYPE_CLEANUP(ast_cc_recallcomplete_type);
 	STASIS_MESSAGE_TYPE_CLEANUP(ast_cc_failure_type);
 	STASIS_MESSAGE_TYPE_CLEANUP(ast_cc_monitorfailed_type);
+	STASIS_MESSAGE_TYPE_CLEANUP(ast_cluster_discovery_type);
 }
 
 /*! \brief Initialize the system level items for \ref stasis */
@@ -419,6 +419,10 @@ int ast_stasis_system_init(void)
 	}
 
 	if (STASIS_MESSAGE_TYPE_INIT(ast_cc_monitorfailed_type) != 0) {
+		return -1;
+	}
+
+	if (STASIS_MESSAGE_TYPE_INIT(ast_cluster_discovery_type) != 0) {
 		return -1;
 	}
 

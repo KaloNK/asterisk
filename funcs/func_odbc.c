@@ -34,8 +34,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include "asterisk/module.h"
 #include "asterisk/file.h"
 #include "asterisk/channel.h"
@@ -388,9 +386,25 @@ static struct odbc_obj *get_odbc_obj(const char *dsn_name, struct dsn **dsn)
 static inline void release_obj_or_dsn(struct odbc_obj **obj, struct dsn **dsn)
 {
 	if (dsn && *dsn) {
+		/* If multiple connections are not enabled then the guarantee
+		 * of a single connection already exists and holding on to the
+		 * connection would prevent any other user from acquiring it
+		 * indefinitely.
+		 */
+		if (ast_odbc_get_max_connections((*dsn)->name) < 2) {
+			ast_odbc_release_obj((*dsn)->connection);
+			(*dsn)->connection = NULL;
+		}
 		ao2_unlock(*dsn);
 		ao2_ref(*dsn, -1);
 		*dsn = NULL;
+		/* Some callers may provide both an obj and dsn. To ensure that
+		 * the connection is not released twice we set it to NULL here if
+		 * present.
+		 */
+		if (obj) {
+			*obj = NULL;
+		}
 	} else if (obj && *obj) {
 		ast_odbc_release_obj(*obj);
 		*obj = NULL;
@@ -1403,7 +1417,8 @@ static char *cli_odbc_read(struct ast_cli_entry *e, int cmd, struct ast_cli_args
 			AST_RWLIST_UNLOCK(&queries);
 			return NULL;
 		} else if (a->pos == 4) {
-			return a->n == 0 ? ast_strdup("exec") : NULL;
+			static const char * const completions[] = { "exec", NULL };
+			return ast_cli_complete(a->word, completions, a->n);
 		} else {
 			return NULL;
 		}
@@ -1609,7 +1624,8 @@ static char *cli_odbc_write(struct ast_cli_entry *e, int cmd, struct ast_cli_arg
 			AST_RWLIST_UNLOCK(&queries);
 			return NULL;
 		} else if (a->pos == 5) {
-			return a->n == 0 ? ast_strdup("exec") : NULL;
+			static const char * const completions[] = { "exec", NULL };
+			return ast_cli_complete(a->word, completions, a->n);
 		} else {
 			return NULL;
 		}

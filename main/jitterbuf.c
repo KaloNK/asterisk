@@ -33,8 +33,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include "jitterbuf.h"
 #include "asterisk/utils.h"
 
@@ -845,4 +843,7 @@ enum jb_return_code jb_setconf(jitterbuf *jb, jb_conf *conf)
 	return JB_OK;
 }
 
-
+int jb_is_late(jitterbuf *jb, long ts)
+{
+	return ts + jb->info.current < jb->info.next_voice_ts;
+}

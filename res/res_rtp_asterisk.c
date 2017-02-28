@@ -35,8 +35,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include <sys/time.h>
 #include <signal.h>
 #include <fcntl.h>
@@ -51,8 +49,10 @@ ASTERISK_REGISTER_FILE()
 #include <pjlib.h>
 #include <pjlib-util.h>
 #include <pjnath.h>
+#include <ifaddrs.h>
 #endif
 
+#include "asterisk/options.h"
 #include "asterisk/stun.h"
 #include "asterisk/pbx.h"
 #include "asterisk/frame.h"
@@ -145,6 +145,9 @@ static pj_str_t turnaddr;
 static int turnport = DEFAULT_TURN_PORT;
 static pj_str_t turnusername;
 static pj_str_t turnpassword;
+static struct ast_ha *ice_blacklist = NULL;    /*!< Blacklisted ICE networks */
+static ast_rwlock_t ice_blacklist_lock = AST_RWLOCK_INIT_VALUE;
+
 
 /*! \brief Pool factory used by pjlib to allocate memory. */
 static pj_caching_pool cachingpool;
@@ -227,6 +230,7 @@ struct dtls_details {
 /*! \brief RTP session description */
 struct ast_rtp {
 	int s;
+	/*! \note The f.subclass.format holds a ref. */
 	struct ast_frame f;
 	unsigned char rawdata[8192 + AST_FRIENDLY_OFFSET];
 	unsigned int ssrc;		/*!< Synchronization source, RFC 3550, page 10. */
@@ -407,6 +411,12 @@ struct ast_rtcp {
 #ifdef HAVE_OPENSSL_SRTP
 	struct dtls_details dtls; /*!< DTLS state information */
 #endif
+
+	/* Cached local address string allows us to generate
+	 * RTCP stasis messages without having to look up our
+	 * own address every time
+	 */
+	char *local_addr_str;
 };
 
 struct rtp_red {
@@ -540,8 +550,8 @@ static int ice_candidate_cmp(void *obj, void *arg, int flags)
 
 	if (strcmp(candidate1->foundation, candidate2->foundation) ||
 			candidate1->id != candidate2->id ||
-			ast_sockaddr_cmp(&candidate1->address, &candidate2->address) ||
-			candidate1->type != candidate1->type) {
+			candidate1->type != candidate2->type ||
+			ast_sockaddr_cmp(&candidate1->address, &candidate2->address)) {
 		return 0;
 	}
 
@@ -1043,7 +1053,16 @@ static void rtp_ioqueue_thread_destroy(struct ast_rtp_ioqueue_thread *ioqueue)
 		pj_thread_destroy(ioqueue->thread);
 	}
 
-	pj_pool_release(ioqueue->pool);
+	if (ioqueue->pool) {
+		/* This mimics the behavior of pj_pool_safe_release
+		 * which was introduced in pjproject 2.6.
+		 */
+		pj_pool_t *temp_pool = ioqueue->pool;
+
+		ioqueue->pool = NULL;
+		pj_pool_release(temp_pool);
+	}
+
 	ast_free(ioqueue);
 }
 
@@ -1340,7 +1359,7 @@ static int ast_rtp_dtls_set_configuration(struct ast_rtp_instance *instance, con
 {
 	struct ast_rtp *rtp = ast_rtp_instance_get_data(instance);
 	int res;
-#ifndef HAVE_OPENSSL_ECDH_AUTO
+#ifdef HAVE_OPENSSL_EC
 	EC_KEY *ecdh;
 #endif
 
@@ -1357,21 +1376,53 @@ static int ast_rtp_dtls_set_configuration(struct ast_rtp_instance *instance, con
 		return 0;
 	}
 
-	if (!(rtp->ssl_ctx = SSL_CTX_new(DTLSv1_method()))) {
+#if OPENSSL_VERSION_NUMBER < 0x10002000L || defined(LIBRESSL_VERSION_NUMBER)
+	rtp->ssl_ctx = SSL_CTX_new(DTLSv1_method());
+#else
+	rtp->ssl_ctx = SSL_CTX_new(DTLS_method());
+#endif
+	if (!rtp->ssl_ctx) {
 		return -1;
 	}
 
 	SSL_CTX_set_read_ahead(rtp->ssl_ctx, 1);
 
-#ifdef HAVE_OPENSSL_ECDH_AUTO
-	SSL_CTX_set_ecdh_auto(rtp->ssl_ctx, 1);
-#else
+#ifdef HAVE_OPENSSL_EC
+
+	if (!ast_strlen_zero(dtls_cfg->pvtfile)) {
+		BIO *bio = BIO_new_file(dtls_cfg->pvtfile, "r");
+		if (bio != NULL) {
+			DH *dh = PEM_read_bio_DHparams(bio, NULL, NULL, NULL);
+			if (dh != NULL) {
+				if (SSL_CTX_set_tmp_dh(rtp->ssl_ctx, dh)) {
+					long options = SSL_OP_CIPHER_SERVER_PREFERENCE |
+						SSL_OP_SINGLE_DH_USE | SSL_OP_SINGLE_ECDH_USE;
+					options = SSL_CTX_set_options(rtp->ssl_ctx, options);
+					ast_verb(2, "DTLS DH initialized, PFS enabled\n");
+				}
+				DH_free(dh);
+			}
+			BIO_free(bio);
+		}
+	}
+	/* enables AES-128 ciphers, to get AES-256 use NID_secp384r1 */
 	ecdh = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
-	if (ecdh) {
-		SSL_CTX_set_tmp_ecdh(rtp->ssl_ctx, ecdh);
+	if (ecdh != NULL) {
+		if (SSL_CTX_set_tmp_ecdh(rtp->ssl_ctx, ecdh)) {
+			#ifndef SSL_CTRL_SET_ECDH_AUTO
+				#define SSL_CTRL_SET_ECDH_AUTO 94
+			#endif
+			/* SSL_CTX_set_ecdh_auto(rtp->ssl_ctx, on); requires OpenSSL 1.0.2 which wraps: */
+			if (SSL_CTX_ctrl(rtp->ssl_ctx, SSL_CTRL_SET_ECDH_AUTO, 1, NULL)) {
+				ast_verb(2, "DTLS ECDH initialized (automatic), faster PFS enabled\n");
+			} else {
+				ast_verb(2, "DTLS ECDH initialized (secp256r1), faster PFS enabled\n");
+			}
+		}
 		EC_KEY_free(ecdh);
 	}
-#endif
+
+#endif /* #ifdef HAVE_OPENSSL_EC */
 
 	rtp->dtls_verify = dtls_cfg->verify;
 
@@ -1393,7 +1444,7 @@ static int ast_rtp_dtls_set_configuration(struct ast_rtp_instance *instance, con
 	if (!ast_strlen_zero(dtls_cfg->certfile)) {
 		char *private = ast_strlen_zero(dtls_cfg->pvtfile) ? dtls_cfg->certfile : dtls_cfg->pvtfile;
 		BIO *certbio;
-		X509 *cert;
+		X509 *cert = NULL;
 		const EVP_MD *type;
 		unsigned int size, i;
 		unsigned char fingerprint[EVP_MAX_MD_SIZE];
@@ -1412,18 +1463,18 @@ static int ast_rtp_dtls_set_configuration(struct ast_rtp_instance *instance, con
 			return -1;
 		}
 
-		if (!(certbio = BIO_new(BIO_s_file()))) {
-			ast_log(LOG_ERROR, "Failed to allocate memory for certificate fingerprinting on RTP instance '%p'\n",
-				instance);
-			return -1;
-		}
-
 		if (rtp->local_hash == AST_RTP_DTLS_HASH_SHA1) {
 			type = EVP_sha1();
 		} else if (rtp->local_hash == AST_RTP_DTLS_HASH_SHA256) {
 			type = EVP_sha256();
 		} else {
 			ast_log(LOG_ERROR, "Unsupported fingerprint hash type on RTP instance '%p'\n",
+				instance);
+			return -1;
+		}
+
+		if (!(certbio = BIO_new(BIO_s_file()))) {
+			ast_log(LOG_ERROR, "Failed to allocate memory for certificate fingerprinting on RTP instance '%p'\n",
 				instance);
 			return -1;
 		}
@@ -1435,6 +1486,9 @@ static int ast_rtp_dtls_set_configuration(struct ast_rtp_instance *instance, con
 			ast_log(LOG_ERROR, "Could not produce fingerprint from certificate '%s' for RTP instance '%p'\n",
 				dtls_cfg->certfile, instance);
 			BIO_free_all(certbio);
+			if (cert) {
+				X509_free(cert);
+			}
 			return -1;
 		}
 
@@ -1446,6 +1500,7 @@ static int ast_rtp_dtls_set_configuration(struct ast_rtp_instance *instance, con
 		*(local_fingerprint-1) = 0;
 
 		BIO_free_all(certbio);
+		X509_free(cert);
 	}
 
 	if (!ast_strlen_zero(dtls_cfg->cipher)) {
@@ -2404,11 +2459,38 @@ static int rtp_learning_rtp_seq_update(struct rtp_learning_info *info, uint16_t 
 }
 
 #ifdef HAVE_PJPROJECT
+/*!
+ * \internal
+ * \brief Checks an address against the ICE blacklist
+ * \note If there is no ice_blacklist list, always returns 0
+ *
+ * \param address The address to consider
+ * \retval 0 if address is not ICE blacklisted
+ * \retval 1 if address is ICE blacklisted
+ */
+static int rtp_address_is_ice_blacklisted(const pj_sockaddr_t *address)
+{
+	char buf[PJ_INET6_ADDRSTRLEN];
+	struct ast_sockaddr saddr;
+	int result = 1;
+
+	ast_sockaddr_parse(&saddr, pj_sockaddr_print(address, buf, sizeof(buf), 0), 0);
+
+	ast_rwlock_rdlock(&ice_blacklist_lock);
+	if (!ice_blacklist || (ast_apply_ha(ice_blacklist, &saddr) == AST_SENSE_ALLOW)) {
+		result = 0;
+	}
+	ast_rwlock_unlock(&ice_blacklist_lock);
+
+	return result;
+}
+
 static void rtp_add_candidates_to_ice(struct ast_rtp_instance *instance, struct ast_rtp *rtp, struct ast_sockaddr *addr, int port, int component,
 				      int transport)
 {
-	pj_sockaddr address[16];
+	pj_sockaddr address[PJ_ICE_MAX_CAND];
 	unsigned int count = PJ_ARRAY_SIZE(address), pos = 0;
+	int basepos = -1;
 
 	/* Add all the local interface IP addresses */
 	if (ast_sockaddr_is_ipv4(addr)) {
@@ -2422,9 +2504,18 @@ static void rtp_add_candidates_to_ice(struct ast_rtp_instance *instance, struct 
 	host_candidate_overrides_apply(count, address);
 
 	for (pos = 0; pos < count; pos++) {
-		pj_sockaddr_set_port(&address[pos], port);
-		ast_rtp_ice_add_cand(rtp, component, transport, PJ_ICE_CAND_TYPE_HOST, 65535, &address[pos], &address[pos], NULL,
+		if (!rtp_address_is_ice_blacklisted(&address[pos])) {
+			if (basepos == -1) {
+				basepos = pos;
+			}
+			pj_sockaddr_set_port(&address[pos], port);
+			ast_rtp_ice_add_cand(rtp, component, transport, PJ_ICE_CAND_TYPE_HOST, 65535, &address[pos], &address[pos], NULL,
 				     pj_sockaddr_get_len(&address[pos]));
+		}
+	}
+	if (basepos == -1) {
+		/* start with first address unless excluded above */
+		basepos = 0;
 	}
 
 	/* If configured to use a STUN server to get our external mapped address do so */
@@ -2433,15 +2524,27 @@ static void rtp_add_candidates_to_ice(struct ast_rtp_instance *instance, struct 
 
 		if (!ast_stun_request(component == AST_RTP_ICE_COMPONENT_RTCP ? rtp->rtcp->s : rtp->s, &stunaddr, NULL, &answer)) {
 			pj_sockaddr base;
+			pj_sockaddr ext;
 			pj_str_t mapped = pj_str(ast_strdupa(ast_inet_ntoa(answer.sin_addr)));
+			int srflx = 1;
 
 			/* Use the first local host candidate as the base */
-			pj_sockaddr_cp(&base, &address[0]);
+			pj_sockaddr_cp(&base, &address[basepos]);
 
-			pj_sockaddr_init(pj_AF_INET(), &address[0], &mapped, ntohs(answer.sin_port));
+			pj_sockaddr_init(pj_AF_INET(), &ext, &mapped, ntohs(answer.sin_port));
 
-			ast_rtp_ice_add_cand(rtp, component, transport, PJ_ICE_CAND_TYPE_SRFLX, 65535, &address[0], &base,
-					     &base, pj_sockaddr_get_len(&address[0]));
+			/* If the returned address is the same as one of our host candidates, don't send the srflx */
+			for (pos = 0; pos < count; pos++) {
+				if ((pj_sockaddr_cmp(&address[pos], &ext) == 0) && !rtp_address_is_ice_blacklisted(&address[pos])) {
+					srflx = 0;
+					break;
+				}
+			}
+
+			if (srflx) {
+				ast_rtp_ice_add_cand(rtp, component, transport, PJ_ICE_CAND_TYPE_SRFLX, 65535, &ext, &base,
+							 &base, pj_sockaddr_get_len(&ext));
+			}
 		}
 	}
 
@@ -2556,7 +2659,7 @@ static int ast_rtp_new(struct ast_rtp_instance *instance,
 
 	/* Set default parameters on the newly created RTP structure */
 	rtp->ssrc = ast_random();
-	rtp->seqno = ast_random() & 0xffff;
+	rtp->seqno = ast_random() & 0x7fff;
 	rtp->strict_rtp_state = (strictrtp ? STRICT_RTP_LEARN : STRICT_RTP_OPEN);
 	if (strictrtp) {
 		rtp_learning_seq_init(&rtp->rtp_source_learn, (uint16_t)rtp->seqno);
@@ -2664,6 +2767,7 @@ static int ast_rtp_destroy(struct ast_rtp_instance *instance)
 		 * RTP instance while it's active.
 		 */
 		close(rtp->rtcp->s);
+		ast_free(rtp->rtcp->local_addr_str);
 		ast_free(rtp->rtcp);
 	}
 
@@ -2671,6 +2775,7 @@ static int ast_rtp_destroy(struct ast_rtp_instance *instance)
 	if (rtp->red) {
 		AST_SCHED_DEL(rtp->sched, rtp->red->schedid);
 		ast_free(rtp->red);
+		rtp->red = NULL;
 	}
 
 #ifdef HAVE_PJPROJECT
@@ -2991,7 +3096,26 @@ static void timeval2ntp(struct timeval tv, unsigned int *msw, unsigned int *lsw)
 	unsigned int sec, usec, frac;
 	sec = tv.tv_sec + 2208988800u; /* Sec between 1900 and 1970 */
 	usec = tv.tv_usec;
-	frac = (usec << 12) + (usec << 8) - ((usec * 3650) >> 6);
+	/*
+	 * Convert usec to 0.32 bit fixed point without overflow.
+	 *
+	 * = usec * 2^32 / 10^6
+	 * = usec * 2^32 / (2^6 * 5^6)
+	 * = usec * 2^26 / 5^6
+	 *
+	 * The usec value needs 20 bits to represent 999999 usec.  So
+	 * splitting the 2^26 to get the most precision using 32 bit
+	 * values gives:
+	 *
+	 * = ((usec * 2^12) / 5^6) * 2^14
+	 *
+	 * Splitting the division into two stages preserves all the
+	 * available significant bits of usec over doing the division
+	 * all at once.
+	 *
+	 * = ((((usec * 2^12) / 5^3) * 2^7) / 5^3) * 2^7
+	 */
+	frac = ((((usec << 12) / 125) << 7) / 125) << 7;
 	*msw = sec;
 	*lsw = frac;
 }
@@ -2999,7 +3123,8 @@ static void timeval2ntp(struct timeval tv, unsigned int *msw, unsigned int *lsw)
 static void ntp2timeval(unsigned int msw, unsigned int lsw, struct timeval *tv)
 {
 	tv->tv_sec = msw - 2208988800u;
-	tv->tv_usec = ((lsw << 6) / 3650) - (lsw >> 12) - (lsw >> 8);
+	/* Reverse the sequence in timeval2ntp() */
+	tv->tv_usec = ((((lsw >> 7) * 125) >> 7) * 125) >> 12;
 }
 
 static void calculate_lost_packet_statistics(struct ast_rtp *rtp,
@@ -3076,12 +3201,7 @@ static int ast_rtcp_write_report(struct ast_rtp_instance *instance, int sr)
 	int rate = rtp_get_rate(rtp->f.subclass.format);
 	int ice;
 	int header_offset = 0;
-	char *str_remote_address;
-	char *str_local_address;
 	struct ast_sockaddr remote_address = { { 0, } };
-	struct ast_sockaddr local_address = { { 0, } };
-	struct ast_sockaddr real_remote_address = { { 0, } };
-	struct ast_sockaddr real_local_address = { { 0, } };
 	struct ast_rtp_rtcp_report_block *report_block = NULL;
 	RAII_VAR(struct ast_rtp_rtcp_report *, rtcp_report,
 			ast_rtp_rtcp_report_alloc(rtp->themssrc ? 1 : 0),
@@ -3189,9 +3309,9 @@ static int ast_rtcp_write_report(struct ast_rtp_instance *instance, int sr)
 				ast_sockaddr_stringify(&remote_address), ice ? " (via ICE)" : "");
 		ast_verbose("  Our SSRC: %u\n", rtcp_report->ssrc);
 		if (sr) {
-			ast_verbose("  Sent(NTP): %u.%010u\n",
+			ast_verbose("  Sent(NTP): %u.%06u\n",
 				(unsigned int)rtcp_report->sender_information.ntp_timestamp.tv_sec,
-				(unsigned int)rtcp_report->sender_information.ntp_timestamp.tv_usec * 4096);
+				(unsigned int)rtcp_report->sender_information.ntp_timestamp.tv_usec);
 			ast_verbose("  Sent(RTP): %u\n", rtcp_report->sender_information.rtp_timestamp);
 			ast_verbose("  Sent packets: %u\n", rtcp_report->sender_information.packet_count);
 			ast_verbose("  Sent octets: %u\n", rtcp_report->sender_information.octet_count);
@@ -3208,22 +3328,9 @@ static int ast_rtcp_write_report(struct ast_rtp_instance *instance, int sr)
 		}
 	}
 
-	ast_rtp_instance_get_local_address(instance, &local_address);
-	if (!ast_find_ourip(&real_local_address, &local_address, 0)) {
-		str_local_address = ast_strdupa(ast_sockaddr_stringify(&real_local_address));
-	} else {
-		str_local_address = ast_strdupa(ast_sockaddr_stringify(&local_address));
-	}
-
-	if (!ast_find_ourip(&real_remote_address, &remote_address, 0)) {
-		str_remote_address = ast_strdupa(ast_sockaddr_stringify(&real_remote_address));
-	} else {
-		str_remote_address = ast_strdupa(ast_sockaddr_stringify(&remote_address));
-	}
-
 	message_blob = ast_json_pack("{s: s, s: s}",
-			"to", str_remote_address,
-			"from", str_local_address);
+			"to", ast_sockaddr_stringify(&remote_address),
+			"from", rtp->rtcp->local_addr_str);
 	ast_rtp_publish_rtcp_message(instance, ast_rtp_rtcp_sent_type(),
 			rtcp_report,
 			message_blob);
@@ -3389,7 +3496,8 @@ static int ast_rtp_raw_write(struct ast_rtp_instance *instance, struct ast_frame
 	return 0;
 }
 
-static struct ast_frame *red_t140_to_red(struct rtp_red *red) {
+static struct ast_frame *red_t140_to_red(struct rtp_red *red)
+{
 	unsigned char *data = red->t140red.data.ptr;
 	int len = 0;
 	int i;
@@ -3531,6 +3639,11 @@ static int ast_rtp_write(struct ast_rtp_instance *instance, struct ast_frame *fr
 	/* If no smoother is present see if we have to set one up */
 	if (!rtp->smoother && ast_format_can_be_smoothed(format)) {
 		unsigned int framing_ms = ast_rtp_codecs_get_framing(ast_rtp_instance_get_codecs(instance));
+		int is_slinear = ast_format_cache_is_slinear(format);
+
+		if (!framing_ms && is_slinear) {
+			framing_ms = ast_format_get_default_ms(format);
+		}
 
 		if (framing_ms) {
 			rtp->smoother = ast_smoother_new((framing_ms * ast_format_get_minimum_bytes(format)) / ast_format_get_minimum_ms(format));
@@ -3538,6 +3651,9 @@ static int ast_rtp_write(struct ast_rtp_instance *instance, struct ast_frame *fr
 				ast_log(LOG_WARNING, "Unable to create smoother: format %s ms: %u len: %u\n",
 					ast_format_get_name(format), framing_ms, ast_format_get_minimum_bytes(format));
 				return -1;
+			}
+			if (is_slinear) {
+				ast_smoother_set_flags(rtp->smoother, AST_SMOOTHER_FLAG_BE);
 			}
 		}
 	}
@@ -3941,9 +4057,22 @@ static int update_rtt_stats(struct ast_rtp *rtp, unsigned int lsr, unsigned int 
 	lsr_a = ((msw & 0x0000ffff) << 16) | ((lsw & 0xffff0000) >> 16);
 	rtt = lsr_a - lsr - dlsr;
 	rtt_msw = (rtt & 0xffff0000) >> 16;
-	rtt_lsw = (rtt & 0x0000ffff) << 16;
+	rtt_lsw = (rtt & 0x0000ffff);
 	rtt_tv.tv_sec = rtt_msw;
-	rtt_tv.tv_usec = ((rtt_lsw << 6) / 3650) - (rtt_lsw >> 12) - (rtt_lsw >> 8);
+	/*
+	 * Convert 16.16 fixed point rtt_lsw to usec without
+	 * overflow.
+	 *
+	 * = rtt_lsw * 10^6 / 2^16
+	 * = rtt_lsw * (2^6 * 5^6) / 2^16
+	 * = rtt_lsw * 5^6 / 2^10
+	 *
+	 * The rtt_lsw value is in 16.16 fixed point format and 5^6
+	 * requires 14 bits to represent.  We have enough space to
+	 * directly do the conversion because there is no integer
+	 * component in rtt_lsw.
+	 */
+	rtt_tv.tv_usec = (rtt_lsw * 15625) >> 10;
 	rtp->rtcp->rtt = (double)rtt_tv.tv_sec + ((double)rtt_tv.tv_usec / 1000000);
 	if (lsr_a - dlsr < lsr) {
 		return 1;
@@ -4031,11 +4160,6 @@ static struct ast_frame *ast_rtcp_read(struct ast_rtp_instance *instance)
 	int report_counter = 0;
 	struct ast_rtp_rtcp_report_block *report_block;
 	struct ast_frame *f = &ast_null_frame;
-	char *str_local_address;
-	char *str_remote_address;
-	struct ast_sockaddr local_address = { { 0,} };
-	struct ast_sockaddr real_local_address = { { 0, } };
-	struct ast_sockaddr real_remote_address = { { 0, } };
 
 	/* Read in RTCP data from the socket */
 	if ((res = rtcp_recvfrom(instance, rtcpdata + AST_FRIENDLY_OFFSET,
@@ -4092,8 +4216,6 @@ static struct ast_frame *ast_rtcp_read(struct ast_rtp_instance *instance)
 
 	ast_debug(1, "Got RTCP report of %d bytes\n", res);
 
-	ast_rtp_instance_get_local_address(instance, &local_address);
-
 	while (position < packetwords) {
 		int i, pt, rc;
 		unsigned int length;
@@ -4146,9 +4268,9 @@ static struct ast_frame *ast_rtcp_read(struct ast_rtp_instance *instance)
 					&rtcp_report->sender_information.ntp_timestamp);
 			rtcp_report->sender_information.rtp_timestamp = ntohl(rtcpheader[i + 2]);
 			if (rtcp_debug_test_addr(&addr)) {
-				ast_verbose("NTP timestamp: %u.%010u\n",
+				ast_verbose("NTP timestamp: %u.%06u\n",
 						(unsigned int)rtcp_report->sender_information.ntp_timestamp.tv_sec,
-						(unsigned int)rtcp_report->sender_information.ntp_timestamp.tv_usec * 4096);
+						(unsigned int)rtcp_report->sender_information.ntp_timestamp.tv_usec);
 				ast_verbose("RTP timestamp: %u\n", rtcp_report->sender_information.rtp_timestamp);
 				ast_verbose("SPC: %u\tSOC: %u\n",
 						rtcp_report->sender_information.packet_count,
@@ -4209,26 +4331,38 @@ static struct ast_frame *ast_rtcp_read(struct ast_rtp_instance *instance)
 			/* If and when we handle more than one report block, this should occur outside
 			 * this loop.
 			 */
-			if (!ast_find_ourip(&real_local_address, &local_address, 0)) {
-				str_local_address = ast_strdupa(ast_sockaddr_stringify(&real_local_address));
-			} else {
-				str_local_address = ast_strdupa(ast_sockaddr_stringify(&local_address));
-			}
-
-			if (!ast_find_ourip(&real_remote_address, &addr, 0)) {
-				str_remote_address = ast_strdupa(ast_sockaddr_stringify(&real_remote_address));
-			} else {
-				str_remote_address = ast_strdupa(ast_sockaddr_stringify(&addr));
-			}
 
 			message_blob = ast_json_pack("{s: s, s: s, s: f}",
-					"from", str_remote_address,
-					"to", str_local_address,
+					"from", ast_sockaddr_stringify(&rtp->rtcp->them),
+					"to", rtp->rtcp->local_addr_str,
 					"rtt", rtp->rtcp->rtt);
 			ast_rtp_publish_rtcp_message(instance, ast_rtp_rtcp_received_type(),
 					rtcp_report,
 					message_blob);
 			ast_json_unref(message_blob);
+
+			/* Return an AST_FRAME_RTCP frame with the ast_rtp_rtcp_report
+			 * object as a its data */
+			rtp->f.frametype = AST_FRAME_RTCP;
+			rtp->f.data.ptr = rtp->rawdata + AST_FRIENDLY_OFFSET;
+			memcpy(rtp->f.data.ptr, rtcp_report, sizeof(struct ast_rtp_rtcp_report));
+			rtp->f.datalen = sizeof(struct ast_rtp_rtcp_report);
+			if (rc > 0) {
+				/* There's always a single report block stored, here */
+				struct ast_rtp_rtcp_report *rtcp_report2;
+				report_block = rtp->f.data.ptr + rtp->f.datalen + sizeof(struct ast_rtp_rtcp_report_block *);
+				memcpy(report_block, rtcp_report->report_block[report_counter-1], sizeof(struct ast_rtp_rtcp_report_block));
+				rtcp_report2 = (struct ast_rtp_rtcp_report *)rtp->f.data.ptr;
+				rtcp_report2->report_block[report_counter-1] = report_block;
+				rtp->f.datalen += sizeof(struct ast_rtp_rtcp_report_block);
+			}
+			rtp->f.offset = AST_FRIENDLY_OFFSET;
+			rtp->f.samples = 0;
+			rtp->f.mallocd = 0;
+			rtp->f.delivery.tv_sec = 0;
+			rtp->f.delivery.tv_usec = 0;
+			rtp->f.src = "RTP";
+			f = &rtp->f;
 			break;
 		case RTCP_PT_FUR:
 		/* Handle RTCP FIR as FUR */
@@ -4277,6 +4411,7 @@ static int bridge_p2p_rtp_write(struct ast_rtp_instance *instance, unsigned int 
 	int reconstruct = ntohl(rtpheader[0]);
 	struct ast_sockaddr remote_address = { {0,} };
 	int ice;
+	unsigned int timestamp = ntohl(rtpheader[1]);
 
 	/* Get fields from packet */
 	payload = (reconstruct & 0x7f0000) >> 16;
@@ -4303,6 +4438,22 @@ static int bridge_p2p_rtp_write(struct ast_rtp_instance *instance, unsigned int 
 	/* If the payload coming in is not one of the negotiated ones then send it to the core, this will cause formats to change and the bridge to break */
 	if (ast_rtp_codecs_find_payload_code(ast_rtp_instance_get_codecs(instance1), bridged_payload) == -1) {
 		ast_debug(1, "Unsupported payload type received \n");
+		return -1;
+	}
+
+	/* If bridged peer is in dtmf, feed all packets to core until it finishes to avoid infinite dtmf */
+	if (bridged->sending_digit) {
+		ast_debug(1, "Feeding packets to core until DTMF finishes\n");
+		return -1;
+	}
+
+	/*
+	 * Even if we are no longer in dtmf, we could still be receiving
+	 * re-transmissions of the last dtmf end still.  Feed those to the
+	 * core so they can be filtered accordingly.
+	 */
+	if (rtp->last_end_timestamp == timestamp) {
+		ast_debug(1, "Feeding packet with duplicate timestamp to core\n");
 		return -1;
 	}
 
@@ -4756,6 +4907,8 @@ static struct ast_frame *ast_rtp_read(struct ast_rtp_instance *instance, int rtc
 		/* Video -- samples is # of samples vs. 90000 */
 		if (!rtp->lastividtimestamp)
 			rtp->lastividtimestamp = timestamp;
+		ast_set_flag(&rtp->f, AST_FRFLAG_HAS_TIMING_INFO);
+		rtp->f.ts = timestamp / (rtp_get_rate(rtp->f.subclass.format) / 1000);
 		rtp->f.samples = timestamp - rtp->lastividtimestamp;
 		rtp->lastividtimestamp = timestamp;
 		rtp->f.delivery.tv_sec = 0;
@@ -4786,6 +4939,8 @@ static void ast_rtp_prop_set(struct ast_rtp_instance *instance, enum ast_rtp_pro
 
 	if (property == AST_RTP_PROPERTY_RTCP) {
 		if (value) {
+			struct ast_sockaddr local_addr;
+
 			if (rtp->rtcp) {
 				ast_debug(1, "Ignoring duplicate RTCP property on RTP instance '%p'\n", instance);
 				return;
@@ -4800,6 +4955,21 @@ static void ast_rtp_prop_set(struct ast_rtp_instance *instance, enum ast_rtp_pro
 			ast_sockaddr_set_port(&rtp->rtcp->us,
 					      ast_sockaddr_port(&rtp->rtcp->us) + 1);
 
+			ast_sockaddr_copy(&local_addr, &rtp->rtcp->us);
+			if (!ast_find_ourip(&local_addr, &rtp->rtcp->us, 0)) {
+				ast_sockaddr_set_port(&local_addr, ast_sockaddr_port(&rtp->rtcp->us));
+			} else {
+				/* Failed to get local address reset to use default. */
+				ast_sockaddr_copy(&local_addr, &rtp->rtcp->us);
+			}
+
+			rtp->rtcp->local_addr_str = ast_strdup(ast_sockaddr_stringify(&local_addr));
+			if (!rtp->rtcp->local_addr_str) {
+				ast_free(rtp->rtcp);
+				rtp->rtcp = NULL;
+				return;
+			}
+
 			if ((rtp->rtcp->s =
 			     create_new_socket("RTCP",
 					       ast_sockaddr_is_ipv4(&rtp->rtcp->us) ?
@@ -4807,6 +4977,7 @@ static void ast_rtp_prop_set(struct ast_rtp_instance *instance, enum ast_rtp_pro
 					       ast_sockaddr_is_ipv6(&rtp->rtcp->us) ?
 					       AF_INET6 : -1)) < 0) {
 				ast_debug(1, "Failed to create a new socket for RTCP on instance '%p'\n", instance);
+				ast_free(rtp->rtcp->local_addr_str);
 				ast_free(rtp->rtcp);
 				rtp->rtcp = NULL;
 				return;
@@ -4816,6 +4987,7 @@ static void ast_rtp_prop_set(struct ast_rtp_instance *instance, enum ast_rtp_pro
 			if (ast_bind(rtp->rtcp->s, &rtp->rtcp->us)) {
 				ast_debug(1, "Failed to setup RTCP on RTP instance '%p'\n", instance);
 				close(rtp->rtcp->s);
+				ast_free(rtp->rtcp->local_addr_str);
 				ast_free(rtp->rtcp);
 				rtp->rtcp = NULL;
 				return;
@@ -4855,6 +5027,7 @@ static void ast_rtp_prop_set(struct ast_rtp_instance *instance, enum ast_rtp_pro
 					SSL_free(rtp->rtcp->dtls.ssl);
 				}
 #endif
+				ast_free(rtp->rtcp->local_addr_str);
 				ast_free(rtp->rtcp);
 				rtp->rtcp = NULL;
 			}
@@ -4875,13 +5048,31 @@ static int ast_rtp_fd(struct ast_rtp_instance *instance, int rtcp)
 static void ast_rtp_remote_address_set(struct ast_rtp_instance *instance, struct ast_sockaddr *addr)
 {
 	struct ast_rtp *rtp = ast_rtp_instance_get_data(instance);
+	struct ast_sockaddr local;
+
+	ast_rtp_instance_get_local_address(instance, &local);
+	if (!ast_sockaddr_isnull(addr)) {
+		/* Update the local RTP address with what is being used */
+		if (ast_ouraddrfor(addr, &local)) {
+			/* Failed to update our address so reuse old local address */
+			ast_rtp_instance_get_local_address(instance, &local);
+		} else {
+			ast_rtp_instance_set_local_address(instance, &local);
+		}
+	}
 
 	if (rtp->rtcp) {
 		ast_debug(1, "Setting RTCP address on RTP instance '%p'\n", instance);
 		ast_sockaddr_copy(&rtp->rtcp->them, addr);
 		if (!ast_sockaddr_isnull(addr)) {
-			ast_sockaddr_set_port(&rtp->rtcp->them,
-					      ast_sockaddr_port(addr) + 1);
+			ast_sockaddr_set_port(&rtp->rtcp->them, ast_sockaddr_port(addr) + 1);
+
+			/* Update the local RTCP address with what is being used */
+			ast_sockaddr_set_port(&local, ast_sockaddr_port(&local) + 1);
+			ast_sockaddr_copy(&rtp->rtcp->us, &local);
+
+			ast_free(rtp->rtcp->local_addr_str);
+			rtp->rtcp->local_addr_str = ast_strdup(ast_sockaddr_stringify(&local));
 		}
 	}
 
@@ -4891,8 +5082,6 @@ static void ast_rtp_remote_address_set(struct ast_rtp_instance *instance, struct
 		rtp->strict_rtp_state = STRICT_RTP_LEARN;
 		rtp_learning_seq_init(&rtp->rtp_source_learn, rtp->seqno);
 	}
-
-	return;
 }
 
 /*! \brief Write t140 redundacy frame
@@ -4913,22 +5102,21 @@ static int rtp_red_init(struct ast_rtp_instance *instance, int buffer_time, int 
 	struct ast_rtp *rtp = ast_rtp_instance_get_data(instance);
 	int x;
 
-	if (!(rtp->red = ast_calloc(1, sizeof(*rtp->red)))) {
+	rtp->red = ast_calloc(1, sizeof(*rtp->red));
+	if (!rtp->red) {
 		return -1;
 	}
 
 	rtp->red->t140.frametype = AST_FRAME_TEXT;
-	ao2_replace(rtp->red->t140.subclass.format, ast_format_t140_red);
+	rtp->red->t140.subclass.format = ast_format_t140_red;
 	rtp->red->t140.data.ptr = &rtp->red->buf_data;
 
-	rtp->red->t140.ts = 0;
 	rtp->red->t140red = rtp->red->t140;
 	rtp->red->t140red.data.ptr = &rtp->red->t140red_data;
-	rtp->red->t140red.datalen = 0;
+
 	rtp->red->ti = buffer_time;
 	rtp->red->num_gen = generations;
 	rtp->red->hdrlen = generations * 4 + 1;
-	rtp->red->prev_ts = 0;
 
 	for (x = 0; x < generations; x++) {
 		rtp->red->pt[x] = payloads[x];
@@ -4937,8 +5125,6 @@ static int rtp_red_init(struct ast_rtp_instance *instance, int buffer_time, int 
 	}
 	rtp->red->t140red_data[x*4] = rtp->red->pt[x] = payloads[x]; /* primary pt */
 	rtp->red->schedid = ast_sched_add(rtp->sched, generations, red_write, instance);
-
-	rtp->red->t140.datalen = 0;
 
 	return 0;
 }
@@ -5349,6 +5535,10 @@ static int rtp_reload(int reload)
 	turnusername = pj_str(NULL);
 	turnpassword = pj_str(NULL);
 	host_candidate_overrides_clear();
+	ast_rwlock_wrlock(&ice_blacklist_lock);
+	ast_free_ha(ice_blacklist);
+	ice_blacklist = NULL;
+	ast_rwlock_unlock(&ice_blacklist_lock);
 #endif
 
 	if (cfg) {
@@ -5458,6 +5648,25 @@ static int rtp_reload(int reload)
 			AST_RWLIST_INSERT_TAIL(&host_candidates, candidate, next);
 		}
 		AST_RWLIST_UNLOCK(&host_candidates);
+
+		/* Read ICE blacklist configuration lines */
+		ast_rwlock_wrlock(&ice_blacklist_lock);
+		for (var = ast_variable_browse(cfg, "general"); var; var = var->next) {
+			if (!strcasecmp(var->name, "ice_blacklist")) {
+				struct ast_ha *na;
+				int ha_error = 0;
+				if (!(na = ast_append_ha("d", var->value, ice_blacklist, &ha_error))) {
+					ast_log(LOG_WARNING, "Invalid ice_blacklist value: %s\n", var->value);
+				} else {
+					ice_blacklist = na;
+				}
+				if (ha_error) {
+					ast_log(LOG_ERROR, "Bad ice_blacklist configuration value line %d : %s\n", var->lineno, var->value);
+				}
+			}
+		}
+		ast_rwlock_unlock(&ice_blacklist_lock);
+
 #endif
 		ast_config_destroy(cfg);
 	}
@@ -5497,6 +5706,7 @@ static int load_module(void)
 #ifdef HAVE_PJPROJECT
 	pj_lock_t *lock;
 
+	AST_PJPROJECT_INIT_LOG_LEVEL();
 	if (pj_init() != PJ_SUCCESS) {
 		return AST_MODULE_LOAD_DECLINE;
 	}

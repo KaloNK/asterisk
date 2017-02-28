@@ -32,8 +32,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include "asterisk/paths.h"	/* use ast_config_AST_CONFIG_DIR */
 #include "asterisk/network.h"	/* we do some sockaddr manipulation here */
 
@@ -283,7 +281,7 @@ struct ast_config_include {
 static void ast_variable_destroy(struct ast_variable *doomed);
 static void ast_includes_destroy(struct ast_config_include *incls);
 
-#ifdef MALLOC_DEBUG
+#ifdef __AST_DEBUG_MALLOC
 struct ast_variable *_ast_variable_new(const char *name, const char *value, const char *filename, const char *file, const char *func, int lineno)
 #else
 struct ast_variable *ast_variable_new(const char *name, const char *value, const char *filename)
@@ -300,7 +298,7 @@ struct ast_variable *ast_variable_new(const char *name, const char *value, const
 	}
 
 	if (
-#ifdef MALLOC_DEBUG
+#ifdef __AST_DEBUG_MALLOC
 		(variable = __ast_calloc(1, fn_len + name_len + val_len + sizeof(*variable), file, lineno, func))
 #else
 		(variable = ast_calloc(1, fn_len + name_len + val_len + sizeof(*variable)))

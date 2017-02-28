@@ -29,8 +29,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE();
-
 #include "asterisk/astobj2.h"
 #include "asterisk/stasis_internal.h"
 #include "asterisk/stasis.h"
@@ -59,6 +57,7 @@ ASTERISK_REGISTER_FILE();
 			</description>
 			<see-also>
 				<ref type="application">UserEvent</ref>
+				<ref type="managerEvent">UserEvent</ref>
 			</see-also>
 		</managerEventInstance>
 	</managerEvent>

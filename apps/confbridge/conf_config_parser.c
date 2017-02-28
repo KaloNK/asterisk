@@ -29,7 +29,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
 #include "asterisk/logger.h"
 #include "asterisk/config.h"
 #include "asterisk/config_options.h"
@@ -284,6 +283,13 @@ ASTERISK_REGISTER_FILE()
 						or 80.
 					</para></description>
 				</configOption>
+				<configOption name="binaural_active">
+					<synopsis>If true binaural conferencing with stereo audio is active</synopsis>
+					<description><para>
+						Activates binaural mixing for a conference bridge.
+						Binaural features are disabled by default.
+					</para></description>
+				</configOption>
 				<configOption name="record_conference">
 					<synopsis>Record the conference starting with the first active user's entrance and ending with the last active user's exit</synopsis>
 					<description><para>
@@ -419,6 +425,8 @@ ASTERISK_REGISTER_FILE()
 							<enum name="sound_kicked"><para>The sound played to a user who has been kicked from the conference.</para></enum>
 							<enum name="sound_muted"><para>The sound played when the mute option it toggled on.</para></enum>
 							<enum name="sound_unmuted"><para>The sound played when the mute option it toggled off.</para></enum>
+							<enum name="sound_binaural_on"><para>The sound played when binaural auudio is turned on.</para></enum>
+							<enum name="sound_binaural_off"><para>The sound played when the binaural audio is turned off.</para></enum>
 							<enum name="sound_only_person"><para>The sound played when the user is the only person in the conference.</para></enum>
 							<enum name="sound_only_one"><para>The sound played to a user when there is only one other
 										person is in the conference.</para></enum>
@@ -505,6 +513,9 @@ ASTERISK_REGISTER_FILE()
 						<enum name="toggle_mute"><para>
 							Toggle turning on and off mute.  Mute will make the user silent
 							to everyone else, but the user will still be able to listen in.
+							</para></enum>
+						<enum name="toggle_binaural"><para>
+							Toggle turning on and off binaural audio processing.
 							</para></enum>
 						<enum name="no_op"><para>
 							This action does nothing (No Operation). Its only real purpose exists for
@@ -910,6 +921,10 @@ static int set_sound(const char *sound_name, const char *sound_file, struct brid
 		ast_string_field_set(sounds, muted, sound_file);
 	} else if (!strcasecmp(sound_name, "sound_unmuted")) {
 		ast_string_field_set(sounds, unmuted, sound_file);
+	} else if (!strcasecmp(sound_name, "sound_binaural_on")) {
+		ast_string_field_set(sounds, binauralon, sound_file);
+	} else if (!strcasecmp(sound_name, "sound_binaural_off")) {
+		ast_string_field_set(sounds, binauraloff, sound_file);
 	} else if (!strcasecmp(sound_name, "sound_there_are")) {
 		ast_string_field_set(sounds, thereare, sound_file);
 	} else if (!strcasecmp(sound_name, "sound_other_in_party")) {
@@ -1135,6 +1150,7 @@ static int add_action_to_menu_entry(struct conf_menu_entry *menu_entry, enum con
 	switch (id) {
 	case MENU_ACTION_NOOP:
 	case MENU_ACTION_TOGGLE_MUTE:
+	case MENU_ACTION_TOGGLE_BINAURAL:
 	case MENU_ACTION_INCREASE_LISTENING:
 	case MENU_ACTION_DECREASE_LISTENING:
 	case MENU_ACTION_INCREASE_TALKING:
@@ -1243,6 +1259,8 @@ static int add_menu_entry(struct conf_menu *menu, const char *dtmf, const char *
 		ast_copy_string(menu_entry->dtmf, dtmf, sizeof(menu_entry->dtmf));
 		if (!strcasecmp(action, "toggle_mute")) {
 			res |= add_action_to_menu_entry(menu_entry, MENU_ACTION_TOGGLE_MUTE, NULL);
+		} else if (!strcasecmp(action, "toggle_binaural")) {
+			res |= add_action_to_menu_entry(menu_entry, MENU_ACTION_TOGGLE_BINAURAL, NULL);
 		} else if (!strcasecmp(action, "no_op")) {
 			res |= add_action_to_menu_entry(menu_entry, MENU_ACTION_NOOP, NULL);
 		} else if (!strcasecmp(action, "increase_listening_volume")) {
@@ -1365,7 +1383,7 @@ static char *handle_cli_confbridge_show_user_profiles(struct ast_cli_entry *e, i
 	case CLI_INIT:
 		e->command = "confbridge show profile users";
 		e->usage =
-			"Usage confbridge show profile users\n";
+			"Usage: confbridge show profile users\n";
 		return NULL;
 	case CLI_GENERATE:
 		return NULL;
@@ -1395,7 +1413,7 @@ static char *handle_cli_confbridge_show_user_profile(struct ast_cli_entry *e, in
 	case CLI_INIT:
 		e->command = "confbridge show profile user";
 		e->usage =
-			"Usage confbridge show profile user [<profile name>]\n";
+			"Usage: confbridge show profile user [<profile name>]\n";
 		return NULL;
 	case CLI_GENERATE:
 		if (a->pos == 4) {
@@ -1516,7 +1534,7 @@ static char *handle_cli_confbridge_show_bridge_profiles(struct ast_cli_entry *e,
 	case CLI_INIT:
 		e->command = "confbridge show profile bridges";
 		e->usage =
-			"Usage confbridge show profile bridges\n";
+			"Usage: confbridge show profile bridges\n";
 		return NULL;
 	case CLI_GENERATE:
 		return NULL;
@@ -1548,7 +1566,7 @@ static char *handle_cli_confbridge_show_bridge_profile(struct ast_cli_entry *e, 
 	case CLI_INIT:
 		e->command = "confbridge show profile bridge";
 		e->usage =
-			"Usage confbridge show profile bridge <profile name>\n";
+			"Usage: confbridge show profile bridge <profile name>\n";
 		return NULL;
 	case CLI_GENERATE:
 		if (a->pos == 4) {
@@ -1641,6 +1659,8 @@ static char *handle_cli_confbridge_show_bridge_profile(struct ast_cli_entry *e, 
 	ast_cli(a->fd,"sound_kicked:         %s\n", conf_get_sound(CONF_SOUND_KICKED, b_profile.sounds));
 	ast_cli(a->fd,"sound_muted:          %s\n", conf_get_sound(CONF_SOUND_MUTED, b_profile.sounds));
 	ast_cli(a->fd,"sound_unmuted:        %s\n", conf_get_sound(CONF_SOUND_UNMUTED, b_profile.sounds));
+	ast_cli(a->fd,"sound_binaural_on:    %s\n", conf_get_sound(CONF_SOUND_BINAURAL_ON, b_profile.sounds));
+	ast_cli(a->fd,"sound_binaural_off:   %s\n", conf_get_sound(CONF_SOUND_BINAURAL_OFF, b_profile.sounds));
 	ast_cli(a->fd,"sound_there_are:      %s\n", conf_get_sound(CONF_SOUND_THERE_ARE, b_profile.sounds));
 	ast_cli(a->fd,"sound_other_in_party: %s\n", conf_get_sound(CONF_SOUND_OTHER_IN_PARTY, b_profile.sounds));
 	ast_cli(a->fd,"sound_place_into_conference: %s\n", conf_get_sound(CONF_SOUND_PLACE_IN_CONF, b_profile.sounds));
@@ -1700,7 +1720,7 @@ static char *handle_cli_confbridge_show_menus(struct ast_cli_entry *e, int cmd, 
 	case CLI_INIT:
 		e->command = "confbridge show menus";
 		e->usage =
-			"Usage confbridge show profile menus\n";
+			"Usage: confbridge show profile menus\n";
 		return NULL;
 	case CLI_GENERATE:
 		return NULL;
@@ -1734,7 +1754,7 @@ static char *handle_cli_confbridge_show_menu(struct ast_cli_entry *e, int cmd, s
 	case CLI_INIT:
 		e->command = "confbridge show menu";
 		e->usage =
-			"Usage confbridge show menu [<menu name>]\n";
+			"Usage: confbridge show menu [<menu name>]\n";
 		return NULL;
 	case CLI_GENERATE:
 		if (a->pos == 3) {
@@ -1768,6 +1788,9 @@ static char *handle_cli_confbridge_show_menu(struct ast_cli_entry *e, int cmd, s
 			switch (menu_action->id) {
 			case MENU_ACTION_TOGGLE_MUTE:
 				ast_cli(a->fd, "toggle_mute");
+				break;
+			case MENU_ACTION_TOGGLE_BINAURAL:
+				ast_cli(a->fd, "toggle_binaural");
 				break;
 			case MENU_ACTION_NOOP:
 				ast_cli(a->fd, "no_op");
@@ -2172,6 +2195,7 @@ int conf_load_config(void)
 	aco_option_register(&cfg_info, "jitterbuffer", ACO_EXACT, bridge_types, "no", OPT_BOOLFLAG_T, 1, FLDSET(struct bridge_profile, flags), USER_OPT_JITTERBUFFER);
 	/* "auto" will fail to parse as a uint, but we use PARSE_DEFAULT to set the value to 0 in that case, which is the value that auto resolves to */
 	aco_option_register(&cfg_info, "internal_sample_rate", ACO_EXACT, bridge_types, "0", OPT_UINT_T, PARSE_DEFAULT, FLDSET(struct bridge_profile, internal_sample_rate), 0);
+	aco_option_register(&cfg_info, "binaural_active", ACO_EXACT, bridge_types, "no", OPT_BOOLFLAG_T, 1, FLDSET(struct bridge_profile, flags), BRIDGE_OPT_BINAURAL_ACTIVE);
 	aco_option_register_custom(&cfg_info, "mixing_interval", ACO_EXACT, bridge_types, "20", mix_interval_handler, 0);
 	aco_option_register(&cfg_info, "record_conference", ACO_EXACT, bridge_types, "no", OPT_BOOLFLAG_T, 1, FLDSET(struct bridge_profile, flags), BRIDGE_OPT_RECORD_CONFERENCE);
 	aco_option_register_custom(&cfg_info, "video_mode", ACO_EXACT, bridge_types, NULL, video_mode_handler, 0);

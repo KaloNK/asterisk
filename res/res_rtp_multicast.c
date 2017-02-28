@@ -34,8 +34,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include <sys/time.h>
 #include <signal.h>
 #include <fcntl.h>
@@ -143,7 +141,7 @@ struct ast_multicast_rtp_options *ast_multicast_rtp_create_options(const char *t
 
 	mcast_options = ast_calloc(1, sizeof(*mcast_options)
 			+ strlen(type)
-			+ strlen(options) + 2);
+			+ strlen(S_OR(options, "")) + 2);
 	if (!mcast_options) {
 		return NULL;
 	}
@@ -155,8 +153,9 @@ struct ast_multicast_rtp_options *ast_multicast_rtp_create_options(const char *t
 	mcast_options->type = pos;
 	pos += strlen(type) + 1;
 
-	/* Safe */
-	strcpy(pos, options);
+	if (!ast_strlen_zero(options)) {
+		strcpy(pos, options); /* Safe */
+	}
 	mcast_options->options = pos;
 
 	if (ast_app_parse_options(multicast_rtp_options, &mcast_options->opts,
@@ -226,7 +225,7 @@ static void set_ttl(int sock, const char *ttl_str)
 	ast_debug(3, "Setting multicast TTL to %s\n", ttl_str);
 
 	if (sscanf(ttl_str, "%30d", &ttl) < 1) {
-		ast_log(LOG_WARNING, "Inavlid multicast ttl option '%s'\n", ttl_str);
+		ast_log(LOG_WARNING, "Invalid multicast ttl option '%s'\n", ttl_str);
 		return;
 	}
 

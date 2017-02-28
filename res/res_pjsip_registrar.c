@@ -46,11 +46,32 @@
 		<syntax />
 		<description>
 			<para>
-			In response <literal>InboundRegistrationDetail</literal> events showing configuration and status
-			information are raised for each inbound registration object.  As well as <literal>AuthDetail</literal>
-			events for each associated auth object.  Once all events are completed an
-			<literal>InboundRegistrationDetailComplete</literal> is issued.
-                        </para>
+			In response, <literal>InboundRegistrationDetail</literal> events showing configuration
+			and status information are raised for all contacts, static or dynamic.  Once all events
+			are completed an <literal>InboundRegistrationDetailComplete</literal> is issued.
+			</para>
+			<warning><para>
+				This command just dumps all coonfigured AORs with contacts, even if the contact
+				is a permanent one.  To really get just inbound registrations, use
+				<literal>PJSIPShowRegistrationInboundContactStatuses</literal>.
+			</para>
+			</warning>
+		</description>
+		<see-also>
+			<ref type="manager" module="res_pjsip_registrar">PJSIPShowRegistrationInboundContactStatuses</ref>
+		</see-also>
+	</manager>
+	<manager name="PJSIPShowRegistrationInboundContactStatuses" language="en_US">
+		<synopsis>
+			Lists ContactStatuses for PJSIP inbound registrations.
+		</synopsis>
+		<syntax />
+		<description>
+			<para>
+			In response, <literal>ContactStatusDetail</literal> events showing status information
+			are raised for each inbound registration (dynamic contact) object.  Once all events
+			are completed a <literal>ContactStatusDetailComplete</literal> event is issued.
+			</para>
 		</description>
 	</manager>
  ***/
@@ -523,25 +544,17 @@ static int register_aor(pjsip_rx_data *rdata,
 {
 	int res;
 	struct ao2_container *contacts = NULL;
-	struct ast_named_lock *lock;
 
-	lock = ast_named_lock_get(AST_NAMED_LOCK_TYPE_RWLOCK, "aor", aor_name);
-	if (!lock) {
-		return PJ_TRUE;
-	}
-
-	ao2_wrlock(lock);
+	ao2_lock(aor);
 	contacts = ast_sip_location_retrieve_aor_contacts_nolock(aor);
 	if (!contacts) {
-		ao2_unlock(lock);
-		ast_named_lock_put(lock);
+		ao2_unlock(aor);
 		return PJ_TRUE;
 	}
 
 	res = register_aor_core(rdata, endpoint, aor, aor_name, contacts);
 	ao2_cleanup(contacts);
-	ao2_unlock(lock);
-	ast_named_lock_put(lock);
+	ao2_unlock(aor);
 
 	return res;
 }
@@ -563,6 +576,7 @@ static int match_aor(const char *aor_name, const char *id)
 static char *find_aor_name(const char *username, const char *domain, const char *aors)
 {
 	char *configured_aors;
+	char *aors_buf;
 	char *aor_name;
 	char *id_domain;
 	struct ast_sip_domain_alias *alias;
@@ -570,8 +584,10 @@ static char *find_aor_name(const char *username, const char *domain, const char 
 	id_domain = ast_alloca(strlen(username) + strlen(domain) + 2);
 	sprintf(id_domain, "%s@%s", username, domain);
 
+	aors_buf = ast_strdupa(aors);
+
 	/* Look for exact match on username@domain */
-	configured_aors = ast_strdupa(aors);
+	configured_aors = aors_buf;
 	while ((aor_name = ast_strip(strsep(&configured_aors, ",")))) {
 		if (match_aor(aor_name, id_domain)) {
 			return ast_strdup(aor_name);
@@ -586,7 +602,7 @@ static char *find_aor_name(const char *username, const char *domain, const char 
 		sprintf(id_domain, "%s@%s", username, alias->domain);
 		ao2_cleanup(alias);
 
-		configured_aors = ast_strdupa(aors);
+		configured_aors = strcpy(aors_buf, aors);/* Safe */
 		while ((aor_name = ast_strip(strsep(&configured_aors, ",")))) {
 			if (match_aor(aor_name, id_domain_alias)) {
 				return ast_strdup(aor_name);
@@ -594,8 +610,13 @@ static char *find_aor_name(const char *username, const char *domain, const char 
 		}
 	}
 
+	if (ast_strlen_zero(username)) {
+		/* No username, no match */
+		return NULL;
+	}
+
 	/* Look for exact match on username only */
-	configured_aors = ast_strdupa(aors);
+	configured_aors = strcpy(aors_buf, aors);/* Safe */
 	while ((aor_name = ast_strip(strsep(&configured_aors, ",")))) {
 		if (match_aor(aor_name, username)) {
 			return ast_strdup(aor_name);
@@ -625,6 +646,12 @@ static struct ast_sip_aor *find_registrar_aor(struct pjsip_rx_data *rdata, struc
 			ast_copy_pj_str(domain_name, &uri->host, uri->host.slen + 1);
 			username = ast_alloca(uri->user.slen + 1);
 			ast_copy_pj_str(username, &uri->user, uri->user.slen + 1);
+
+			/*
+			 * We may want to match without any user options getting
+			 * in the way.
+			 */
+			AST_SIP_USER_OPTIONS_TRUNCATE_CHECK(username);
 
 			aor_name = find_aor_name(username, domain_name, endpoint->aors);
 			if (aor_name) {
@@ -779,6 +806,42 @@ static int ami_show_registrations(struct mansession *s, const struct message *m)
 	return 0;
 }
 
+static int ami_show_registration_contact_statuses(struct mansession *s, const struct message *m)
+{
+	int count = 0;
+	struct ast_sip_ami ami = { .s = s, .m = m, .arg = NULL, .action_id = astman_get_header(m, "ActionID"), };
+	struct ao2_container *contacts = ast_sorcery_retrieve_by_fields(
+		ast_sip_get_sorcery(), "contact", AST_RETRIEVE_FLAG_MULTIPLE | AST_RETRIEVE_FLAG_ALL, NULL);
+	struct ao2_iterator i;
+	struct ast_sip_contact *contact;
+
+	astman_send_listack(s, m, "Following are ContactStatusEvents for each Inbound "
+			    "registration", "start");
+
+	if (contacts) {
+		i = ao2_iterator_init(contacts, 0);
+		while ((contact = ao2_iterator_next(&i))) {
+			struct ast_sip_contact_wrapper wrapper;
+
+			wrapper.aor_id = (char *)contact->aor;
+			wrapper.contact = contact;
+			wrapper.contact_id = (char *)ast_sorcery_object_get_id(contact);
+
+			ast_sip_format_contact_ami(&wrapper, &ami, 0);
+			count++;
+
+			ao2_ref(contact, -1);
+		}
+		ao2_iterator_destroy(&i);
+		ao2_ref(contacts, -1);
+	}
+
+	astman_send_list_complete_start(s, m, "ContactStatusDetailComplete", count);
+	astman_send_list_complete_end(s);
+	return 0;
+}
+
+#define AMI_SHOW_REGISTRATION_CONTACT_STATUSES "PJSIPShowRegistrationInboundContactStatuses"
 #define AMI_SHOW_REGISTRATIONS "PJSIPShowRegistrationsInbound"
 
 static pjsip_module registrar_module = {
@@ -811,6 +874,8 @@ static int load_module(void)
 
 	ast_manager_register_xml(AMI_SHOW_REGISTRATIONS, EVENT_FLAG_SYSTEM,
 				 ami_show_registrations);
+	ast_manager_register_xml(AMI_SHOW_REGISTRATION_CONTACT_STATUSES, EVENT_FLAG_SYSTEM,
+				 ami_show_registration_contact_statuses);
 
 	return AST_MODULE_LOAD_SUCCESS;
 }
@@ -818,6 +883,7 @@ static int load_module(void)
 static int unload_module(void)
 {
 	ast_manager_unregister(AMI_SHOW_REGISTRATIONS);
+	ast_manager_unregister(AMI_SHOW_REGISTRATION_CONTACT_STATUSES);
 	ast_sip_unregister_service(&registrar_module);
 	return 0;
 }

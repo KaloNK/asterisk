@@ -33,8 +33,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include "asterisk/file.h"
 #include "asterisk/pbx.h"
 #include "asterisk/bridge.h"
@@ -886,6 +884,8 @@ void ast_ari_channels_hangup(struct ast_variable *headers,
 		cause = AST_CAUSE_CONGESTION;
 	} else if (!strcmp(args->reason, "no_answer")) {
 		cause = AST_CAUSE_NOANSWER;
+	} else if(!strcmp(args->reason, "answered_elsewhere")) {
+		cause = AST_CAUSE_ANSWERED_ELSEWHERE;
 	} else {
 		ast_ari_response_error(
 			response, 400, "Invalid Reason",
@@ -1228,7 +1228,12 @@ static void ari_channels_handle_originate_with_id(const char *args_endpoint,
 	}
 
 	if (ast_dial_prerun(dial, other, format_cap)) {
-		ast_ari_response_alloc_failed(response);
+		if (ast_channel_errno() == AST_CHANNEL_ERROR_ID_EXISTS) {
+			ast_ari_response_error(response, 409, "Conflict",
+				"Channel with given unique ID already exists");
+		} else {
+			ast_ari_response_alloc_failed(response);
+		}
 		ast_dial_destroy(dial);
 		ast_free(origination);
 		ast_channel_cleanup(other);
@@ -1776,6 +1781,9 @@ void ast_ari_channels_create(struct ast_variable *headers,
 	originator = ast_channel_get_by_name(args->originator);
 	if (originator) {
 		request_cap = ao2_bump(ast_channel_nativeformats(originator));
+		if (!ast_strlen_zero(args->app)) {
+			stasis_app_subscribe_channel(args->app, originator);
+		}
 	} else if (!ast_strlen_zero(args->formats)) {
 		char *format_name;
 		char *formats_copy = ast_strdupa(args->formats);
@@ -1816,12 +1824,24 @@ void ast_ari_channels_create(struct ast_variable *headers,
 
 	chan_data->chan = ast_request(dialtech, request_cap, &assignedids, originator, dialdevice, &cause);
 	ao2_cleanup(request_cap);
-	ast_channel_cleanup(originator);
+
 	if (!chan_data->chan) {
-		ast_ari_response_alloc_failed(response);
+		if (ast_channel_errno() == AST_CHANNEL_ERROR_ID_EXISTS) {
+			ast_ari_response_error(response, 409, "Conflict",
+				"Channel with given unique ID already exists");
+		} else {
+			ast_ari_response_alloc_failed(response);
+		}
+		ast_channel_cleanup(originator);
 		chan_data_destroy(chan_data);
 		return;
 	}
+
+	if (!ast_strlen_zero(args->app)) {
+		stasis_app_subscribe_channel(args->app, chan_data->chan);
+	}
+
+	ast_channel_cleanup(originator);
 
 	if (save_dialstring(chan_data->chan, stuff)) {
 		ast_ari_response_alloc_failed(response);

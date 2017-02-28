@@ -39,8 +39,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include "asterisk/_private.h"
 
 #include <pthread.h>
@@ -64,7 +62,6 @@ ASTERISK_REGISTER_FILE()
 #include "asterisk/cli.h"
 #include "asterisk/manager.h"
 #include "asterisk/utils.h"
-#include "asterisk/adsi.h"
 #include "asterisk/devicestate.h"
 #include "asterisk/audiohook.h"
 #include "asterisk/global_datastores.h"
@@ -225,6 +222,11 @@ ASTERISK_REGISTER_FILE()
 				</variable>
 			</variablelist>
 		</description>
+		<see-also>
+			<ref type="manager">Bridge</ref>
+			<ref type="managerEvent">BridgeCreate</ref>
+			<ref type="managerEvent">BridgeEnter</ref>
+		</see-also>
 	</application>
 	<manager name="Bridge" language="en_US">
 		<synopsis>
@@ -251,6 +253,15 @@ ASTERISK_REGISTER_FILE()
 		<description>
 			<para>Bridge together two channels already in the PBX.</para>
 		</description>
+		<see-also>
+			<ref type="application">Bridge</ref>
+			<ref type="managerEvent">BridgeCreate</ref>
+			<ref type="managerEvent">BridgeEnter</ref>
+			<ref type="manager">BridgeDestroy</ref>
+			<ref type="manager">BridgeInfo</ref>
+			<ref type="manager">BridgeKick</ref>
+			<ref type="manager">BridgeList</ref>
+		</see-also>
 	</manager>
  ***/
 
@@ -1152,8 +1163,8 @@ static int action_bridge(struct mansession *s, const struct message *m)
 		astman_send_error(s, m, buf);
 		return 0;
 	}
-	xfer_cfg_a = ast_get_chan_features_xfer_config(chana);
 	ast_channel_lock(chana);
+	xfer_cfg_a = ast_get_chan_features_xfer_config(chana);
 	chana_exten = ast_strdupa(ast_channel_exten(chana));
 	chana_context = ast_strdupa(ast_channel_context(chana));
 	chana_priority = ast_channel_priority(chana);
@@ -1168,8 +1179,8 @@ static int action_bridge(struct mansession *s, const struct message *m)
 		astman_send_error(s, m, buf);
 		return 0;
 	}
-	xfer_cfg_b = ast_get_chan_features_xfer_config(chanb);
 	ast_channel_lock(chanb);
+	xfer_cfg_b = ast_get_chan_features_xfer_config(chanb);
 	chanb_exten = ast_strdupa(ast_channel_exten(chanb));
 	chanb_context = ast_strdupa(ast_channel_context(chanb));
 	chanb_priority = ast_channel_priority(chanb);
@@ -1506,7 +1517,9 @@ static int bridge_exec(struct ast_channel *chan, const char *data)
 		goto done;
 	}
 
+	ast_channel_lock(current_dest_chan);
 	xfer_cfg = ast_get_chan_features_xfer_config(current_dest_chan);
+	ast_channel_unlock(current_dest_chan);
 	bridge_add_failed = ast_bridge_add_channel(bridge, current_dest_chan, peer_features,
 		ast_test_flag(&opts, BRIDGE_OPT_PLAYTONE),
 		xfer_cfg ? xfer_cfg->xfersound : NULL);

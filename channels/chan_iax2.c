@@ -58,8 +58,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include <sys/mman.h>
 #include <dirent.h>
 #include <sys/socket.h>
@@ -212,6 +210,25 @@ ASTERISK_REGISTER_FILE()
 			<para>Gets or sets a variable that is sent to a remote IAX2 peer during call setup.</para>
 		</description>
 	</function>
+	<info name="CHANNEL" language="en_US" tech="IAX">
+		<enumlist>
+			<enum name="osptoken">
+				<para>R/O Get the peer's osptoken.</para>
+			</enum>
+			<enum name="peerip">
+				<para>R/O Get the peer's ip address.</para>
+			</enum>
+			<enum name="peername">
+				<para>R/O Get the peer's username.</para>
+			</enum>
+			<enum name="secure_signaling">
+				<para>R/O Get the if the IAX channel is secured.</para>
+			</enum>
+			<enum name="secure_media">
+				<para>R/O Get the if the IAX channel is secured.</para>
+			</enum>
+		</enumlist>
+	</info>
 	<manager name="IAXpeers" language="en_US">
 		<synopsis>
 			List IAX peers.
@@ -7978,7 +7995,7 @@ static int check_access(int callno, struct ast_sockaddr *addr, struct iax_ies *i
 		  * Set authmethods to the last known authmethod used by the system
 		  * Set a fake secret, it's not looked at, just required to attempt authentication.
 		  * Set authrej so the AUTHREP is rejected without even looking at its contents */
-		iaxs[callno]->authmethods = last_authmethod ? last_authmethod : (IAX_AUTH_MD5 | IAX_AUTH_PLAINTEXT);
+		iaxs[callno]->authmethods = last_authmethod ? last_authmethod : IAX_AUTH_MD5;
 		ast_string_field_set(iaxs[callno], secret, "badsecret");
 		iaxs[callno]->authrej = 1;
 		if (!ast_strlen_zero(iaxs[callno]->username)) {
@@ -9173,7 +9190,7 @@ static int registry_authrequest(int callno)
 	 * peer does not exist, and vice-versa.
 	 * Therefore, we use whatever the last peer used (which may vary over the
 	 * course of a server, which should leak minimal information). */
-	sentauthmethod = p ? p->authmethods : last_authmethod ? last_authmethod : (IAX_AUTH_MD5 | IAX_AUTH_PLAINTEXT);
+	sentauthmethod = p ? p->authmethods : last_authmethod ? last_authmethod : IAX_AUTH_MD5;
 	if (!p) {
 		iaxs[callno]->authmethods = sentauthmethod;
 	}
@@ -12851,6 +12868,9 @@ static struct iax2_peer *build_peer(const char *name, struct ast_variable *v, st
 				}
 			} else if (!strcasecmp(v->name, "auth")) {
 				peer->authmethods = get_auth_methods(v->value);
+				if (peer->authmethods & IAX_AUTH_PLAINTEXT) {
+					ast_log(LOG_WARNING, "Auth method for peer '%s' is set to deprecated 'plaintext' at line %d of iax.conf\n", peer->name, v->lineno);
+				}
 			} else if (!strcasecmp(v->name, "encryption")) {
 				peer->encmethods |= get_encrypt_methods(v->value);
 				if (!peer->encmethods) {
@@ -13021,7 +13041,7 @@ static struct iax2_peer *build_peer(const char *name, struct ast_variable *v, st
 			}
 		}
 		if (!peer->authmethods)
-			peer->authmethods = IAX_AUTH_MD5 | IAX_AUTH_PLAINTEXT;
+			peer->authmethods = IAX_AUTH_MD5;
 		ast_clear_flag64(peer, IAX_DELME);
 	}
 
@@ -13170,6 +13190,9 @@ static struct iax2_user *build_user(const char *name, struct ast_variable *v, st
 				}
 			} else if (!strcasecmp(v->name, "auth")) {
 				user->authmethods = get_auth_methods(v->value);
+				if (user->authmethods & IAX_AUTH_PLAINTEXT) {
+					ast_log(LOG_WARNING, "Auth method for user '%s' is set to deprecated 'plaintext' at line %d of iax.conf\n", user->name, v->lineno);
+				}
 			} else if (!strcasecmp(v->name, "encryption")) {
 				user->encmethods |= get_encrypt_methods(v->value);
 				if (!user->encmethods) {
@@ -13302,13 +13325,13 @@ static struct iax2_user *build_user(const char *name, struct ast_variable *v, st
 		}
 		if (!user->authmethods) {
 			if (!ast_strlen_zero(user->secret)) {
-				user->authmethods = IAX_AUTH_MD5 | IAX_AUTH_PLAINTEXT;
+				user->authmethods = IAX_AUTH_MD5;
 				if (!ast_strlen_zero(user->inkeys))
 					user->authmethods |= IAX_AUTH_RSA;
 			} else if (!ast_strlen_zero(user->inkeys)) {
 				user->authmethods = IAX_AUTH_RSA;
 			} else {
-				user->authmethods = IAX_AUTH_MD5 | IAX_AUTH_PLAINTEXT;
+				user->authmethods = IAX_AUTH_MD5;
 			}
 		}
 		ast_clear_flag64(user, IAX_DELME);

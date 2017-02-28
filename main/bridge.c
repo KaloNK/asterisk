@@ -38,6 +38,10 @@
 		<description>
 			<para>Returns detailed information about the available bridging technologies.</para>
 		</description>
+		<see-also>
+			<ref type="manager">BridgeTechnologySuspend</ref>
+			<ref type="manager">BridgeTechnologyUnsuspend</ref>
+		</see-also>
 	</manager>
 	<manager name="BridgeTechnologySuspend" language="en_US">
 		<synopsis>
@@ -52,6 +56,10 @@
 		<description>
 			<para>Marks a bridging technology as suspended, which prevents subsequently created bridges from using it.</para>
 		</description>
+		<see-also>
+			<ref type="manager">BridgeTechnologySuspend</ref>
+			<ref type="manager">BridgeTechnologyUnsuspend</ref>
+		</see-also>
 	</manager>
 	<manager name="BridgeTechnologyUnsuspend" language="en_US">
 		<synopsis>
@@ -66,12 +74,14 @@
 		<description>
 			<para>Clears a previously suspended bridging technology, which allows subsequently created bridges to use it.</para>
 		</description>
+		<see-also>
+			<ref type="manager">BridgeTechnologyList</ref>
+			<ref type="manager">BridgeTechnologySuspend</ref>
+		</see-also>
 	</manager>
 ***/
 
 #include "asterisk.h"
-
-ASTERISK_REGISTER_FILE()
 
 #include "asterisk/logger.h"
 #include "asterisk/channel.h"
@@ -3726,6 +3736,13 @@ void ast_bridge_set_mixing_interval(struct ast_bridge *bridge, unsigned int mixi
 	ast_bridge_unlock(bridge);
 }
 
+void ast_bridge_set_binaural_active(struct ast_bridge *bridge, unsigned int binaural_active)
+{
+	ast_bridge_lock(bridge);
+	bridge->softmix.binaural_active = binaural_active;
+	ast_bridge_unlock(bridge);
+}
+
 void ast_bridge_set_internal_sample_rate(struct ast_bridge *bridge, unsigned int sample_rate)
 {
 	ast_bridge_lock(bridge);
@@ -3760,8 +3777,11 @@ void ast_bridge_set_single_src_video_mode(struct ast_bridge *bridge, struct ast_
 	cleanup_video_mode(bridge);
 	bridge->softmix.video_mode.mode = AST_BRIDGE_VIDEO_MODE_SINGLE_SRC;
 	bridge->softmix.video_mode.mode_data.single_src_data.chan_vsrc = ast_channel_ref(video_src_chan);
-	ast_test_suite_event_notify("BRIDGE_VIDEO_MODE", "Message: video mode set to single source\r\nVideo Mode: %u\r\nVideo Channel: %s",
-		bridge->softmix.video_mode.mode, ast_channel_name(video_src_chan));
+	ast_verb(5, "Video source in bridge '%s' (%s) is now '%s' (%s)\n",
+		bridge->name, bridge->uniqueid,
+		ast_channel_name(video_src_chan),
+		ast_channel_uniqueid(video_src_chan));
+	ast_bridge_publish_state(bridge);
 	ast_indicate(video_src_chan, AST_CONTROL_VIDUPDATE);
 	ast_bridge_unlock(bridge);
 }
@@ -3771,8 +3791,6 @@ void ast_bridge_set_talker_src_video_mode(struct ast_bridge *bridge)
 	ast_bridge_lock(bridge);
 	cleanup_video_mode(bridge);
 	bridge->softmix.video_mode.mode = AST_BRIDGE_VIDEO_MODE_TALKER_SRC;
-	ast_test_suite_event_notify("BRIDGE_VIDEO_MODE", "Message: video mode set to talker source\r\nVideo Mode: %u",
-		bridge->softmix.video_mode.mode);
 	ast_bridge_unlock(bridge);
 }
 
@@ -3800,14 +3818,22 @@ void ast_bridge_update_talker_src_video_mode(struct ast_bridge *bridge, struct a
 		}
 		data->chan_vsrc = ast_channel_ref(chan);
 		data->average_talking_energy = talker_energy;
-		ast_test_suite_event_notify("BRIDGE_VIDEO_SRC", "Message: video source updated\r\nVideo Channel: %s", ast_channel_name(data->chan_vsrc));
+		ast_verb(5, "Video source in bridge '%s' (%s) is now '%s' (%s)\n",
+			bridge->name, bridge->uniqueid,
+			ast_channel_name(data->chan_vsrc),
+			ast_channel_uniqueid(data->chan_vsrc));
+		ast_bridge_publish_state(bridge);
 		ast_indicate(data->chan_vsrc, AST_CONTROL_VIDUPDATE);
 	} else if ((data->average_talking_energy < talker_energy) && !is_keyframe) {
 		ast_indicate(chan, AST_CONTROL_VIDUPDATE);
 	} else if (!data->chan_vsrc && is_keyframe) {
 		data->chan_vsrc = ast_channel_ref(chan);
 		data->average_talking_energy = talker_energy;
-		ast_test_suite_event_notify("BRIDGE_VIDEO_SRC", "Message: video source updated\r\nVideo Channel: %s", ast_channel_name(data->chan_vsrc));
+		ast_verb(5, "Video source in bridge '%s' (%s) is now '%s' (%s)\n",
+			bridge->name, bridge->uniqueid,
+			ast_channel_name(data->chan_vsrc),
+			ast_channel_uniqueid(data->chan_vsrc));
+		ast_bridge_publish_state(bridge);
 		ast_indicate(chan, AST_CONTROL_VIDUPDATE);
 	} else if (!data->chan_old_vsrc && is_keyframe) {
 		data->chan_old_vsrc = ast_channel_ref(chan);
@@ -3896,6 +3922,19 @@ void ast_bridge_remove_video_src(struct ast_bridge *bridge, struct ast_channel *
 		}
 	}
 	ast_bridge_unlock(bridge);
+}
+
+const char *ast_bridge_video_mode_to_string(enum ast_bridge_video_mode_type video_mode)
+{
+	switch (video_mode) {
+	case AST_BRIDGE_VIDEO_MODE_TALKER_SRC:
+		return "talker";
+	case AST_BRIDGE_VIDEO_MODE_SINGLE_SRC:
+		return "single";
+	case AST_BRIDGE_VIDEO_MODE_NONE:
+	default:
+		return "none";
+	}
 }
 
 static int channel_hash(const void *obj, int flags)
@@ -5138,12 +5177,6 @@ static char *complete_bridge_participant(const char *bridge_name, const char *li
 		return NULL;
 	}
 
-	if (!state) {
-		ao2_ref(bridge, -1);
-		return ast_strdup("all");
-	}
-	state--;
-
 	{
 		SCOPED_LOCK(bridge_lock, bridge, ast_bridge_lock, ast_bridge_unlock);
 
@@ -5165,6 +5198,8 @@ static char *complete_bridge_participant(const char *bridge_name, const char *li
 
 static char *handle_bridge_kick_channel(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a)
 {
+	static const char * const completions[] = { "all", NULL };
+	char *complete;
 	struct ast_bridge *bridge;
 
 	switch (cmd) {
@@ -5181,7 +5216,11 @@ static char *handle_bridge_kick_channel(struct ast_cli_entry *e, int cmd, struct
 			return complete_bridge_live(a->word, a->n);
 		}
 		if (a->pos == 3) {
-			return complete_bridge_participant(a->argv[2], a->line, a->word, a->pos, a->n);
+			complete = ast_cli_complete(a->word, completions, a->n);
+			if (!complete) {
+				complete = complete_bridge_participant(a->argv[2], a->line, a->word, a->pos, a->n - 1);
+			}
+			return complete;
 		}
 		return NULL;
 	}

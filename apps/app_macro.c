@@ -32,8 +32,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include "asterisk/file.h"
 #include "asterisk/channel.h"
 #include "asterisk/pbx.h"
@@ -190,8 +188,8 @@ static void macro_fixup(void *data, struct ast_channel *old_chan, struct ast_cha
 static struct ast_exten *find_matching_priority(struct ast_context *c, const char *exten, int priority, const char *callerid)
 {
 	struct ast_exten *e;
-	struct ast_include *i;
 	struct ast_context *c2;
+	int idx;
 
 	for (e=ast_walk_context_extensions(c, NULL); e; e=ast_walk_context_extensions(c, e)) {
 		if (ast_extension_match(ast_get_extension_name(e), exten)) {
@@ -210,7 +208,9 @@ static struct ast_exten *find_matching_priority(struct ast_context *c, const cha
 	}
 
 	/* No match; run through includes */
-	for (i=ast_walk_context_includes(c, NULL); i; i=ast_walk_context_includes(c, i)) {
+	for (idx = 0; idx < ast_context_includes_count(c); idx++) {
+		const struct ast_include *i = ast_context_includes_get(c, idx);
+
 		for (c2=ast_walk_contexts(NULL); c2; c2=ast_walk_contexts(c2)) {
 			if (!strcmp(ast_get_context_name(c2), ast_get_include_name(i))) {
 				e = find_matching_priority(c2, exten, priority, callerid);
@@ -243,7 +243,7 @@ static int _macro_exec(struct ast_channel *chan, const char *data, int exclusive
 	int setmacrocontext=0;
 	int autoloopflag, inhangup = 0;
 	struct ast_str *tmp_subst = NULL;
-  
+	const char *my_macro_exten = NULL;
 	char *save_macro_exten;
 	char *save_macro_context;
 	char *save_macro_priority;
@@ -304,12 +304,32 @@ static int _macro_exec(struct ast_channel *chan, const char *data, int exclusive
 	}
 
 	snprintf(fullmacro, sizeof(fullmacro), "macro-%s", macro);
-	if (!ast_exists_extension(chan, fullmacro, "s", 1,
-		S_COR(ast_channel_caller(chan)->id.number.valid, ast_channel_caller(chan)->id.number.str, NULL))) {
-		if (!ast_context_find(fullmacro)) 
-			ast_log(LOG_WARNING, "No such context '%s' for macro '%s'. Was called by %s@%s\n", fullmacro, macro, ast_channel_exten(chan), ast_channel_context(chan));
-		else
-			ast_log(LOG_WARNING, "Context '%s' for macro '%s' lacks 's' extension, priority 1\n", fullmacro, macro);
+
+	/* first search for the macro */
+	if (!ast_context_find(fullmacro)) {
+		ast_log(LOG_WARNING, "No such context '%s' for macro '%s'. Was called by %s@%s\n",
+			fullmacro, macro, ast_channel_exten(chan), ast_channel_context(chan));
+		return 0;
+	}
+
+	/* now search for the right extension */
+	if (ast_exists_extension(chan, fullmacro, "s", 1,
+		S_COR(ast_channel_caller(chan)->id.number.valid,
+			ast_channel_caller(chan)->id.number.str, NULL))) {
+		/* We have a normal macro */
+		my_macro_exten = "s";
+	} else if (ast_exists_extension(chan, fullmacro, "~~s~~", 1,
+		S_COR(ast_channel_caller(chan)->id.number.valid,
+			ast_channel_caller(chan)->id.number.str, NULL))) {
+		/* We have an AEL generated macro */
+		my_macro_exten = "~~s~~";
+	}
+
+	/* do we have a valid exten? */
+	if (!my_macro_exten) {
+		ast_log(LOG_WARNING,
+			"Context '%s' for macro '%s' lacks 's' extension, priority 1\n",
+			fullmacro, macro);
 		return 0;
 	}
 
@@ -361,7 +381,7 @@ static int _macro_exec(struct ast_channel *chan, const char *data, int exclusive
 	ast_set_flag(ast_channel_flags(chan), AST_FLAG_SUBROUTINE_EXEC);
 
 	/* Setup environment for new run */
-	ast_channel_exten_set(chan, "s");
+	ast_channel_exten_set(chan, my_macro_exten);
 	ast_channel_context_set(chan, fullmacro);
 	ast_channel_priority_set(chan, 1);
 

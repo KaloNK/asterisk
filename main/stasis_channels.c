@@ -30,8 +30,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include "asterisk/astobj2.h"
 #include "asterisk/json.h"
 #include "asterisk/pbx.h"
@@ -197,6 +195,7 @@ static void channel_snapshot_dtor(void *obj)
 
 	ast_string_field_free_memory(snapshot);
 	ao2_cleanup(snapshot->manager_vars);
+	ao2_cleanup(snapshot->ari_vars);
 }
 
 struct ast_channel_snapshot *ast_channel_snapshot_create(struct ast_channel *chan)
@@ -272,6 +271,7 @@ struct ast_channel_snapshot *ast_channel_snapshot_create(struct ast_channel *cha
 	ast_set_flag(&snapshot->softhangup_flags, ast_channel_softhangup_internal_flag(chan));
 
 	snapshot->manager_vars = ast_channel_get_manager_vars(chan);
+	snapshot->ari_vars = ast_channel_get_ari_vars(chan);
 	snapshot->tech_properties = ast_channel_tech(chan)->properties;
 
 	return snapshot;
@@ -919,6 +919,10 @@ struct ast_json *ast_channel_snapshot_to_json(
 			snapshot->context, snapshot->exten, snapshot->priority),
 		"creationtime", ast_json_timeval(snapshot->creationtime, NULL),
 		"language", snapshot->language);
+
+	if (snapshot->ari_vars && !AST_LIST_EMPTY(snapshot->ari_vars)) {
+		ast_json_object_set(json_chan, "channelvars", ast_json_channel_vars(snapshot->ari_vars));
+	}
 
 	return ast_json_ref(json_chan);
 }

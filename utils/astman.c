@@ -27,7 +27,6 @@
  ***/
 
 #include "asterisk.h"
-ASTERISK_REGISTER_FILE()
 
 #include <newt.h>
 #include <stdio.h>
@@ -88,17 +87,6 @@ struct ast_chan {
 static AST_LIST_HEAD_NOLOCK_STATIC(chans, ast_chan);
 
 /* dummy functions to be compatible with the Asterisk core for md5.c */
-void __ast_register_file(const char *file);
-void __ast_register_file(const char *file)
-{
-}
-
-void __ast_unregister_file(const char *file);
-void __ast_unregister_file(const char *file)
-{
-}
-
-#if !defined(LOW_MEMORY)
 int ast_add_profile(const char *, uint64_t scale);
 int ast_add_profile(const char *s, uint64_t scale)
 {
@@ -115,7 +103,6 @@ int64_t ast_mark(int key, int start1_stop0)
 {
 	return 0;
 }
-#endif /* LOW_MEMORY */
 
 /* end of dummy functions */
 

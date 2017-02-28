@@ -24,6 +24,7 @@
 #include "asterisk/res_pjsip.h"
 #include "include/res_pjsip_private.h"
 #include "asterisk/sorcery.h"
+#include "asterisk/taskprocessor.h"
 #include "asterisk/ast_version.h"
 #include "asterisk/res_pjsip_cli.h"
 
@@ -43,6 +44,19 @@
 #define DEFAULT_UNIDENTIFIED_REQUEST_COUNT 5
 #define DEFAULT_UNIDENTIFIED_REQUEST_PERIOD 5
 #define DEFAULT_UNIDENTIFIED_REQUEST_PRUNE_INTERVAL 30
+#define DEFAULT_MWI_TPS_QUEUE_HIGH AST_TASKPROCESSOR_HIGH_WATER_LEVEL
+#define DEFAULT_MWI_TPS_QUEUE_LOW -1
+#define DEFAULT_MWI_DISABLE_INITIAL_UNSOLICITED 0
+#define DEFAULT_IGNORE_URI_USER_OPTIONS 0
+
+/*!
+ * \brief Cached global config object
+ *
+ * \details
+ * Cached so we don't have to keep asking sorcery for the config.
+ * We could ask for it hundreds of times a second if not more.
+ */
+static AO2_GLOBAL_OBJ_STATIC(global_cfg);
 
 static char default_useragent[256];
 
@@ -63,22 +77,32 @@ struct global_config {
 		/*! Realm to use in challenges before an endpoint is identified */
 		AST_STRING_FIELD(default_realm);
 	);
-	/* Value to put in Max-Forwards header */
+	/*! Value to put in Max-Forwards header */
 	unsigned int max_forwards;
-	/* The interval at which to send keep alive messages to active connection-oriented transports */
+	/*! The interval at which to send keep alive messages to active connection-oriented transports */
 	unsigned int keep_alive_interval;
-	/* The maximum time for all contacts to be qualified at startup */
+	/*! The maximum time for all contacts to be qualified at startup */
 	unsigned int max_initial_qualify_time;
-	/* The interval at which to check for expired contacts */
+	/*! The interval at which to check for expired contacts */
 	unsigned int contact_expiration_check_interval;
 	/*! Nonzero to disable multi domain support */
 	unsigned int disable_multi_domain;
-	/* The maximum number of unidentified requests per source IP address before a security event is logged */
+	/*! The maximum number of unidentified requests per source IP address before a security event is logged */
 	unsigned int unidentified_request_count;
-	/* The period during which unidentified requests are accumulated */
+	/*! The period during which unidentified requests are accumulated */
 	unsigned int unidentified_request_period;
-	/* Interval at which expired unidentifed requests will be pruned */
+	/*! Interval at which expired unidentifed requests will be pruned */
 	unsigned int unidentified_request_prune_interval;
+	struct {
+		/*! Taskprocessor high water alert trigger level */
+		unsigned int tps_queue_high;
+		/*! Taskprocessor low water clear alert level. */
+		int tps_queue_low;
+		/*! Nonzero to disable sending unsolicited mwi to all endpoints on startup */
+		unsigned int disable_initial_unsolicited;
+	} mwi;
+	/*! Nonzero if URI user field options are ignored. */
+	unsigned int ignore_uri_user_options;
 };
 
 static void global_destructor(void *obj)
@@ -106,28 +130,31 @@ static int global_apply(const struct ast_sorcery *sorcery, void *obj)
 	struct global_config *cfg = obj;
 	char max_forwards[10];
 
+	if (ast_strlen_zero(cfg->debug)) {
+		ast_log(LOG_ERROR,
+			"Global option 'debug' can't be empty.  Set it to a valid value or remove the entry to accept 'no' as the default\n");
+		return -1;
+	}
+
+	if (ast_strlen_zero(cfg->default_from_user)) {
+		ast_log(LOG_ERROR,
+			"Global option 'default_from_user' can't be empty.  Set it to a valid value or remove the entry to accept 'asterisk' as the default\n");
+		return -1;
+	}
+
 	snprintf(max_forwards, sizeof(max_forwards), "%u", cfg->max_forwards);
 
 	ast_sip_add_global_request_header("Max-Forwards", max_forwards, 1);
 	ast_sip_add_global_request_header("User-Agent", cfg->useragent, 1);
 	ast_sip_add_global_response_header("Server", cfg->useragent, 1);
+
+	ao2_t_global_obj_replace_unref(global_cfg, cfg, "Applying global settings");
 	return 0;
 }
 
 static struct global_config *get_global_cfg(void)
 {
-	struct global_config *cfg;
-	struct ao2_container *globals;
-
-	globals = ast_sorcery_retrieve_by_fields(ast_sip_get_sorcery(), "global",
-		AST_RETRIEVE_FLAG_MULTIPLE | AST_RETRIEVE_FLAG_ALL, NULL);
-	if (!globals) {
-		return NULL;
-	}
-
-	cfg = ao2_find(globals, NULL, 0);
-	ao2_ref(globals, -1);
-	return cfg;
+	return ao2_global_obj_ref(global_cfg);
 }
 
 char *ast_sip_global_default_outbound_endpoint(void)
@@ -314,6 +341,67 @@ void ast_sip_get_default_from_user(char *from_user, size_t size)
 	}
 }
 
+
+unsigned int ast_sip_get_mwi_tps_queue_high(void)
+{
+	unsigned int tps_queue_high;
+	struct global_config *cfg;
+
+	cfg = get_global_cfg();
+	if (!cfg) {
+		return DEFAULT_MWI_TPS_QUEUE_HIGH;
+	}
+
+	tps_queue_high = cfg->mwi.tps_queue_high;
+	ao2_ref(cfg, -1);
+	return tps_queue_high;
+}
+
+int ast_sip_get_mwi_tps_queue_low(void)
+{
+	int tps_queue_low;
+	struct global_config *cfg;
+
+	cfg = get_global_cfg();
+	if (!cfg) {
+		return DEFAULT_MWI_TPS_QUEUE_LOW;
+	}
+
+	tps_queue_low = cfg->mwi.tps_queue_low;
+	ao2_ref(cfg, -1);
+	return tps_queue_low;
+}
+
+unsigned int ast_sip_get_mwi_disable_initial_unsolicited(void)
+{
+	unsigned int disable_initial_unsolicited;
+	struct global_config *cfg;
+
+	cfg = get_global_cfg();
+	if (!cfg) {
+		return DEFAULT_MWI_DISABLE_INITIAL_UNSOLICITED;
+	}
+
+	disable_initial_unsolicited = cfg->mwi.disable_initial_unsolicited;
+	ao2_ref(cfg, -1);
+	return disable_initial_unsolicited;
+}
+
+unsigned int ast_sip_get_ignore_uri_user_options(void)
+{
+	unsigned int ignore_uri_user_options;
+	struct global_config *cfg;
+
+	cfg = get_global_cfg();
+	if (!cfg) {
+		return DEFAULT_IGNORE_URI_USER_OPTIONS;
+	}
+
+	ignore_uri_user_options = cfg->ignore_uri_user_options;
+	ao2_ref(cfg, -1);
+	return ignore_uri_user_options;
+}
+
 /*!
  * \internal
  * \brief Observer to set default global object if none exist.
@@ -391,6 +479,8 @@ int ast_sip_destroy_sorcery_global(void)
 
 	ast_sorcery_instance_observer_remove(sorcery, &observer_callbacks_global);
 
+	ao2_t_global_obj_release(global_cfg, "Module is unloading");
+
 	return 0;
 }
 
@@ -437,7 +527,8 @@ int ast_sip_initialize_sorcery_global(void)
 	ast_sorcery_object_field_register(sorcery, "global", "contact_expiration_check_interval",
 		__stringify(DEFAULT_CONTACT_EXPIRATION_CHECK_INTERVAL),
 		OPT_UINT_T, 0, FLDSET(struct global_config, contact_expiration_check_interval));
-	ast_sorcery_object_field_register(sorcery, "global", "disable_multi_domain", "no",
+	ast_sorcery_object_field_register(sorcery, "global", "disable_multi_domain",
+		DEFAULT_DISABLE_MULTI_DOMAIN ? "yes" : "no",
 		OPT_BOOL_T, 1, FLDSET(struct global_config, disable_multi_domain));
 	ast_sorcery_object_field_register(sorcery, "global", "unidentified_request_count",
 		__stringify(DEFAULT_UNIDENTIFIED_REQUEST_COUNT),
@@ -450,6 +541,18 @@ int ast_sip_initialize_sorcery_global(void)
 		OPT_UINT_T, 0, FLDSET(struct global_config, unidentified_request_prune_interval));
 	ast_sorcery_object_field_register(sorcery, "global", "default_realm", DEFAULT_REALM,
 		OPT_STRINGFIELD_T, 0, STRFLDSET(struct global_config, default_realm));
+	ast_sorcery_object_field_register(sorcery, "global", "mwi_tps_queue_high",
+		__stringify(DEFAULT_MWI_TPS_QUEUE_HIGH),
+		OPT_UINT_T, 0, FLDSET(struct global_config, mwi.tps_queue_high));
+	ast_sorcery_object_field_register(sorcery, "global", "mwi_tps_queue_low",
+		__stringify(DEFAULT_MWI_TPS_QUEUE_LOW),
+		OPT_INT_T, 0, FLDSET(struct global_config, mwi.tps_queue_low));
+	ast_sorcery_object_field_register(sorcery, "global", "mwi_disable_initial_unsolicited",
+		DEFAULT_MWI_DISABLE_INITIAL_UNSOLICITED ? "yes" : "no",
+		OPT_BOOL_T, 1, FLDSET(struct global_config, mwi.disable_initial_unsolicited));
+	ast_sorcery_object_field_register(sorcery, "global", "ignore_uri_user_options",
+		DEFAULT_IGNORE_URI_USER_OPTIONS ? "yes" : "no",
+		OPT_BOOL_T, 1, FLDSET(struct global_config, ignore_uri_user_options));
 
 	if (ast_sorcery_instance_observer_add(sorcery, &observer_callbacks_global)) {
 		return -1;

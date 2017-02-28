@@ -25,8 +25,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include "asterisk/_private.h"
 
 #include "asterisk/datastore.h"
@@ -47,15 +45,9 @@ struct ast_datastore *__ast_datastore_alloc(const struct ast_datastore_info *inf
 		return NULL;
 	}
 
-#if defined(__AST_DEBUG_MALLOC)
 	if (!(datastore = __ast_calloc(1, sizeof(*datastore), file, line, function))) {
 		return NULL;
 	}
-#else
-	if (!(datastore = ast_calloc(1, sizeof(*datastore)))) {
-		return NULL;
-	}
-#endif
 
 	datastore->info = info;
 

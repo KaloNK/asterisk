@@ -29,8 +29,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include "asterisk/_private.h"
 #include "asterisk/cli.h"
 #include "asterisk/linkedlists.h"
@@ -482,7 +480,6 @@ int ast_thread_inhibit_escalations(void)
 
 	thread_inhibit_escalations = ast_threadstorage_get(
 		&thread_inhibit_escalations_tl, sizeof(*thread_inhibit_escalations));
-
 	if (thread_inhibit_escalations == NULL) {
 		ast_log(LOG_ERROR, "Error inhibiting privilege escalations for current thread\n");
 		return -1;
@@ -490,6 +487,23 @@ int ast_thread_inhibit_escalations(void)
 
 	*thread_inhibit_escalations = 1;
 	return 0;
+}
+
+int ast_thread_inhibit_escalations_swap(int inhibit)
+{
+	int *thread_inhibit_escalations;
+	int orig;
+
+	thread_inhibit_escalations = ast_threadstorage_get(
+		&thread_inhibit_escalations_tl, sizeof(*thread_inhibit_escalations));
+	if (thread_inhibit_escalations == NULL) {
+		ast_log(LOG_ERROR, "Error swapping privilege escalations inhibit for current thread\n");
+		return -1;
+	}
+
+	orig = *thread_inhibit_escalations;
+	*thread_inhibit_escalations = !!inhibit;
+	return orig;
 }
 
 /*!
@@ -505,7 +519,6 @@ static int thread_inhibits_escalations(void)
 
 	thread_inhibit_escalations = ast_threadstorage_get(
 		&thread_inhibit_escalations_tl, sizeof(*thread_inhibit_escalations));
-
 	if (thread_inhibit_escalations == NULL) {
 		ast_log(LOG_ERROR, "Error checking thread's ability to run dangerous functions\n");
 		/* On error, assume that we are inhibiting */

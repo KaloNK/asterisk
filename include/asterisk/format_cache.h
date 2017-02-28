@@ -209,6 +209,11 @@ extern struct ast_format *ast_format_siren7;
 extern struct ast_format *ast_format_opus;
 
 /*!
+ * \brief Built-in cached Codec 2 format.
+ */
+extern struct ast_format *ast_format_codec2;
+
+/*!
  * \brief Built-in cached t140 format.
  */
 extern struct ast_format *ast_format_t140;
@@ -222,6 +227,14 @@ extern struct ast_format *ast_format_t140_red;
  * \brief Built-in "null" format.
  */
 extern struct ast_format *ast_format_none;
+
+/*!
+ * \brief Built-in SILK format.
+ */
+extern struct ast_format *ast_format_silk8;
+extern struct ast_format *ast_format_silk12;
+extern struct ast_format *ast_format_silk16;
+extern struct ast_format *ast_format_silk24;
 
 /*!
  * \brief Initialize format cache support within the core.

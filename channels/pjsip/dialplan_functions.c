@@ -59,10 +59,57 @@
 		</parameter>
 	</syntax>
 	<description>
-		<para>Returns the codecs offered based upon the media choice</para>
+		<para>When read, returns the codecs offered based upon the media choice.</para>
+		<para>When written, sets the codecs to offer when an outbound dial attempt is made,
+		or when a session refresh is sent using <replaceable>PJSIP_SEND_SESSION_REFRESH</replaceable>.
+		</para>
 	</description>
+	<see-also>
+		<ref type="function">PJSIP_SEND_SESSION_REFRESH</ref>
+	</see-also>
 </function>
-<info name="PJSIPCHANNEL" language="en_US" tech="PJSIP">
+<function name="PJSIP_SEND_SESSION_REFRESH" language="en_US">
+	<synopsis>
+		W/O: Initiate a session refresh via an UPDATE or re-INVITE on an established media session
+	</synopsis>
+	<syntax>
+		<parameter name="update_type" required="false">
+			<para>The type of update to send. Default is <literal>invite</literal>.</para>
+			<enumlist>
+				<enum name="invite">
+					<para>Send the session refresh as a re-INVITE.</para>
+				</enum>
+				<enum name="update">
+					<para>Send the session refresh as an UPDATE.</para>
+				</enum>
+			</enumlist>
+		</parameter>
+	</syntax>
+	<description>
+		<para>This function will cause the PJSIP stack to immediately refresh
+		the media session for the channel. This will be done using either a
+		re-INVITE (default) or an UPDATE request.
+		</para>
+		<para>This is most useful when combined with the <replaceable>PJSIP_MEDIA_OFFER</replaceable>
+		dialplan function, as it allows the formats in use on a channel to be
+		re-negotiated after call setup.</para>
+		<warning>
+			<para>The formats the endpoint supports are <emphasis>not</emphasis>
+			checked or enforced by this function. Using this function to offer
+			formats not supported by the endpoint <emphasis>may</emphasis> result
+			in a loss of media.</para>
+		</warning>
+		<example title="Re-negotiate format to g722">
+		 ; Within some existing extension on an answered channel
+		 same => n,Set(PJSIP_MEDIA_OFFER(audio)=!all,g722)
+		 same => n,Set(PJSIP_SEND_SESSION_REFRESH()=invite)
+		</example>
+	</description>
+	<see-also>
+		<ref type="function">PJSIP_MEDIA_OFFER</ref>
+	</see-also>
+</function>
+<info name="CHANNEL" language="en_US" tech="PJSIP">
 	<enumlist>
 		<enum name="rtp">
 			<para>R/O Retrieve media related information.</para>
@@ -364,6 +411,19 @@
 		</enum>
 	</enumlist>
 </info>
+<info name="CHANNEL_EXAMPLES" language="en_US" tech="PJSIP">
+	<example title="PJSIP specific CHANNEL examples">
+		; Log the current Call-ID
+		same => n,Log(NOTICE, ${CHANNEL(pjsip,call-id)})
+
+		; Log the destination address of the audio stream
+		same => n,Log(NOTICE, ${CHANNEL(rtp,dest)})
+
+		; Store the round-trip time associated with a
+		; video stream in the CDR field video-rtt
+		same => n,Set(CDR(video-rtt)=${CHANNEL(rtcp,rtt,video)})
+	</example>
+</info>
 ***/
 
 #include "asterisk.h"
@@ -371,8 +431,6 @@
 #include <pjsip.h>
 #include <pjlib.h>
 #include <pjsip_ua.h>
-
-ASTERISK_REGISTER_FILE()
 
 #include "asterisk/astobj2.h"
 #include "asterisk/module.h"
@@ -662,7 +720,7 @@ static int channel_read_pjsip(struct ast_channel *chan, const char *type, const 
 
 /*! \brief Struct used to push function arguments to task processor */
 struct pjsip_func_args {
-	struct ast_channel *chan;
+	struct ast_sip_session *session;
 	const char *param;
 	const char *type;
 	const char *field;
@@ -677,49 +735,31 @@ static int read_pjsip(void *data)
 	struct pjsip_func_args *func_args = data;
 
 	if (!strcmp(func_args->param, "rtp")) {
-		func_args->ret = channel_read_rtp(func_args->chan, func_args->type,
+		func_args->ret = channel_read_rtp(func_args->session->channel, func_args->type,
 		                                  func_args->field, func_args->buf,
 		                                  func_args->len);
 	} else if (!strcmp(func_args->param, "rtcp")) {
-		func_args->ret = channel_read_rtcp(func_args->chan, func_args->type,
+		func_args->ret = channel_read_rtcp(func_args->session->channel, func_args->type,
 		                                   func_args->field, func_args->buf,
 		                                   func_args->len);
 	} else if (!strcmp(func_args->param, "endpoint")) {
-		struct ast_sip_channel_pvt *pvt = ast_channel_tech_pvt(func_args->chan);
-
-		if (!pvt) {
-			ast_log(AST_LOG_WARNING, "Channel %s has no pvt!\n", ast_channel_name(func_args->chan));
+		if (!func_args->session->endpoint) {
+			ast_log(AST_LOG_WARNING, "Channel %s has no endpoint!\n", ast_channel_name(func_args->session->channel));
 			return -1;
 		}
-		if (!pvt->session || !pvt->session->endpoint) {
-			ast_log(AST_LOG_WARNING, "Channel %s has no endpoint!\n", ast_channel_name(func_args->chan));
-			return -1;
-		}
-		snprintf(func_args->buf, func_args->len, "%s", ast_sorcery_object_get_id(pvt->session->endpoint));
+		snprintf(func_args->buf, func_args->len, "%s", ast_sorcery_object_get_id(func_args->session->endpoint));
 	} else if (!strcmp(func_args->param, "contact")) {
-		struct ast_sip_channel_pvt *pvt = ast_channel_tech_pvt(func_args->chan);
-
-		if (!pvt) {
-			ast_log(AST_LOG_WARNING, "Channel %s has no pvt!\n", ast_channel_name(func_args->chan));
-			return -1;
-		}
-		if (!pvt->session || !pvt->session->contact) {
+		if (!func_args->session->contact) {
 			return 0;
 		}
-		snprintf(func_args->buf, func_args->len, "%s", ast_sorcery_object_get_id(pvt->session->contact));
+		snprintf(func_args->buf, func_args->len, "%s", ast_sorcery_object_get_id(func_args->session->contact));
 	} else if (!strcmp(func_args->param, "aor")) {
-		struct ast_sip_channel_pvt *pvt = ast_channel_tech_pvt(func_args->chan);
-
-		if (!pvt) {
-			ast_log(AST_LOG_WARNING, "Channel %s has no pvt!\n", ast_channel_name(func_args->chan));
-			return -1;
-		}
-		if (!pvt->session || !pvt->session->aor) {
+		if (!func_args->session->aor) {
 			return 0;
 		}
-		snprintf(func_args->buf, func_args->len, "%s", ast_sorcery_object_get_id(pvt->session->aor));
+		snprintf(func_args->buf, func_args->len, "%s", ast_sorcery_object_get_id(func_args->session->aor));
 	} else if (!strcmp(func_args->param, "pjsip")) {
-		func_args->ret = channel_read_pjsip(func_args->chan, func_args->type,
+		func_args->ret = channel_read_pjsip(func_args->session->channel, func_args->type,
 		                                    func_args->field, func_args->buf,
 		                                    func_args->len);
 	} else {
@@ -746,7 +786,6 @@ int pjsip_acf_channel_read(struct ast_channel *chan, const char *cmd, char *data
 		ast_log(LOG_WARNING, "No channel was provided to %s function.\n", cmd);
 		return -1;
 	}
-	channel = ast_channel_tech_pvt(chan);
 
 	/* Check for zero arguments */
 	if (ast_strlen_zero(parse)) {
@@ -756,29 +795,44 @@ int pjsip_acf_channel_read(struct ast_channel *chan, const char *cmd, char *data
 
 	AST_STANDARD_APP_ARGS(args, parse);
 
+	ast_channel_lock(chan);
+
 	/* Sanity check */
 	if (strcmp(ast_channel_tech(chan)->type, "PJSIP")) {
 		ast_log(LOG_WARNING, "Cannot call %s on a non-PJSIP channel\n", cmd);
+		ast_channel_unlock(chan);
 		return 0;
 	}
 
+	channel = ast_channel_tech_pvt(chan);
 	if (!channel) {
-		ast_log(AST_LOG_WARNING, "Channel %s has no pvt!\n", ast_channel_name(chan));
+		ast_log(LOG_WARNING, "Channel %s has no pvt!\n", ast_channel_name(chan));
+		ast_channel_unlock(chan);
 		return -1;
 	}
 
+	if (!channel->session) {
+		ast_log(LOG_WARNING, "Channel %s has no session\n", ast_channel_name(chan));
+		ast_channel_unlock(chan);
+		return -1;
+	}
+
+	func_args.session = ao2_bump(channel->session);
+	ast_channel_unlock(chan);
+
 	memset(buf, 0, len);
 
-	func_args.chan = chan;
 	func_args.param = args.param;
 	func_args.type = args.type;
 	func_args.field = args.field;
 	func_args.buf = buf;
 	func_args.len = len;
-	if (ast_sip_push_task_synchronous(channel->session->serializer, read_pjsip, &func_args)) {
+	if (ast_sip_push_task_synchronous(func_args.session->serializer, read_pjsip, &func_args)) {
 		ast_log(LOG_WARNING, "Unable to read properties of channel %s: failed to push task\n", ast_channel_name(chan));
+		ao2_ref(func_args.session, -1);
 		return -1;
 	}
+	ao2_ref(func_args.session, -1);
 
 	return func_args.ret;
 }
@@ -960,4 +1014,71 @@ int pjsip_acf_media_offer_write(struct ast_channel *chan, const char *cmd, char 
 	}
 
 	return ast_sip_push_task_synchronous(channel->session->serializer, media_offer_write_av, &mdata);
+}
+
+struct refresh_data {
+	struct ast_sip_session *session;
+	enum ast_sip_session_refresh_method method;
+};
+
+static int sip_session_response_cb(struct ast_sip_session *session, pjsip_rx_data *rdata)
+{
+	struct ast_format *fmt;
+
+	if (!session->channel) {
+		/* Egads! */
+		return 0;
+	}
+
+	fmt = ast_format_cap_get_best_by_type(ast_channel_nativeformats(session->channel), AST_MEDIA_TYPE_AUDIO);
+	if (!fmt) {
+		/* No format? That's weird. */
+		return 0;
+	}
+	ast_channel_set_writeformat(session->channel, fmt);
+	ast_channel_set_rawwriteformat(session->channel, fmt);
+	ast_channel_set_readformat(session->channel, fmt);
+	ast_channel_set_rawreadformat(session->channel, fmt);
+	ao2_ref(fmt, -1);
+
+	return 0;
+}
+
+static int refresh_write_cb(void *obj)
+{
+	struct refresh_data *data = obj;
+
+	ast_sip_session_refresh(data->session, NULL, NULL,
+		sip_session_response_cb, data->method, 1);
+
+	return 0;
+}
+
+int pjsip_acf_session_refresh_write(struct ast_channel *chan, const char *cmd, char *data, const char *value)
+{
+	struct ast_sip_channel_pvt *channel;
+	struct refresh_data rdata = {
+		.method = AST_SIP_SESSION_REFRESH_METHOD_INVITE,
+	};
+
+	if (!chan) {
+		ast_log(LOG_WARNING, "No channel was provided to %s function.\n", cmd);
+		return -1;
+	}
+
+	if (strcmp(ast_channel_tech(chan)->type, "PJSIP")) {
+		ast_log(LOG_WARNING, "Cannot call %s on a non-PJSIP channel\n", cmd);
+		return -1;
+	}
+
+	channel = ast_channel_tech_pvt(chan);
+	rdata.session = channel->session;
+
+	if (!strcmp(value, "invite")) {
+		rdata.method = AST_SIP_SESSION_REFRESH_METHOD_INVITE;
+	} else if (!strcmp(value, "update")) {
+		rdata.method = AST_SIP_SESSION_REFRESH_METHOD_UPDATE;
+	}
+
+	return ast_sip_push_task_synchronous(channel->session->serializer, refresh_write_cb, &rdata);
 }

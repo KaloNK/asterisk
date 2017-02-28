@@ -43,7 +43,6 @@ struct ast_sched_context *prune_context;
 
 /* From the auth/realm realtime column size */
 #define MAX_REALM_LENGTH 40
-static char default_realm[MAX_REALM_LENGTH + 1];
 
 #define DEFAULT_SUSPECTS_BUCKETS 53
 
@@ -120,12 +119,12 @@ static struct ast_taskprocessor *find_request_serializer(pjsip_rx_data *rdata)
 
 	tsx = pjsip_tsx_layer_find_tsx(&tsx_key, PJ_TRUE);
 	if (!tsx) {
-		ast_debug(1, "Could not find %.*s transaction for %d response.\n",
-			(int) pj_strlen(&rdata->msg_info.cseq->method.name),
-			pj_strbuf(&rdata->msg_info.cseq->method.name),
-			rdata->msg_info.msg->line.status.code);
+		ast_debug(1, "Could not find transaction for %s.\n",
+			pjsip_rx_data_get_info(rdata));
 		return NULL;
 	}
+	ast_debug(3, "Found transaction %s for %s.\n",
+		tsx->obj_name, pjsip_rx_data_get_info(rdata));
 
 	if (tsx->last_tx) {
 		const char *serializer_name;
@@ -402,21 +401,14 @@ static pj_bool_t distributor(pjsip_rx_data *rdata)
 	if (serializer) {
 		/* We have a serializer so we know where to send the message. */
 	} else if (rdata->msg_info.msg->type == PJSIP_RESPONSE_MSG) {
-		ast_debug(3, "No dialog serializer for response %s. Using request transaction as basis\n",
+		ast_debug(3, "No dialog serializer for %s.  Using request transaction as basis.\n",
 			pjsip_rx_data_get_info(rdata));
 		serializer = find_request_serializer(rdata);
 		if (!serializer) {
-			if (ast_taskprocessor_alert_get()) {
-				/* We're overloaded, ignore the unmatched response. */
-				ast_debug(3, "Taskprocessor overload alert: Ignoring unmatched '%s'.\n",
-					pjsip_rx_data_get_info(rdata));
-				return PJ_TRUE;
-			}
-
 			/*
-			 * Pick a serializer for the unmatched response.  Maybe
-			 * the stack can figure out what it is for, or we really
-			 * should just toss it regardless.
+			 * Pick a serializer for the unmatched response.
+			 * We couldn't determine what serializer originally
+			 * sent the request or the serializer is gone.
 			 */
 			serializer = ast_sip_get_distributor_serializer(rdata);
 		}
@@ -462,35 +454,54 @@ static pj_bool_t distributor(pjsip_rx_data *rdata)
 	return PJ_TRUE;
 }
 
-static struct ast_sip_auth *artificial_auth;
+static struct ast_sip_auth *alloc_artificial_auth(char *default_realm)
+{
+	struct ast_sip_auth *fake_auth;
+
+	fake_auth = ast_sorcery_alloc(ast_sip_get_sorcery(), SIP_SORCERY_AUTH_TYPE,
+		"artificial");
+	if (!fake_auth) {
+		return NULL;
+	}
+
+	ast_string_field_set(fake_auth, realm, default_realm);
+	ast_string_field_set(fake_auth, auth_user, "");
+	ast_string_field_set(fake_auth, auth_pass, "");
+	fake_auth->type = AST_SIP_AUTH_TYPE_ARTIFICIAL;
+
+	return fake_auth;
+}
+
+static AO2_GLOBAL_OBJ_STATIC(artificial_auth);
 
 static int create_artificial_auth(void)
 {
-	if (!(artificial_auth = ast_sorcery_alloc(
-		      ast_sip_get_sorcery(), SIP_SORCERY_AUTH_TYPE, "artificial"))) {
+	char default_realm[MAX_REALM_LENGTH + 1];
+	struct ast_sip_auth *fake_auth;
+
+	ast_sip_get_default_realm(default_realm, sizeof(default_realm));
+	fake_auth = alloc_artificial_auth(default_realm);
+	if (!fake_auth) {
 		ast_log(LOG_ERROR, "Unable to create artificial auth\n");
 		return -1;
 	}
 
-	ast_string_field_set(artificial_auth, realm, default_realm);
-	ast_string_field_set(artificial_auth, auth_user, "");
-	ast_string_field_set(artificial_auth, auth_pass, "");
-	artificial_auth->type = AST_SIP_AUTH_TYPE_ARTIFICIAL;
+	ao2_global_obj_replace_unref(artificial_auth, fake_auth);
+	ao2_ref(fake_auth, -1);
 	return 0;
 }
 
 struct ast_sip_auth *ast_sip_get_artificial_auth(void)
 {
-	ao2_ref(artificial_auth, +1);
-	return artificial_auth;
+	return ao2_global_obj_ref(artificial_auth);
 }
 
 static struct ast_sip_endpoint *artificial_endpoint = NULL;
 
 static int create_artificial_endpoint(void)
 {
-	if (!(artificial_endpoint = ast_sorcery_alloc(
-		      ast_sip_get_sorcery(), "endpoint", NULL))) {
+	artificial_endpoint = ast_sorcery_alloc(ast_sip_get_sorcery(), "endpoint", NULL);
+	if (!artificial_endpoint) {
 		return -1;
 	}
 
@@ -571,9 +582,7 @@ static pj_bool_t endpoint_lookup(pjsip_rx_data *rdata)
 		}
 	}
 
-	if (!endpoint && !is_ack) {
-		char name[AST_UUID_STR_LEN] = "";
-		pjsip_uri *from = rdata->msg_info.from->uri;
+	if (!endpoint) {
 
 		/* always use an artificial endpoint - per discussion no reason
 		   to have "alwaysauthreject" as an option.  It is felt using it
@@ -581,6 +590,13 @@ static pj_bool_t endpoint_lookup(pjsip_rx_data *rdata)
 		   breaking old stuff and we really don't want to enable the discovery
 		   of SIP accounts */
 		endpoint = ast_sip_get_artificial_endpoint();
+	}
+
+	rdata->endpt_info.mod_data[endpoint_mod.id] = endpoint;
+
+	if ((endpoint == artificial_endpoint) && !is_ack) {
+		char name[AST_UUID_STR_LEN] = "";
+		pjsip_uri *from = rdata->msg_info.from->uri;
 
 		if (PJSIP_URI_SCHEME_IS_SIP(from) || PJSIP_URI_SCHEME_IS_SIPS(from)) {
 			pjsip_sip_uri *sip_from = pjsip_uri_get_uri(from);
@@ -614,7 +630,6 @@ static pj_bool_t endpoint_lookup(pjsip_rx_data *rdata)
 			ast_sip_report_invalid_endpoint(name, rdata);
 		}
 	}
-	rdata->endpt_info.mod_data[endpoint_mod.id] = endpoint;
 	return PJ_FALSE;
 }
 
@@ -725,8 +740,7 @@ static pj_bool_t authenticate(pjsip_rx_data *rdata)
 				ao2_ref(unid, -1);
 			}
 			ast_sip_report_auth_success(endpoint, rdata);
-			pjsip_tx_data_dec_ref(tdata);
-			return PJ_FALSE;
+			break;
 		case AST_SIP_AUTHENTICATION_FAILED:
 			log_failed_request(rdata, "Failed to authenticate", 0, 0);
 			ast_sip_report_auth_failed_challenge_response(endpoint, rdata);
@@ -739,6 +753,7 @@ static pj_bool_t authenticate(pjsip_rx_data *rdata)
 			pjsip_endpt_respond_stateless(ast_sip_get_pjsip_endpoint(), rdata, 500, NULL, NULL, NULL);
 			return PJ_TRUE;
 		}
+		pjsip_tx_data_dec_ref(tdata);
 	}
 
 	return PJ_FALSE;
@@ -756,7 +771,7 @@ static int distribute(void *data)
 		.start_mod = &distributor_mod,
 		.idx_after_start = 1,
 	};
-	pj_bool_t handled;
+	pj_bool_t handled = PJ_FALSE;
 	pjsip_rx_data *rdata = data;
 	int is_request = rdata->msg_info.msg->type == PJSIP_REQUEST_MSG;
 	int is_ack = is_request ? rdata->msg_info.msg->line.req.method.id == PJSIP_ACK_METHOD : 0;
@@ -964,24 +979,45 @@ static int clean_task(const void *data)
 
 static void global_loaded(const char *object_type)
 {
-	char *identifier_order = ast_sip_get_endpoint_identifier_order();
-	char *io_copy = ast_strdupa(identifier_order);
-	char *identify_method;
+	char default_realm[MAX_REALM_LENGTH + 1];
+	struct ast_sip_auth *fake_auth;
+	char *identifier_order;
 
-	ast_free(identifier_order);
-	using_auth_username = 0;
-	while ((identify_method = ast_strip(strsep(&io_copy, ",")))) {
-		if (!strcmp(identify_method, "auth_username")) {
-			using_auth_username = 1;
-			break;
+	/* Update using_auth_username */
+	identifier_order = ast_sip_get_endpoint_identifier_order();
+	if (identifier_order) {
+		char *identify_method;
+		char *io_copy = ast_strdupa(identifier_order);
+		int new_using = 0;
+
+		ast_free(identifier_order);
+		while ((identify_method = ast_strip(strsep(&io_copy, ",")))) {
+			if (!strcmp(identify_method, "auth_username")) {
+				new_using = 1;
+				break;
+			}
+		}
+		using_auth_username = new_using;
+	}
+
+	/* Update default_realm of artificial_auth */
+	ast_sip_get_default_realm(default_realm, sizeof(default_realm));
+	fake_auth = ast_sip_get_artificial_auth();
+	if (!fake_auth || strcmp(fake_auth->realm, default_realm)) {
+		ao2_cleanup(fake_auth);
+
+		fake_auth = alloc_artificial_auth(default_realm);
+		if (fake_auth) {
+			ao2_global_obj_replace_unref(artificial_auth, fake_auth);
+			ao2_ref(fake_auth, -1);
 		}
 	}
 
-	ast_sip_get_default_realm(default_realm, sizeof(default_realm));
 	ast_sip_get_unidentified_request_thresholds(&unidentified_count, &unidentified_period, &unidentified_prune_interval);
 
 	/* Clean out the old task, if any */
 	ast_sched_clean_by_callback(prune_context, prune_task, clean_task);
+	/* Have to do something with the return value to shut up the stupid compiler. */
 	if (ast_sched_add_variable(prune_context, unidentified_prune_interval * 1000, prune_task, NULL, 1) < 0) {
 		return;
 	}
@@ -1109,7 +1145,7 @@ void ast_sip_destroy_distributor(void)
 	internal_sip_unregister_service(&endpoint_mod);
 	internal_sip_unregister_service(&distributor_mod);
 
-	ao2_cleanup(artificial_auth);
+	ao2_global_obj_release(artificial_auth);
 	ao2_cleanup(artificial_endpoint);
 
 	ast_sorcery_observer_remove(ast_sip_get_sorcery(), "global", &global_observer);

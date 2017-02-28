@@ -22,7 +22,6 @@
  *
  * \author Mark Spencer <markster@digium.com>
  *
- * \todo Convert the rest of the AGI commands over to XML documentation
  */
 
 /*** MODULEINFO
@@ -30,8 +29,6 @@
  ***/
 
 #include "asterisk.h"
-
-ASTERISK_REGISTER_FILE()
 
 #include <math.h>
 #include <signal.h>
@@ -85,6 +82,7 @@ ASTERISK_REGISTER_FILE()
 		</description>
 		<see-also>
 			<ref type="agi">hangup</ref>
+			<ref type="application">AGI</ref>
 		</see-also>
 	</agi>
 	<agi name="asyncagi break" language="en_US">
@@ -98,6 +96,7 @@ ASTERISK_REGISTER_FILE()
 		</description>
 		<see-also>
 			<ref type="agi">hangup</ref>
+			<ref type="application">AGI</ref>
 		</see-also>
 	</agi>
 	<agi name="channel status" language="en_US">
@@ -138,6 +137,9 @@ ASTERISK_REGISTER_FILE()
 				</enum>
 			</enumlist>
 		</description>
+		<see-also>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="control stream file" language="en_US">
 		<synopsis>
@@ -188,6 +190,11 @@ ASTERISK_REGISTER_FILE()
 				</variable>
 			</variablelist>
 		</description>
+		<see-also>
+			<ref type="agi">get option</ref>
+			<ref type="agi">control stream file</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="database del" language="en_US">
 		<synopsis>
@@ -203,6 +210,12 @@ ASTERISK_REGISTER_FILE()
 			<para>Returns <literal>1</literal> if successful, <literal>0</literal>
 			otherwise.</para>
 		</description>
+		<see-also>
+			<ref type="agi">database get</ref>
+			<ref type="agi">database put</ref>
+			<ref type="agi">database deltree</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="database deltree" language="en_US">
 		<synopsis>
@@ -217,6 +230,12 @@ ASTERISK_REGISTER_FILE()
 			within a <replaceable>family</replaceable> in the Asterisk database.</para>
 			<para>Returns <literal>1</literal> if successful, <literal>0</literal> otherwise.</para>
 		</description>
+		<see-also>
+			<ref type="agi">database get</ref>
+			<ref type="agi">database put</ref>
+			<ref type="agi">database del</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="database get" language="en_US">
 		<synopsis>
@@ -234,6 +253,12 @@ ASTERISK_REGISTER_FILE()
 			in parenthesis.</para>
 			<para>Example return code: 200 result=1 (testvariable)</para>
 		</description>
+		<see-also>
+			<ref type="agi">database put</ref>
+			<ref type="agi">database del</ref>
+			<ref type="agi">database deltree</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="database put" language="en_US">
 		<synopsis>
@@ -250,6 +275,12 @@ ASTERISK_REGISTER_FILE()
 			<replaceable>value</replaceable>.</para>
 			<para>Returns <literal>1</literal> if successful, <literal>0</literal> otherwise.</para>
 		</description>
+		<see-also>
+			<ref type="agi">database get</ref>
+			<ref type="agi">database del</ref>
+			<ref type="agi">database deltree</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="exec" language="en_US">
 		<synopsis>
@@ -265,6 +296,9 @@ ASTERISK_REGISTER_FILE()
 			<para>Returns whatever the <replaceable>application</replaceable> returns, or
 			<literal>-2</literal> on failure to find <replaceable>application</replaceable>.</para>
 		</description>
+		<see-also>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="get data" language="en_US">
 		<synopsis>
@@ -279,6 +313,9 @@ ASTERISK_REGISTER_FILE()
 			<para>Stream the given <replaceable>file</replaceable>, and receive DTMF data.</para>
 			<para>Returns the digits received from the channel at the other end.</para>
 		</description>
+		<see-also>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="get full variable" language="en_US">
 		<synopsis>
@@ -295,6 +332,11 @@ ASTERISK_REGISTER_FILE()
 			variables, unlike GET VARIABLE.</para>
 			<para>Example return code: 200 result=1 (testvariable)</para>
 		</description>
+		<see-also>
+			<ref type="agi">get variable</ref>
+			<ref type="agi">set variable</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="get option" language="en_US">
 		<synopsis>
@@ -310,6 +352,8 @@ ASTERISK_REGISTER_FILE()
 		</description>
 		<see-also>
 			<ref type="agi">stream file</ref>
+			<ref type="agi">control stream file</ref>
+			<ref type="application">AGI</ref>
 		</see-also>
 	</agi>
 	<agi name="get variable" language="en_US">
@@ -325,6 +369,11 @@ ASTERISK_REGISTER_FILE()
 			the variable in parentheses.</para>
 			<para>Example return code: 200 result=1 (testvariable)</para>
 		</description>
+		<see-also>
+			<ref type="agi">get full variable</ref>
+			<ref type="agi">set variable</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="hangup" language="en_US">
 		<synopsis>
@@ -337,6 +386,9 @@ ASTERISK_REGISTER_FILE()
 			<para>Hangs up the specified channel. If no channel name is given, hangs
 			up the current channel</para>
 		</description>
+		<see-also>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="noop" language="en_US">
 		<synopsis>
@@ -346,6 +398,9 @@ ASTERISK_REGISTER_FILE()
 		<description>
 			<para>Does nothing.</para>
 		</description>
+		<see-also>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="receive char" language="en_US">
 		<synopsis>
@@ -363,6 +418,10 @@ ASTERISK_REGISTER_FILE()
 			if one is received, or <literal>0</literal> if the channel does not support
 			text reception. Returns <literal>-1</literal> only on error/hangup.</para>
 		</description>
+		<see-also>
+			<ref type="agi">receive text</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="receive text" language="en_US">
 		<synopsis>
@@ -379,6 +438,11 @@ ASTERISK_REGISTER_FILE()
 			do not support the reception of text. Returns <literal>-1</literal> for failure
 			or <literal>1</literal> for success, and the string in parenthesis.</para>
 		</description>
+		<see-also>
+			<ref type="agi">receive char</ref>
+			<ref type="agi">send text</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="record file" language="en_US">
 		<synopsis>
@@ -404,6 +468,9 @@ ASTERISK_REGISTER_FILE()
 			lack of dtmf digits or reaching <replaceable>timeout</replaceable>. <replaceable>silence</replaceable>
 			value must be preceded by <literal>s=</literal> and is also optional.</para>
 		</description>
+		<see-also>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="say alpha" language="en_US">
 		<synopsis>
@@ -419,6 +486,15 @@ ASTERISK_REGISTER_FILE()
 			without a digit being pressed, or the ASCII numerical value of the digit if one
 			was pressed or <literal>-1</literal> on error/hangup.</para>
 		</description>
+		<see-also>
+			<ref type="agi">say digits</ref>
+			<ref type="agi">say number</ref>
+			<ref type="agi">say phonetic</ref>
+			<ref type="agi">say date</ref>
+			<ref type="agi">say time</ref>
+			<ref type="agi">say datetime</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="say digits" language="en_US">
 		<synopsis>
@@ -434,6 +510,15 @@ ASTERISK_REGISTER_FILE()
 			without a digit being pressed, or the ASCII numerical value of the digit if one
 			was pressed or <literal>-1</literal> on error/hangup.</para>
 		</description>
+		<see-also>
+			<ref type="agi">say alpha</ref>
+			<ref type="agi">say number</ref>
+			<ref type="agi">say phonetic</ref>
+			<ref type="agi">say date</ref>
+			<ref type="agi">say time</ref>
+			<ref type="agi">say datetime</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="say number" language="en_US">
 		<synopsis>
@@ -450,6 +535,15 @@ ASTERISK_REGISTER_FILE()
 			completes without a digit being pressed, or the ASCII numerical value of
 			the digit if one was pressed or <literal>-1</literal> on error/hangup.</para>
 		</description>
+		<see-also>
+			<ref type="agi">say alpha</ref>
+			<ref type="agi">say digits</ref>
+			<ref type="agi">say phonetic</ref>
+			<ref type="agi">say date</ref>
+			<ref type="agi">say time</ref>
+			<ref type="agi">say datetime</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="say phonetic" language="en_US">
 		<synopsis>
@@ -465,6 +559,15 @@ ASTERISK_REGISTER_FILE()
 			playback completes without a digit pressed, the ASCII numerical value of the digit
 			if one was pressed, or <literal>-1</literal> on error/hangup.</para>
 		</description>
+		<see-also>
+			<ref type="agi">say alpha</ref>
+			<ref type="agi">say digits</ref>
+			<ref type="agi">say number</ref>
+			<ref type="agi">say date</ref>
+			<ref type="agi">say time</ref>
+			<ref type="agi">say datetime</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="say date" language="en_US">
 		<synopsis>
@@ -483,6 +586,15 @@ ASTERISK_REGISTER_FILE()
 			completes without a digit being pressed, or the ASCII numerical value of the
 			digit if one was pressed or <literal>-1</literal> on error/hangup.</para>
 		</description>
+		<see-also>
+			<ref type="agi">say alpha</ref>
+			<ref type="agi">say digits</ref>
+			<ref type="agi">say number</ref>
+			<ref type="agi">say phonetic</ref>
+			<ref type="agi">say time</ref>
+			<ref type="agi">say datetime</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="say time" language="en_US">
 		<synopsis>
@@ -501,6 +613,15 @@ ASTERISK_REGISTER_FILE()
 			without a digit being pressed, or the ASCII numerical value of the digit if
 			one was pressed or <literal>-1</literal> on error/hangup.</para>
 		</description>
+		<see-also>
+			<ref type="agi">say alpha</ref>
+			<ref type="agi">say digits</ref>
+			<ref type="agi">say number</ref>
+			<ref type="agi">say phonetic</ref>
+			<ref type="agi">say date</ref>
+			<ref type="agi">say datetime</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="say datetime" language="en_US">
 		<synopsis>
@@ -528,6 +649,15 @@ ASTERISK_REGISTER_FILE()
 			completes without a digit being pressed, or the ASCII numerical value of the
 			digit if one was pressed or <literal>-1</literal> on error/hangup.</para>
 		</description>
+		<see-also>
+			<ref type="agi">say alpha</ref>
+			<ref type="agi">say digits</ref>
+			<ref type="agi">say number</ref>
+			<ref type="agi">say phonetic</ref>
+			<ref type="agi">say date</ref>
+			<ref type="agi">say time</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="send image" language="en_US">
 		<synopsis>
@@ -542,6 +672,9 @@ ASTERISK_REGISTER_FILE()
 			the channel does not support image transmission.  Returns <literal>-1</literal>
 			only on error/hangup. Image names should not include extensions.</para>
 		</description>
+		<see-also>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="send text" language="en_US">
 		<synopsis>
@@ -559,6 +692,10 @@ ASTERISK_REGISTER_FILE()
 			channel does not support text transmission. Returns <literal>-1</literal> only
 			on error/hangup.</para>
 		</description>
+		<see-also>
+			<ref type="agi">receive text</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="set autohangup" language="en_US">
 		<synopsis>
@@ -572,6 +709,9 @@ ASTERISK_REGISTER_FILE()
 			seconds in the future. Of course it can be hungup before then as well. Setting to
 			<literal>0</literal> will cause the autohangup feature to be disabled on this channel.</para>
 		</description>
+		<see-also>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="set callerid" language="en_US">
 		<synopsis>
@@ -583,6 +723,9 @@ ASTERISK_REGISTER_FILE()
 		<description>
 			<para>Changes the callerid of the current channel.</para>
 		</description>
+		<see-also>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="set context" language="en_US">
 		<synopsis>
@@ -594,6 +737,11 @@ ASTERISK_REGISTER_FILE()
 		<description>
 			<para>Sets the context for continuation upon exiting the application.</para>
 		</description>
+		<see-also>
+			<ref type="agi">set extension</ref>
+			<ref type="agi">set priority</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="set extension" language="en_US">
 		<synopsis>
@@ -605,6 +753,11 @@ ASTERISK_REGISTER_FILE()
 		<description>
 			<para>Changes the extension for continuation upon exiting the application.</para>
 		</description>
+		<see-also>
+			<ref type="agi">set context</ref>
+			<ref type="agi">set priority</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="set music" language="en_US">
 		<synopsis>
@@ -629,6 +782,9 @@ ASTERISK_REGISTER_FILE()
 			used. This generator will be stopped automatically when playing a file.</para>
 			<para>Always returns <literal>0</literal>.</para>
 		</description>
+		<see-also>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="set priority" language="en_US">
 		<synopsis>
@@ -641,6 +797,11 @@ ASTERISK_REGISTER_FILE()
 			<para>Changes the priority for continuation upon exiting the application.
 			The priority must be a valid priority or label.</para>
 		</description>
+		<see-also>
+			<ref type="agi">set context</ref>
+			<ref type="agi">set extension</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="set variable" language="en_US">
 		<synopsis>
@@ -653,6 +814,11 @@ ASTERISK_REGISTER_FILE()
 		<description>
 			<para>Sets a variable to the current channel.</para>
 		</description>
+		<see-also>
+			<ref type="agi">get variable</ref>
+			<ref type="agi">get full variable</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="stream file" language="en_US">
 		<synopsis>
@@ -690,6 +856,8 @@ ASTERISK_REGISTER_FILE()
 		</description>
 		<see-also>
 			<ref type="agi">control stream file</ref>
+			<ref type="agi">get option</ref>
+			<ref type="application">AGI</ref>
 		</see-also>
 	</agi>
 	<agi name="tdd mode" language="en_US">
@@ -708,6 +876,9 @@ ASTERISK_REGISTER_FILE()
 			<para>Enable/Disable TDD transmission/reception on a channel. Returns <literal>1</literal> if
 			successful, or <literal>0</literal> if channel is not TDD-capable.</para>
 		</description>
+		<see-also>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="verbose" language="en_US">
 		<synopsis>
@@ -722,6 +893,9 @@ ASTERISK_REGISTER_FILE()
 			message system. <replaceable>level</replaceable> is the verbose level (1-4).
 			Always returns <literal>1</literal></para>
 		</description>
+		<see-also>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="wait for digit" language="en_US">
 		<synopsis>
@@ -737,6 +911,9 @@ ASTERISK_REGISTER_FILE()
 			one is received. Use <literal>-1</literal> for the <replaceable>timeout</replaceable> value if
 			you desire the call to block indefinitely.</para>
 		</description>
+		<see-also>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="speech create" language="en_US">
 		<synopsis>
@@ -748,6 +925,16 @@ ASTERISK_REGISTER_FILE()
 		<description>
 			<para>Create a speech object to be used by the other Speech AGI commands.</para>
 		</description>
+		<see-also>
+			<ref type="agi">speech set</ref>
+			<ref type="agi">speech destroy</ref>
+			<ref type="agi">speech load grammar</ref>
+			<ref type="agi">speech unload grammar</ref>
+			<ref type="agi">speech activate grammar</ref>
+			<ref type="agi">speech deactivate grammar</ref>
+			<ref type="agi">speech recognize</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="speech set" language="en_US">
 		<synopsis>
@@ -760,6 +947,16 @@ ASTERISK_REGISTER_FILE()
 		<description>
 			<para>Set an engine-specific setting.</para>
 		</description>
+		<see-also>
+			<ref type="agi">speech create</ref>
+			<ref type="agi">speech destroy</ref>
+			<ref type="agi">speech load grammar</ref>
+			<ref type="agi">speech unload grammar</ref>
+			<ref type="agi">speech activate grammar</ref>
+			<ref type="agi">speech deactivate grammar</ref>
+			<ref type="agi">speech recognize</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="speech destroy" language="en_US">
 		<synopsis>
@@ -772,6 +969,13 @@ ASTERISK_REGISTER_FILE()
 		</description>
 		<see-also>
 			<ref type="agi">speech create</ref>
+			<ref type="agi">speech set</ref>
+			<ref type="agi">speech load grammar</ref>
+			<ref type="agi">speech unload grammar</ref>
+			<ref type="agi">speech activate grammar</ref>
+			<ref type="agi">speech deactivate grammar</ref>
+			<ref type="agi">speech recognize</ref>
+			<ref type="application">AGI</ref>
 		</see-also>
 	</agi>
 	<agi name="speech load grammar" language="en_US">
@@ -785,6 +989,16 @@ ASTERISK_REGISTER_FILE()
 		<description>
 			<para>Loads the specified grammar as the specified name.</para>
 		</description>
+		<see-also>
+			<ref type="agi">speech create</ref>
+			<ref type="agi">speech set</ref>
+			<ref type="agi">speech destroy</ref>
+			<ref type="agi">speech unload grammar</ref>
+			<ref type="agi">speech activate grammar</ref>
+			<ref type="agi">speech deactivate grammar</ref>
+			<ref type="agi">speech recognize</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="speech unload grammar" language="en_US">
 		<synopsis>
@@ -796,6 +1010,16 @@ ASTERISK_REGISTER_FILE()
 		<description>
 			<para>Unloads the specified grammar.</para>
 		</description>
+		<see-also>
+			<ref type="agi">speech create</ref>
+			<ref type="agi">speech set</ref>
+			<ref type="agi">speech destroy</ref>
+			<ref type="agi">speech load grammar</ref>
+			<ref type="agi">speech activate grammar</ref>
+			<ref type="agi">speech deactivate grammar</ref>
+			<ref type="agi">speech recognize</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="speech activate grammar" language="en_US">
 		<synopsis>
@@ -807,6 +1031,16 @@ ASTERISK_REGISTER_FILE()
 		<description>
 			<para>Activates the specified grammar on the speech object.</para>
 		</description>
+		<see-also>
+			<ref type="agi">speech create</ref>
+			<ref type="agi">speech set</ref>
+			<ref type="agi">speech destroy</ref>
+			<ref type="agi">speech load grammar</ref>
+			<ref type="agi">speech unload grammar</ref>
+			<ref type="agi">speech deactivate grammar</ref>
+			<ref type="agi">speech recognize</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="speech deactivate grammar" language="en_US">
 		<synopsis>
@@ -818,6 +1052,16 @@ ASTERISK_REGISTER_FILE()
 		<description>
 			<para>Deactivates the specified grammar on the speech object.</para>
 		</description>
+		<see-also>
+			<ref type="agi">speech create</ref>
+			<ref type="agi">speech set</ref>
+			<ref type="agi">speech destroy</ref>
+			<ref type="agi">speech load grammar</ref>
+			<ref type="agi">speech unload grammar</ref>
+			<ref type="agi">speech activate grammar</ref>
+			<ref type="agi">speech recognize</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<agi name="speech recognize" language="en_US">
 		<synopsis>
@@ -832,14 +1076,27 @@ ASTERISK_REGISTER_FILE()
 			<para>Plays back given <replaceable>prompt</replaceable> while listening for
 			speech and dtmf.</para>
 		</description>
+		<see-also>
+			<ref type="agi">speech create</ref>
+			<ref type="agi">speech set</ref>
+			<ref type="agi">speech destroy</ref>
+			<ref type="agi">speech load grammar</ref>
+			<ref type="agi">speech unload grammar</ref>
+			<ref type="agi">speech activate grammar</ref>
+			<ref type="agi">speech deactivate grammar</ref>
+			<ref type="application">AGI</ref>
+		</see-also>
 	</agi>
 	<application name="AGI" language="en_US">
 		<synopsis>
 			Executes an AGI compliant application.
 		</synopsis>
 		<syntax>
-			<parameter name="command" required="true" />
+			<parameter name="command" required="true">
+				<para>How AGI should be invoked on the channel.</para>
+			</parameter>
 			<parameter name="args">
+				<para>Arguments to pass to the AGI script or server.</para>
 				<argument name="arg1" required="true" />
 				<argument name="arg2" multiple="yes" />
 			</parameter>
@@ -848,21 +1105,72 @@ ASTERISK_REGISTER_FILE()
 			<para>Executes an Asterisk Gateway Interface compliant
 			program on a channel. AGI allows Asterisk to launch external programs written
 			in any language to control a telephony channel, play audio, read DTMF digits,
-			etc. by communicating with the AGI protocol on <emphasis>stdin</emphasis> and
-			<emphasis>stdout</emphasis>. As of <literal>1.6.0</literal>, this channel will
+			etc. by communicating with the AGI protocol.</para>
+			<para>The following variants of AGI exist, and are chosen based on the value
+			passed to <replaceable>command</replaceable>:</para>
+			<enumlist>
+				<enum name="AGI">
+					<para>The classic variant of AGI, this will launch the script
+					specified by <replaceable>command</replaceable> as a new process.
+					Communication with the script occurs on <literal>stdin</literal> and
+					<literal>stdout</literal>. If the full path to the script is not
+					provided, the <directory>astagidir</directory> specified in
+					<filename>asterisk.conf</filename> will be used.
+					</para>
+				</enum>
+				<enum name="FastAGI">
+					<para>Connect Asterisk to a FastAGI server using a TCP connection.
+					The URI to the FastAGI server should be given in the form
+					<literal>[scheme]://host.domain[:port][/script/name]</literal>,
+					where <replaceable>scheme</replaceable> is either <literal>agi</literal>
+					or <literal>hagi</literal>.</para>
+					<para>In the case of <literal>hagi</literal>, an SRV lookup will be
+					performed to try to connect to a list of FastAGI servers. The hostname in
+					the URI must be prefixed with <literal>_agi._tcp</literal>. prior to the DNS resolution. For
+					example, if you specify the URI <literal>hagi://agi.example.com/foo.agi</literal>
+					the DNS query would be for <literal>_agi._tcp.agi.example.com</literal>. You
+					will need to make sure this resolves correctly.</para>
+				</enum>
+				<enum name="AsyncAGI">
+					<para>Use AMI to control the channel in AGI. AGI commands can be invoked
+					using the <literal>AMI</literal> action, with a variety of AGI specific
+					events passed back over the AMI connection. AsyncAGI should be invoked
+					by passing <literal>agi:async</literal> to the <replaceable>command</replaceable>
+					parameter.</para>
+				</enum>
+			</enumlist>
+			<note>
+			<para>As of <literal>1.6.0</literal>, this channel will
 			not stop dialplan execution on hangup inside of this application. Dialplan
 			execution will continue normally, even upon hangup until the AGI application
 			signals a desire to stop (either by exiting or, in the case of a net script, by
-			closing the connection). A locally executed AGI script will receive SIGHUP on
-			hangup from the channel except when using DeadAGI. A fast AGI server will
-			correspondingly receive a HANGUP inline with the command dialog. Both of theses
-			signals may be disabled by setting the <variable>AGISIGHUP</variable> channel
-			variable to <literal>no</literal> before executing the AGI application.
+			closing the connection).</para>
+			<para>A locally executed AGI script will receive <literal>SIGHUP</literal> on
+			hangup from the channel except when using <literal>DeadAGI</literal>
+			(or when the channel is already hungup). A fast AGI server will
+			correspondingly receive a <literal>HANGUP</literal> inline with the command dialog.
+			Both of these signals may be disabled by setting the <variable>AGISIGHUP</variable>
+			channel variable to <literal>no</literal> before executing the AGI application.
 			Alternatively, if you would like the AGI application to exit immediately
 			after a channel hangup is detected, set the <variable>AGIEXITONHANGUP</variable>
 			variable to <literal>yes</literal>.</para>
-			<para>Use the CLI command <literal>agi show commands</literal> to list available agi
-			commands.</para>
+			</note>
+			<example title="AGI invocation examples">
+				; Start the AGI script /tmp/my-cool-script.sh, passing it the contents
+				; of the channel variable FOO
+				same => n,AGI(/tmp/my-cool-script.sh,${FOO})
+
+				; Start the AGI script my-cool-script.sh located in the astagidir
+				; directory, specified in asterisk.conf
+				same => n,AGI(my-cool-script.sh)
+
+				; Connect to the FastAGI server located at 127.0.0.1 and start the script
+				; awesome-script
+				same => n,AGI(agi://127.0.0.1/awesome-script)
+
+				; Start AsyncAGI
+				same => n,AGI(agi:async)
+			</example>
 			<para>This application sets the following channel variable upon completion:</para>
 			<variablelist>
 				<variable name="AGISTATUS">
@@ -876,8 +1184,12 @@ ASTERISK_REGISTER_FILE()
 			</variablelist>
 		</description>
 		<see-also>
+			<ref type="manager">AGI</ref>
+			<ref type="managerEvent">AsyncAGIStart</ref>
+			<ref type="managerEvent">AsyncAGIEnd</ref>
 			<ref type="application">EAGI</ref>
 			<ref type="application">DeadAGI</ref>
+			<ref type="filename">asterisk.conf</ref>
 		</see-also>
 	</application>
 	<application name="EAGI" language="en_US">
@@ -890,8 +1202,10 @@ ASTERISK_REGISTER_FILE()
 		</syntax>
 		<description>
 			<para>Using 'EAGI' provides enhanced AGI, with incoming audio available out of band
-			on file descriptor 3.</para>
-			<xi:include xpointer="xpointer(/docs/application[@name='AGI']/description/para)" />
+			on file descriptor 3. In all other respects, it behaves in the same fashion as
+			AGI. See the documentation for the <literal>AGI</literal> dialplan application for
+			more information on invoking AGI on a channel.</para>
+			<para>This application sets the following channel variable upon completion:</para>
 			<xi:include xpointer="xpointer(/docs/application[@name='AGI']/description/variablelist)" />
 		</description>
 		<see-also>
@@ -908,7 +1222,16 @@ ASTERISK_REGISTER_FILE()
 			<xi:include xpointer="xpointer(/docs/application[@name='AGI']/syntax/parameter[@name='args'])" />
 		</syntax>
 		<description>
-			<xi:include xpointer="xpointer(/docs/application[@name='AGI']/description/para)" />
+			<warning>
+				<para>This application is deprecated and may be removed in a future version
+				of Asterisk. Use the replacement application <literal>AGI</literal> instead
+				of <literal>DeadAGI</literal>.
+				</para>
+			</warning>
+			<para>Execute AGI on a 'dead' or hungup channel. See the documentation for the
+			<literal>AGI</literal> dialplan application for more information on invoking
+			AGI on a channel.</para>
+			<para>This application sets the following channel variable upon completion:</para>
 			<xi:include xpointer="xpointer(/docs/application[@name='AGI']/description/variablelist)" />
 		</description>
 		<see-also>
@@ -936,6 +1259,11 @@ ASTERISK_REGISTER_FILE()
 		<description>
 			<para>Add an AGI command to the execute queue of the channel in Async AGI.</para>
 		</description>
+		<see-also>
+			<ref type="managerEvent">AsyncAGIStart</ref>
+			<ref type="managerEvent">AsyncAGIExec</ref>
+			<ref type="managerEvent">AsyncAGIEnd</ref>
+		</see-also>
 	</manager>
 	<managerEvent language="en_US" name="AsyncAGIStart">
 		<managerEventInstance class="EVENT_FLAG_AGI">
@@ -946,6 +1274,12 @@ ASTERISK_REGISTER_FILE()
 					<para>URL encoded string read from the AsyncAGI server.</para>
 				</parameter>
 			</syntax>
+			<see-also>
+				<ref type="managerEvent">AsyncAGIEnd</ref>
+				<ref type="managerEvent">AsyncAGIExec</ref>
+				<ref type="application">AGI</ref>
+				<ref type="manager">AGI</ref>
+			</see-also>
 		</managerEventInstance>
 	</managerEvent>
 	<managerEvent language="en_US" name="AsyncAGIEnd">
@@ -954,6 +1288,12 @@ ASTERISK_REGISTER_FILE()
 			<syntax>
 				<channel_snapshot/>
 			</syntax>
+			<see-also>
+				<ref type="managerEvent">AsyncAGIStart</ref>
+				<ref type="managerEvent">AsyncAGIExec</ref>
+				<ref type="application">AGI</ref>
+				<ref type="manager">AGI</ref>
+			</see-also>
 		</managerEventInstance>
 	</managerEvent>
 	<managerEvent language="en_US" name="AsyncAGIExec">
@@ -968,6 +1308,12 @@ ASTERISK_REGISTER_FILE()
 					<para>URL encoded result string from the executed AGI command.</para>
 				</parameter>
 			</syntax>
+			<see-also>
+				<ref type="managerEvent">AsyncAGIStart</ref>
+				<ref type="managerEvent">AsyncAGIEnd</ref>
+				<ref type="application">AGI</ref>
+				<ref type="manager">AGI</ref>
+			</see-also>
 		</managerEventInstance>
 	</managerEvent>
 	<managerEvent language="en_US" name="AGIExecStart">
@@ -982,6 +1328,10 @@ ASTERISK_REGISTER_FILE()
 					<para>Random identification number assigned to the execution of this command.</para>
 				</parameter>
 			</syntax>
+			<see-also>
+				<ref type="managerEvent">AGIExecEnd</ref>
+				<ref type="application">AGI</ref>
+			</see-also>
 		</managerEventInstance>
 	</managerEvent>
 	<managerEvent language="en_US" name="AGIExecEnd">
@@ -997,6 +1347,10 @@ ASTERISK_REGISTER_FILE()
 					<para>The text result reason from AGI</para>
 				</parameter>
 			</syntax>
+			<see-also>
+				<ref type="managerEvent">AGIExecStart</ref>
+				<ref type="application">AGI</ref>
+			</see-also>
 		</managerEventInstance>
 	</managerEvent>
  ***/
@@ -3719,7 +4073,7 @@ static enum agi_result agi_handle_command(struct ast_channel *chan, AGI *agi, ch
 			break;
 		}
 	} else if (c) {
-		ami_res = "Command Not Permitted on a dead channel";
+		ami_res = "Command Not Permitted on a dead channel or intercept routine";
 		resultcode = 511;
 
 		ast_agi_send(agi->fd, chan, "%d %s\n", resultcode, ami_res);
@@ -3735,23 +4089,6 @@ static enum agi_result agi_handle_command(struct ast_channel *chan, AGI *agi, ch
 	}
 
 	return AGI_RESULT_SUCCESS;
-}
-
-AST_LIST_HEAD_NOLOCK(deferred_frames, ast_frame);
-
-static void queue_deferred_frames(struct deferred_frames *deferred_frames,
-	struct ast_channel *chan)
-{
-	struct ast_frame *f;
-
-	if (!AST_LIST_EMPTY(deferred_frames)) {
-		ast_channel_lock(chan);
-		while ((f = AST_LIST_REMOVE_HEAD(deferred_frames, frame_list))) {
-			ast_queue_frame_head(chan, f);
-			ast_frfree(f);
-		}
-		ast_channel_unlock(chan);
-	}
 }
 
 static enum agi_result run_agi(struct ast_channel *chan, char *request, AGI *agi, int pid, int *status, int dead, int argc, char *argv[])
@@ -3772,9 +4109,8 @@ static enum agi_result run_agi(struct ast_channel *chan, char *request, AGI *agi
 	const char *sighup_str;
 	const char *exit_on_hangup_str;
 	int exit_on_hangup;
-	struct deferred_frames deferred_frames;
-
-	AST_LIST_HEAD_INIT_NOLOCK(&deferred_frames);
+	/*! Running in an interception routine is like DeadAGI mode.  No touchy the channel frames. */
+	int in_intercept = ast_channel_get_intercept_mode();
 
 	ast_channel_lock(chan);
 	sighup_str = pbx_builtin_getvar_helper(chan, "AGISIGHUP");
@@ -3809,7 +4145,7 @@ static enum agi_result run_agi(struct ast_channel *chan, char *request, AGI *agi
 			}
 		}
 		ms = -1;
-		if (dead) {
+		if (dead || in_intercept) {
 			c = ast_waitfor_nandfds(&chan, 0, &agi->ctrl, 1, NULL, &outfd, &ms);
 		} else if (!ast_check_hangup(chan)) {
 			c = ast_waitfor_nandfds(&chan, 1, &agi->ctrl, 1, NULL, &outfd, &ms);
@@ -3836,20 +4172,8 @@ static enum agi_result run_agi(struct ast_channel *chan, char *request, AGI *agi
 					/* Write, ignoring errors */
 					if (write(agi->audio, f->data.ptr, f->datalen) < 0) {
 					}
-					ast_frfree(f);
-				} else if (ast_is_deferrable_frame(f)) {
-					struct ast_frame *dup_f;
-
-					if ((dup_f = ast_frisolate(f))) {
-						AST_LIST_INSERT_HEAD(&deferred_frames, dup_f, frame_list);
-					}
-
-					if (dup_f != f) {
-						ast_frfree(f);
-					}
-				} else {
-					ast_frfree(f);
 				}
+				ast_frfree(f);
 			}
 		} else if (outfd > -1) {
 			size_t len = sizeof(buf);
@@ -3897,14 +4221,12 @@ static enum agi_result run_agi(struct ast_channel *chan, char *request, AGI *agi
 				buf[buflen - 1] = '\0';
 			}
 
-			queue_deferred_frames(&deferred_frames, chan);
-
 			if (agidebug)
 				ast_verbose("<%s>AGI Rx << %s\n", ast_channel_name(chan), buf);
-			cmd_status = agi_handle_command(chan, agi, buf, dead);
+			cmd_status = agi_handle_command(chan, agi, buf, dead || in_intercept);
 			switch (cmd_status) {
 			case AGI_RESULT_FAILURE:
-				if (dead || !ast_check_hangup(chan)) {
+				if (dead || in_intercept || !ast_check_hangup(chan)) {
 					/* The failure was not because of a hangup. */
 					returnstatus = AGI_RESULT_FAILURE;
 				}
@@ -3920,8 +4242,6 @@ static enum agi_result run_agi(struct ast_channel *chan, char *request, AGI *agi
 			}
 		}
 	}
-
-	queue_deferred_frames(&deferred_frames, chan);
 
 	if (agi->speech) {
 		ast_speech_destroy(agi->speech);

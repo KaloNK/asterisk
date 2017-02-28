@@ -41,13 +41,12 @@
 
 /*** MODULEINFO
 	<depend>generic_odbc</depend>
+	<depend>res_odbc_transaction</depend>
 	<depend>ltdl</depend>
 	<support_level>core</support_level>
  ***/
 
 #include "asterisk.h"
-
-ASTERISK_REGISTER_FILE()
 
 #include "asterisk/file.h"
 #include "asterisk/channel.h"
@@ -522,7 +521,7 @@ static int load_odbc_config(void)
 						!strncasecmp(v->name, "share", 5) ||
 						!strcasecmp(v->name, "limit") ||
 						!strcasecmp(v->name, "idlecheck")) {
-					ast_log(LOG_WARNING, "The 'pooling', 'shared_connections', 'limit', and 'idlecheck' options are deprecated. Please see UPGRADE.txt for information\n");
+					ast_log(LOG_WARNING, "The 'pooling', 'shared_connections', 'limit', and 'idlecheck' options were replaced by 'max_connections'.  See res_odbc.conf.sample.\n");
 				} else if (!strcasecmp(v->name, "enabled")) {
 					enabled = ast_true(v->value);
 				} else if (!strcasecmp(v->name, "pre-connect")) {
@@ -668,10 +667,14 @@ static char *handle_cli_odbc_show(struct ast_cli_entry *e, int cmd, struct ast_c
 			char timestr[80];
 			struct ast_tm tm;
 
-			ast_localtime(&class->last_negative_connect, &tm, NULL);
-			ast_strftime(timestr, sizeof(timestr), "%Y-%m-%d %T", &tm);
 			ast_cli(a->fd, "  Name:   %s\n  DSN:    %s\n", class->name, class->dsn);
-			ast_cli(a->fd, "    Last connection attempt: %s\n", timestr);
+
+			if (class->last_negative_connect.tv_sec > 0) {
+				ast_localtime(&class->last_negative_connect, &tm, NULL);
+				ast_strftime(timestr, sizeof(timestr), "%Y-%m-%d %T", &tm);
+				ast_cli(a->fd, "    Last fail connection attempt: %s\n", timestr);
+			}
+
 			ast_cli(a->fd, "    Number of active connections: %zd (out of %d)\n", class->connection_cnt, class->maxconnections);
 			ast_cli(a->fd, "\n");
 		}
@@ -742,6 +745,22 @@ static int aoro2_class_cb(void *obj, void *arg, int flags)
 		return CMP_MATCH | CMP_STOP;
 	}
 	return 0;
+}
+
+unsigned int ast_odbc_get_max_connections(const char *name)
+{
+	struct odbc_class *class;
+	unsigned int max_connections;
+
+	class = ao2_callback(class_container, 0, aoro2_class_cb, (char *) name);
+	if (!class) {
+		return 0;
+	}
+
+	max_connections = class->maxconnections;
+	ao2_ref(class, -1);
+
+	return max_connections;
 }
 
 /*

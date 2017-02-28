@@ -31,8 +31,6 @@
 
 #include "asterisk.h"
 
-ASTERISK_REGISTER_FILE()
-
 #include "asterisk/app.h"
 #include "asterisk/astobj2.h"
 #include "asterisk/bridge.h"
@@ -370,6 +368,9 @@ static void play_on_channel(struct stasis_app_playback *playback,
 
 		playback_final_update(playback, offsetms, res,
 			ast_channel_uniqueid(chan));
+		if (res == AST_CONTROL_STREAM_STOP) {
+			break;
+		}
 
 		/* Reset offset for any subsequent media */
 		offsetms = 0;

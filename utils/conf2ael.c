@@ -28,7 +28,6 @@
  ***/
 
 #include "asterisk.h"
-ASTERISK_REGISTER_FILE()
 
 #include "asterisk/paths.h"	/* CONFIG_DIR */
 #include <locale.h>
@@ -79,18 +78,7 @@ char ast_config_AST_SYSTEM_NAME[20] = ""; */
 int option_debug = 0;
 int option_verbose = 0;
 
-void __ast_register_file(const char *file);
-void __ast_register_file(const char *file)
-{
-}
-
-void __ast_unregister_file(const char *file);
-void __ast_unregister_file(const char *file)
-{
-}
-#if !defined(LOW_MEMORY)
 int ast_add_profile(const char *x, uint64_t scale) { return 0;}
-#endif
 /* Our own version of ast_log, since the expr parser uses it. -- stolen from utils/check_expr.c */
 void ast_log(int level, const char *file, int line, const char *function, const char *fmt, ...) __attribute__((format(printf,5,6)));
 
@@ -573,7 +561,7 @@ void pbx_substitute_variables_helper(struct ast_channel *c,const char *cp1,char 
 int ast_add_extension2(struct ast_context *con,
 					   int replace, const char *extension, int priority, const char *label, const char *callerid,
 					   const char *application, void *data, void (*datad)(void *),
-					   const char *registrar)
+					   const char *registrar, const char *registrar_file, int registrar_line)
 {
 	return localized_add_extension2(con, replace, extension, priority, label, callerid, application, data, datad, registrar);
 }
@@ -664,20 +652,8 @@ struct ast_exten *ast_walk_context_extensions(struct ast_context *con, struct as
 	return NULL;
 }
 
-struct ast_include *ast_walk_context_includes(struct ast_context *con, struct ast_include *inc);
-struct ast_include *ast_walk_context_includes(struct ast_context *con, struct ast_include *inc)
-{
-	return NULL;
-}
-
-struct ast_ignorepat *ast_walk_context_ignorepats(struct ast_context *con, struct ast_ignorepat *ip);
-struct ast_ignorepat *ast_walk_context_ignorepats(struct ast_context *con, struct ast_ignorepat *ip)
-{
-	return NULL;
-}
-
-struct ast_sw *ast_walk_context_switches(struct ast_context *con, struct ast_sw *sw);
-struct ast_sw *ast_walk_context_switches(struct ast_context *con, struct ast_sw *sw)
+const struct ast_include *ast_walk_context_includes(const struct ast_context *con, const struct ast_include *inc);
+const struct ast_include *ast_walk_context_includes(const struct ast_context *con, const struct ast_include *inc)
 {
 	return NULL;
 }
@@ -720,7 +696,6 @@ unsigned int ast_hashtab_hash_contexts(const void *obj)
 }
 
 #ifdef DEBUG_THREADS
-#if !defined(LOW_MEMORY)
 void ast_mark_lock_acquired(void *lock_addr)
 {
 }
@@ -767,5 +742,4 @@ void ast_suspend_lock_info(void *lock_addr)
 void ast_restore_lock_info(void *lock_addr)
 {
 }
-#endif /* !defined(LOW_MEMORY) */
 #endif /* DEBUG_THREADS */

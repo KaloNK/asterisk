@@ -263,6 +263,8 @@ struct ast_bridge_softmix {
 	 * for itself.
 	 */
 	unsigned int internal_mixing_interval;
+	/*! TRUE if binaural convolve is activated in configuration. */
+	unsigned int binaural_active;
 };
 
 /*!
@@ -868,6 +870,14 @@ void ast_bridge_set_internal_sample_rate(struct ast_bridge *bridge, unsigned int
 void ast_bridge_set_mixing_interval(struct ast_bridge *bridge, unsigned int mixing_interval);
 
 /*!
+ * \brief Activates the use of binaural signals in a conference bridge.
+ *
+ *  \param bridge Channel to activate the binaural signals.
+ *  \param binaural_active If true binaural signal processing will be active for the bridge.
+ */
+void ast_bridge_set_binaural_active(struct ast_bridge *bridge, unsigned int binaural_active);
+
+/*!
  * \brief Set a bridge to feed a single video source to all participants.
  */
 void ast_bridge_set_single_src_video_mode(struct ast_bridge *bridge, struct ast_channel *video_src_chan);
@@ -902,6 +912,15 @@ int ast_bridge_is_video_src(struct ast_bridge *bridge, struct ast_channel *chan)
  * \brief remove a channel as a source of video for the bridge.
  */
 void ast_bridge_remove_video_src(struct ast_bridge *bridge, struct ast_channel *chan);
+
+/*!
+ * \brief Converts an enum representation of a bridge video mode to string
+ *
+ * \param video_mode The video mode
+ *
+ * \retval A string representation of \c video_mode
+ */
+const char *ast_bridge_video_mode_to_string(enum ast_bridge_video_mode_type video_mode);
 
 enum ast_transfer_result {
 	/*! The transfer completed successfully */
