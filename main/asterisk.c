@@ -707,7 +707,7 @@ static char *handle_show_sysinfo(struct ast_cli_entry *e, int cmd, struct ast_cl
 #if defined(HAVE_SYSINFO)
 	ast_cli(a->fd, "  Buffer RAM:                %" PRIu64 " KiB\n", ((uint64_t) sys_info.bufferram * sys_info.mem_unit) / 1024);
 #endif
-#if defined (HAVE_SYSCTL) || defined(HAVE_SWAPCTL)
+#if defined(HAVE_SWAPCTL) || defined(HAVE_SYSINFO)
 	ast_cli(a->fd, "  Total Swap Space:          %d KiB\n", totalswap);
 	ast_cli(a->fd, "  Free Swap Space:           %" PRIu64 " KiB\n\n", freeswap);
 #endif
@@ -1696,6 +1696,66 @@ static void set_icon(char *text)
 {
 	if (getenv("TERM") && strstr(getenv("TERM"), "xterm"))
 		fprintf(stdout, "\033]1;%s\007", text);
+}
+
+/*! \brief Check whether we were set to high(er) priority. */
+static int has_priority(void)
+{
+	/* Neither of these calls should fail with these arguments. */
+#ifdef __linux__
+	/* For SCHED_OTHER, SCHED_BATCH and SCHED_IDLE, this will return
+	 * 0. For the realtime priorities SCHED_RR and SCHED_FIFO, it
+	 * will return something >= 1. */
+	return sched_getscheduler(0);
+#else
+	/* getpriority() can return a value in -20..19 (or even -INF..20)
+	 * where negative numbers are high priority. We don't bother
+	 * checking errno. If the query fails and it returns -1, we'll
+	 * assume that we're running at high prio; a safe assumption
+	 * that will enable the resource starvation monitor (canary)
+	 * just in case. */
+	return (getpriority(PRIO_PROCESS, 0) < 0);
+#endif
+}
+
+/*! \brief Set priority on all known threads. */
+static int set_priority_all(int pri)
+{
+#if !defined(__linux__)
+	/* The non-linux version updates the entire process prio. */
+	return ast_set_priority(pri);
+#elif defined(LOW_MEMORY)
+	ast_log(LOG_WARNING, "Unable to enumerate all threads to update priority\n");
+	return ast_set_priority(pri);
+#else
+	struct thread_list_t *cur;
+	struct sched_param sched;
+	char const *policy_str;
+	int policy;
+
+	memset(&sched, 0, sizeof(sched));
+	if (pri) {
+		policy = SCHED_RR;
+		policy_str = "realtime";
+		sched.sched_priority = 10;
+	} else {
+		policy = SCHED_OTHER;
+		policy_str = "regular";
+		sched.sched_priority = 0;
+	}
+	if (sched_setscheduler(getpid(), policy, &sched)) {
+		ast_log(LOG_WARNING, "Unable to set %s thread priority on main thread\n", policy_str);
+		return -1;
+	}
+	ast_verb(1, "Setting %s thread priority on all threads\n", policy_str);
+	AST_RWLIST_RDLOCK(&thread_list);
+	AST_RWLIST_TRAVERSE(&thread_list, cur, list) {
+		/* Don't care about the return value. It should work. */
+		sched_setscheduler(cur->lwp, policy, &sched);
+	}
+	AST_RWLIST_UNLOCK(&thread_list);
+	return 0;
+#endif
 }
 
 /*! \brief We set ourselves to a high priority, that we might pre-empt everything
@@ -3586,7 +3646,7 @@ static void *canary_thread(void *unused)
 				"He's kicked the bucket.  He's shuffled off his mortal coil, "
 				"run down the curtain, and joined the bleeding choir invisible!!  "
 				"THIS is an EX-CANARY.  (Reducing priority)\n");
-			ast_set_priority(0);
+			set_priority_all(0);
 			pthread_exit(NULL);
 		}
 
@@ -3598,8 +3658,11 @@ static void *canary_thread(void *unused)
 /* Used by libc's atexit(3) function */
 static void canary_exit(void)
 {
-	if (canary_pid > 0)
+	if (canary_pid > 0) {
+		int status;
 		kill(canary_pid, SIGKILL);
+		waitpid(canary_pid, &status, 0);
+	}
 }
 
 /* Execute CLI commands on startup.  Run by main() thread. */
@@ -4058,13 +4121,21 @@ int main(int argc, char *argv[])
 	return 0;
 }
 
+static inline void check_init(int init_result, const char *name)
+{
+	if (init_result) {
+		printf("%s initialization failed.\n%s", name, term_quit());
+		ast_run_atexits(0);
+		exit(init_result == -2 ? 2 : 1);
+	}
+}
+
 static void asterisk_daemon(int isroot, const char *runuser, const char *rungroup)
 {
 	FILE *f;
 	sigset_t sigs;
 	int num;
 	char *buf;
-	int moduleresult;         /*!< Result from the module load subsystem */
 	char tmp[80];
 
 	/* This needs to remain as high up in the initial start up as possible.
@@ -4095,8 +4166,16 @@ static void asterisk_daemon(int isroot, const char *runuser, const char *rungrou
 	__ast_mm_init_phase_1();
 #endif	/* defined(__AST_DEBUG_MALLOC) */
 
+	/* Check whether high prio was succesfully set by us or some
+	 * other incantation. */
+	if (has_priority()) {
+		ast_set_flag(&ast_options, AST_OPT_FLAG_HIGH_PRIORITY);
+	} else {
+		ast_clear_flag(&ast_options, AST_OPT_FLAG_HIGH_PRIORITY);
+	}
+
 	/* Spawning of astcanary must happen AFTER the call to daemon(3) */
-	if (isroot && ast_opt_high_priority) {
+	if (ast_opt_high_priority) {
 		snprintf(canary_filename, sizeof(canary_filename), "%s/alt.asterisk.canary.tweet.tweet.tweet", ast_config_AST_RUN_DIR);
 
 		/* Don't let the canary child kill Asterisk, if it dies immediately */
@@ -4169,42 +4248,15 @@ static void asterisk_daemon(int isroot, const char *runuser, const char *rungrou
 	callerid_init();
 	ast_builtins_init();
 
-	if (ast_utils_init()) {
-		printf("Failed: ast_utils_init\n%s", term_quit());
-		exit(1);
-	}
-
-	if (ast_tps_init()) {
-		printf("Failed: ast_tps_init\n%s", term_quit());
-		exit(1);
-	}
-
-	if (ast_fd_init()) {
-		printf("Failed: ast_fd_init\n%s", term_quit());
-		exit(1);
-	}
-
-	if (ast_pbx_init()) {
-		printf("Failed: ast_pbx_init\n%s", term_quit());
-		exit(1);
-	}
-
-	if (ast_event_init()) {
-		printf("Failed: ast_event_init\n%s", term_quit());
-		exit(1);
-	}
-
+	check_init(ast_utils_init(), "Utilities");
+	check_init(ast_tps_init(), "Task Processor Core");
+	check_init(ast_fd_init(), "File Descriptor Debugging");
+	check_init(ast_pbx_init(), "ast_pbx_init");
+	check_init(ast_event_init(), "Generic Event System");
 #ifdef TEST_FRAMEWORK
-	if (ast_test_init()) {
-		printf("Failed: ast_test_init\n%s", term_quit());
-		exit(1);
-	}
+	check_init(ast_test_init(), "Test Framework");
 #endif
-
-	if (ast_translate_init()) {
-		printf("Failed: ast_translate_init\n%s", term_quit());
-		exit(1);
-	}
+	check_init(ast_translate_init(), "Translator Core");
 
 	ast_aoc_cli_init();
 
@@ -4228,141 +4280,52 @@ static void asterisk_daemon(int isroot, const char *runuser, const char *rungrou
 	srand((unsigned int) getpid() + (unsigned int) time(NULL));
 	initstate((unsigned int) getpid() * 65536 + (unsigned int) time(NULL), randompool, sizeof(randompool));
 
-	if (init_logger()) {		/* Start logging subsystem */
-		printf("Failed: init_logger\n%s", term_quit());
-		exit(1);
-	}
+	check_init(init_logger(), "Logger");
 
 	threadstorage_init();
 
-	ast_format_attr_init();
-	ast_format_list_init();
-	ast_rtp_engine_init();
+	check_init(ast_format_attr_init(), "Format Attributes");
+	check_init(ast_format_list_init(), "Format Lists");
 
+	ast_rtp_engine_init();
 	ast_autoservice_init();
 
-	if (ast_timing_init()) {
-		printf("Failed: ast_timing_init\n%s", term_quit());
-		exit(1);
-	}
-
-	if (ast_ssl_init()) {
-		printf("Failed: ast_ssl_init\n%s", term_quit());
-		exit(1);
-	}
+	check_init(ast_timing_init(), "Timing");
+	check_init(ast_ssl_init(), "SSL");
 
 #ifdef AST_XML_DOCS
 	/* Load XML documentation. */
 	ast_xmldoc_load_documentation();
 #endif
 
-	if (astdb_init()) {
-		printf("Failed: astdb_init\n%s", term_quit());
-		exit(1);
-	}
-
-	if (ast_msg_init()) {
-		printf("Failed: ast_msg_init\n%s", term_quit());
-		exit(1);
-	}
-
-	/* initialize the data retrieval API */
-	if (ast_data_init()) {
-		printf("Failed: ast_data_init\n%s", term_quit());
-		exit(1);
-	}
-
-	ast_channels_init();
-
-	if ((moduleresult = load_modules(1))) {		/* Load modules, pre-load only */
-		printf("Failed: load_modules(1)\n%s", term_quit());
-		exit(moduleresult == -2 ? 2 : 1);
-	}
-
-	if (dnsmgr_init()) {		/* Initialize the DNS manager */
-		printf("Failed: dnsmgr_init\n%s", term_quit());
-		exit(1);
-	}
-
-	if (ast_named_acl_init()) { /* Initialize the Named ACL system */
-		printf("Failed: ast_named_acl_init\n%s", term_quit());
-		exit(1);
-	}
+	check_init(astdb_init(), "ASTdb");
+	check_init(ast_msg_init(), "Messaging API");
+	check_init(ast_data_init(), "Data Retrieval API");
+	check_init(ast_channels_init(), "Channel");
+	check_init(load_modules(1), "Module Preload");
+	check_init(dnsmgr_init(), "DNS manager");
+	check_init(ast_named_acl_init(), "Named ACL system");
 
 	ast_http_init();		/* Start the HTTP server, if needed */
 
-	if (init_manager()) {
-		printf("Failed: init_manager\n%s", term_quit());
-		exit(1);
-	}
-
-	if (ast_cdr_engine_init()) {
-		printf("Failed: ast_cdr_engine_init\n%s", term_quit());
-		exit(1);
-	}
-
-	if (ast_cel_engine_init()) {
-		printf("Failed: ast_cel_engine_init\n%s", term_quit());
-		exit(1);
-	}
-
-	if (ast_device_state_engine_init()) {
-		printf("Failed: ast_device_state_engine_init\n%s", term_quit());
-		exit(1);
-	}
-
-	if (ast_presence_state_engine_init()) {
-		printf("Failed: ast_presence_state_engine_init\n%s", term_quit());
-		exit(1);
-	}
+	check_init(init_manager(), "Asterisk Manager Interface");
+	check_init(ast_cdr_engine_init(), "CDR Engine");
+	check_init(ast_cel_engine_init(), "CEL Engine");
+	check_init(ast_device_state_engine_init(), "Device State Engine");
+	check_init(ast_presence_state_engine_init(), "Presence State Engine");
 
 	ast_dsp_init();
 	ast_udptl_init();
 
-	if (ast_image_init()) {
-		printf("Failed: ast_image_init\n%s", term_quit());
-		exit(1);
-	}
-
-	if (ast_file_init()) {
-		printf("Failed: ast_file_init\n%s", term_quit());
-		exit(1);
-	}
-
-	if (load_pbx()) {
-		printf("Failed: load_pbx\n%s", term_quit());
-		exit(1);
-	}
-
-	if (ast_indications_init()) {
-		printf("Failed: ast_indications_init\n%s", term_quit());
-		exit(1);
-	}
-
-	if (ast_features_init()) {
-		printf("Failed: ast_features_init\n%s", term_quit());
-		exit(1);
-	}
-
-	if (init_framer()) {
-		printf("Failed: init_framer\n%s", term_quit());
-		exit(1);
-	}
-
-	if (ast_enum_init()) {
-		printf("Failed: ast_enum_init\n%s", term_quit());
-		exit(1);
-	}
-
-	if (ast_cc_init()) {
-		printf("Failed: ast_cc_init\n%s", term_quit());
-		exit(1);
-	}
-
-	if ((moduleresult = load_modules(0))) {		/* Load modules */
-		printf("Failed: load_modules(0)\n%s", term_quit());
-		exit(moduleresult == -2 ? 2 : 1);
-	}
+	check_init(ast_image_init(), "Image");
+	check_init(ast_file_init(), "Generic File Format Support");
+	check_init(load_pbx(), "load_pbx");
+	check_init(ast_indications_init(), "Indication Tone Handling");
+	check_init(ast_features_init(), "Call Features");
+	check_init(init_framer(), "init_framer");
+	check_init(ast_enum_init(), "ENUM Support");
+	check_init(ast_cc_init(), "Call Completion Supplementary Services");
+	check_init(load_modules(0), "Module");
 
 	/* loads the cli_permissoins.conf file needed to implement cli restrictions. */
 	ast_cli_perms_init(0);

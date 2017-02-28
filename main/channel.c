@@ -5997,7 +5997,7 @@ struct ast_channel *ast_request(const char *type, struct ast_format_cap *request
 
 		if (set_security_requirements(requestor, c)) {
 			ast_log(LOG_WARNING, "Setting security requirements failed\n");
-			c = ast_channel_release(c);
+			ast_hangup(c);
 			*cause = AST_CAUSE_BEARERCAPABILITY_NOTAVAIL;
 			return NULL;
 		}
@@ -8671,10 +8671,13 @@ static void channels_shutdown(void)
 	}
 }
 
-void ast_channels_init(void)
+int ast_channels_init(void)
 {
 	channels = ao2_container_alloc(NUM_CHANNEL_BUCKETS,
 			ast_channel_hash_cb, ast_channel_cmp_cb);
+	if (!channels) {
+		return -1;
+	}
 
 	ast_cli_register_multiple(cli_channel, ARRAY_LEN(cli_channel));
 
@@ -8683,6 +8686,8 @@ void ast_channels_init(void)
 	ast_plc_reload();
 
 	ast_register_cleanup(channels_shutdown);
+
+	return 0;
 }
 
 /*! \brief Print call group and pickup group ---*/
