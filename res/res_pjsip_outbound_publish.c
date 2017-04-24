@@ -68,7 +68,7 @@
 					</description>
 				</configOption>
 				<configOption name="outbound_proxy" default="">
-					<synopsis>SIP URI of the outbound proxy used to send publishes</synopsis>
+					<synopsis>Full SIP URI of the outbound proxy used to send publishes</synopsis>
 				</configOption>
 				<configOption name="server_uri">
 					<synopsis>SIP URI of the server and entity to publish to</synopsis>
@@ -1269,7 +1269,7 @@ static int load_module(void)
 
 	shutdown_group = ast_serializer_shutdown_group_alloc();
 	if (!shutdown_group) {
-		return AST_MODULE_LOAD_FAILURE;
+		return AST_MODULE_LOAD_DECLINE;
 	}
 
 	ast_sorcery_apply_config(ast_sip_get_sorcery(), "res_pjsip_outbound_publish");

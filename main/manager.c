@@ -5646,8 +5646,9 @@ static int action_extensionstate(struct mansession *s, const struct message *m)
 {
 	const char *exten = astman_get_header(m, "Exten");
 	const char *context = astman_get_header(m, "Context");
-	char hint[256] = "";
+	char hint[256];
 	int status;
+
 	if (ast_strlen_zero(exten)) {
 		astman_send_error(s, m, "Extension not specified");
 		return 0;
@@ -5656,16 +5657,18 @@ static int action_extensionstate(struct mansession *s, const struct message *m)
 		context = "default";
 	}
 	status = ast_extension_state(NULL, context, exten);
-	ast_get_hint(hint, sizeof(hint) - 1, NULL, 0, NULL, context, exten);
+	hint[0] = '\0';
+	ast_get_hint(hint, sizeof(hint), NULL, 0, NULL, context, exten);
 	astman_start_ack(s, m);
-	astman_append(s,   "Message: Extension Status\r\n"
-			   "Exten: %s\r\n"
-			   "Context: %s\r\n"
-			   "Hint: %s\r\n"
-			   "Status: %d\r\n"
-		           "StatusText: %s\r\n\r\n",
-		      exten, context, hint, status,
-		      ast_extension_state2str(status));
+	astman_append(s, "Message: Extension Status\r\n"
+		"Exten: %s\r\n"
+		"Context: %s\r\n"
+		"Hint: %s\r\n"
+		"Status: %d\r\n"
+		"StatusText: %s\r\n"
+		"\r\n",
+		exten, context, hint, status,
+		ast_extension_state2str(status));
 	return 0;
 }
 
@@ -6588,10 +6591,9 @@ static void *session_do(void *data)
 	struct mansession s = {
 		.tcptls_session = data,
 	};
-	int flags;
+	int flags = 1;
 	int res;
 	struct ast_sockaddr ser_remote_address_tmp;
-	struct protoent *p;
 
 	if (ast_atomic_fetchadd_int(&unauth_sessions, +1) >= authlimit) {
 		fclose(ser->f);
@@ -6611,14 +6613,8 @@ static void *session_do(void *data)
 	/* here we set TCP_NODELAY on the socket to disable Nagle's algorithm.
 	 * This is necessary to prevent delays (caused by buffering) as we
 	 * write to the socket in bits and pieces. */
-	p = getprotobyname("tcp");
-	if (p) {
-		int arg = 1;
-		if( setsockopt(ser->fd, p->p_proto, TCP_NODELAY, (char *)&arg, sizeof(arg) ) < 0 ) {
-			ast_log(LOG_WARNING, "Failed to set manager tcp connection to TCP_NODELAY mode: %s\nSome manager actions may be slow to respond.\n", strerror(errno));
-		}
-	} else {
-		ast_log(LOG_WARNING, "Failed to set manager tcp connection to TCP_NODELAY, getprotobyname(\"tcp\") failed\nSome manager actions may be slow to respond.\n");
+	if (setsockopt(ser->fd, IPPROTO_TCP, TCP_NODELAY, (char *) &flags, sizeof(flags)) < 0) {
+		ast_log(LOG_WARNING, "Failed to set TCP_NODELAY on manager connection: %s\n", strerror(errno));
 	}
 
 	/* make sure socket is non-blocking */
@@ -6951,6 +6947,7 @@ static int manager_state_cb(char *context, char *exten, struct ast_state_cb_info
 	/* Notify managers of change */
 	char hint[512];
 
+	hint[0] = '\0';
 	ast_get_hint(hint, sizeof(hint), NULL, 0, NULL, context, exten);
 
 	switch(info->reason) {

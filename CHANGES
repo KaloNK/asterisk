@@ -9,18 +9,118 @@
 ==============================================================================
 
 ------------------------------------------------------------------------------
+--- Functionality changes from Asterisk 13.15.0 to Asterisk 13.16.0 ----------
+------------------------------------------------------------------------------
+
+res_rtp_asterisk
+------------------
+ * Added the stun_blacklist option to rtp.conf.  Some multihomed servers have
+   IP interfaces that cannot reach the STUN server specified by stunaddr.
+   Blacklist those interface subnets from trying to send a STUN packet to find
+   the external IP address.  Attempting to send the STUN packet needlessly
+   delays processing incoming and outgoing SIP INVITEs because we will wait
+   for a response that can never come until we give up on the response.
+   Multiple subnets may be listed.
+
+res_pjsip_config_wizard
+------------------
+ * Two new parameters have been added to the pjsip config wizard.
+   Setting 'sends_line_with_registrations' to true will cause the wizard
+   to skip the creation of an identify object to match incoming requests
+   to the endpoint and instead add the line and endpoint parameters to
+   the outbound registration object.
+   Setting 'outbound_proxy' is a shortcut for adding individual
+   endpoint/outbound_proxy, aor/outbound_proxy and registration/outbound_proxy
+   parameters.
+
+------------------------------------------------------------------------------
 --- Functionality changes from Asterisk 13.14.0 to Asterisk 13.15.0 ----------
 ------------------------------------------------------------------------------
+
+AMI
+------------------
+ * The 'PJSIPShowEndpoint' command's respone event of 'IdentifyDetail' now
+   contains a new optional parameter, 'MatchHeader', mapping to the new
+   configuration option 'match_header' for the corresponding 'identify' object.
+   It should be noted that since 'match_header' takes in a key: value pair, the
+   event parameter will contain a ':' as well.
 
 app_record
 ------------------
  * Added new 'u' option to Record() application which prevents Asterisk from
    truncating silence from the end of recorded files.
 
+res_pjsip_outbound_registration
+------------------
+ * Outbound registrations are now refreshed when res_stun_monitor detects
+   a network change event has happened.
+   The 'pjsip send (un)register' CLI commands were updated to accept '*all'
+   as an argument to operate on all registrations.
+   The 'PJSIP(Un)Register' AMI commands were updated to also accept '*all'.
+
 app_voicemail
 ------------------
  * The 'Comedian Mail' prompts can now be overriden using the 'vm-login' and
    'vm-newuser' configuration options in voicemail.conf.
+
+ * Added 'fromstring' field to the voicemail boxes. If set, it will override
+   the global 'fromstring' field on a per-mailbox basis.
+
+func_channel
+------------------
+ * Added CHANNEL(callid) to retrieve the call log tag associated with the
+   channel.  e.g., [C-00000000]  Dialplan now has access to the call log
+   search key associated with the channel so it can be saved in case there
+   is a problem with the call.
+
+res_pjsip
+------------------
+ * A new transport parameter 'symmetric_transport' has been added.
+   When a request from a dynamic contact comes in on a transport with this
+   option set to 'yes', the transport name will be saved and used for
+   subsequent outgoing requests like OPTIONS, NOTIFY and INVITE.  It's
+   saved as a contact uri parameter named 'x-ast-txp' and will display with
+   the contact uri in CLI, AMI, and ARI output.  On the outgoing request,
+   if a transport wasn't explicitly set on the endpoint AND the request URI
+   is not a hostname, the saved transport will be used and the 'x-ast-txp'
+   parameter stripped from the outgoing packet.  To facilitate recreation of
+   subscriptions on asterisk restart, a new column 'contact_uri' needed to be
+   added to the ps_subcsription_persistence table.  Since new columns were
+   added to both transport and subscription_persistence, an alembic upgrade
+   should be run to bring the database tables up to date.
+
+ * A new option, allow_overlap, has been added to endpoints which allows
+   overlap dialing functionality to be enabled or disabled. The option defaults
+   to enabled.
+
+res_pjsip_transport_websocket
+------------------
+ * Removed non-secure websocket support.  Firefox and Chrome have not allowed
+   non-secure websockets for quite some time so this shouldn't be an issue
+   for people.  Attempting to use a non-secure websocket may or may not work
+   when Asterisk attempts to send SIP requests to do something like initiate
+   call hangup.
+
+res_pjsip_endpoint_identifier_ip
+------------------
+ * A new option has been added to the 'identify' configuration object,
+   'match_header'. The 'match_header' attribute should contain a SIP
+   header: value pair that, When set, will cause inbound requests that contain
+   the matching SIP header/value pair to be associated with the corresponding
+   endpoint. This option is cumulative with the 'match' option, so that if
+   either option matches the request, the request is associated with the
+   endpoint.
+
+   In a future release, this module will be renamed to something more
+   appropriate, as it now matches inbound requests on more than just IP
+   address.
+
+res_rtp_asterisk
+-----------------
+ * The RTP layer of Asterisk now has support for RFC 5761: "Multiplexing RTP
+   Data and Control Packets on a Single Port." So far, the only channel driver
+   that supports this feature is chan_pjsip. You can set "rtcp_mux = yes" on
+   a PJSIP endpoint in pjsip.conf to enable the feature.
 
 ------------------------------------------------------------------------------
 --- Functionality changes from Asterisk 13.13.0 to Asterisk 13.14.0 ----------

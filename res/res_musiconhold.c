@@ -154,6 +154,7 @@ struct moh_files_state {
 
 /* Custom astobj2 flag */
 #define MOH_NOTDELETED          (1 << 30)       /*!< Find only records that aren't deleted? */
+#define MOH_REALTIME          (1 << 31)       /*!< Find only records that are realtime */
 
 static struct ast_flags global_flags[1] = {{0}};        /*!< global MOH_ flags */
 
@@ -1075,16 +1076,13 @@ static int moh_scan_files(struct mohclass *class) {
 	DIR *files_DIR;
 	struct dirent *files_dirent;
 	char dir_path[PATH_MAX];
-	char path[PATH_MAX];
 	char filepath[PATH_MAX];
 	char *ext;
 	struct stat statbuf;
 	int i;
 
 	if (class->dir[0] != '/') {
-		ast_copy_string(dir_path, ast_config_AST_DATA_DIR, sizeof(dir_path));
-		strncat(dir_path, "/", sizeof(dir_path) - 1);
-		strncat(dir_path, class->dir, sizeof(dir_path) - 1);
+		snprintf(dir_path, sizeof(dir_path), "%s/%s", ast_config_AST_DATA_DIR, class->dir);
 	} else {
 		ast_copy_string(dir_path, class->dir, sizeof(dir_path));
 	}
@@ -1100,16 +1098,6 @@ static int moh_scan_files(struct mohclass *class) {
 	}
 	class->total_files = 0;
 
-	if (!getcwd(path, sizeof(path))) {
-		ast_log(LOG_WARNING, "getcwd() failed: %s\n", strerror(errno));
-		closedir(files_DIR);
-		return -1;
-	}
-	if (chdir(dir_path) < 0) {
-		ast_log(LOG_WARNING, "chdir() failed: %s\n", strerror(errno));
-		closedir(files_DIR);
-		return -1;
-	}
 	while ((files_dirent = readdir(files_DIR))) {
 		/* The file name must be at least long enough to have the file type extension */
 		if ((strlen(files_dirent->d_name) < 4))
@@ -1146,10 +1134,6 @@ static int moh_scan_files(struct mohclass *class) {
 	}
 
 	closedir(files_DIR);
-	if (chdir(path) < 0) {
-		ast_log(LOG_WARNING, "chdir() failed: %s\n", strerror(errno));
-		return -1;
-	}
 	if (ast_test_flag(class, MOH_SORTALPHA))
 		qsort(&class->filearray[0], class->total_files, sizeof(char *), moh_sort_compare);
 	return class->total_files;
@@ -1683,7 +1667,9 @@ static int moh_class_mark(void *obj, void *arg, int flags)
 {
 	struct mohclass *class = obj;
 
-	class->delete = 1;
+	if ( ((flags & MOH_REALTIME) && class->realtime) || !(flags & MOH_REALTIME) ) {
+		class->delete = 1;
+	}
 
 	return 0;
 }
@@ -1699,22 +1685,27 @@ static int load_moh_classes(int reload)
 {
 	struct ast_config *cfg;
 	struct ast_variable *var;
-	struct mohclass *class;	
+	struct mohclass *class;
 	char *cat;
 	int numclasses = 0;
 	struct ast_flags config_flags = { reload ? CONFIG_FLAG_FILEUNCHANGED : 0 };
 
 	cfg = ast_config_load("musiconhold.conf", config_flags);
 
+	if (cfg == CONFIG_STATUS_FILEUNCHANGED) {
+		if (ast_check_realtime("musiconhold") && reload) {
+			ao2_t_callback(mohclasses, OBJ_NODATA | MOH_REALTIME, moh_class_mark, NULL, "Mark realtime classes for deletion");
+			ao2_t_callback(mohclasses, OBJ_UNLINK | OBJ_NODATA | OBJ_MULTIPLE, moh_classes_delete_marked, NULL, "Purge marked classes");
+		}
+		moh_rescan_files();
+		return 0;
+	}
+
 	if (cfg == CONFIG_STATUS_FILEMISSING || cfg == CONFIG_STATUS_FILEINVALID) {
 		if (ast_check_realtime("musiconhold") && reload) {
 			ao2_t_callback(mohclasses, OBJ_NODATA, moh_class_mark, NULL, "Mark deleted classes");
 			ao2_t_callback(mohclasses, OBJ_UNLINK | OBJ_NODATA | OBJ_MULTIPLE, moh_classes_delete_marked, NULL, "Purge marked classes");
 		}
-		return 0;
-	}
-	if (cfg == CONFIG_STATUS_FILEUNCHANGED) {
-		moh_rescan_files();
 		return 0;
 	}
 

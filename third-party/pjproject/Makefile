@@ -96,9 +96,9 @@ endef
 
 define download_from_pjproject
 	($(SHELL_ECHO_PREFIX) Downloading $(TARBALL_URL) to $(TARBALL) ;\
-	$(DOWNLOAD_TO_STDOUT) $(call DOWNLOAD_TIMEOUT,5,10) $(TARBALL_URL) > $(TARBALL) &&\
+	$(DOWNLOAD_TO_STDOUT) $(call DOWNLOAD_TIMEOUT,5,60) $(TARBALL_URL) > $(TARBALL) &&\
 	$(SHELL_ECHO_PREFIX) Downloading $(PJPROJECT_URL)/MD5SUM to $(PJMD5SUM) &&\
-	$(DOWNLOAD_TO_STDOUT) $(call DOWNLOAD_TIMEOUT,5,10) $(PJPROJECT_URL)/MD5SUM.TXT > $(PJMD5SUM) &&\
+	$(DOWNLOAD_TO_STDOUT) $(call DOWNLOAD_TIMEOUT,5,60) $(PJPROJECT_URL)/MD5SUM.TXT > $(PJMD5SUM) &&\
 	$(verify_tarball))
 endef
 
@@ -135,7 +135,7 @@ source/pjlib/include/pj/%.h: patches/%.h
 	$(ECHO_PREFIX) Applying custom include file $<
 	$(CMD_PREFIX) cp -f $< source/pjlib/include/pj/
 
-.rebuild_needed: $(wildcard ../../makeopts) $(wildcard ../../menuselect.makeopts)
+.rebuild_needed: $(wildcard ../../.lastclean)
 	$(ECHO_PREFIX) Rebuilding
 	$(CMD_PREFIX) $(MAKE) clean $(REALLY_QUIET)
 

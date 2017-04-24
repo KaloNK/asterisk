@@ -135,27 +135,6 @@ if test ${prefix} = ${ac_default_prefix} || test ${prefix} = 'NONE'; then
      fi
 fi
 
-#
-# The following code for detecting lib64 was taken from Fedora's
-# /usr/share/config.site with a modification to check that the
-# /usr/lib64 directory actually exists.  This prevents libdir from
-# being set to /usr/lib64 on 64-bit systems that still use /usr/lib.
-#
-if test "$prefix" = /usr ||\
-     { test "$prefix" = NONE && test "$ac_default_prefix" = /usr ; }
-then
-     for i in x86_64 ppc64 s390x aarch64; do
-        if test $host_cpu = $i; then
-           if test "$libdir" = '${exec_prefix}/lib' &&\
-              { test -d "${exec_prefix}/lib64" || test -d "${ac_default_prefix}/lib64" ; } ; then
-              libdir='${exec_prefix}/lib64'
-              AC_MSG_NOTICE([ Setting libdir=${libdir} ])
-           fi
-           break
-        fi
-     done
-fi
-
 BUILD_PLATFORM=${build}
 BUILD_CPU=${build_cpu}
 BUILD_VENDOR=${build_vendor}
@@ -315,11 +294,11 @@ AC_PATH_PROG([NM], [nm], :)
 
 if test "${WGET}" != ":" ; then
   DOWNLOAD=${WGET}
-  DOWNLOAD_TO_STDOUT="${WGET} -O-"
+  DOWNLOAD_TO_STDOUT="${WGET} -q -O-"
   DOWNLOAD_TIMEOUT='--timeout=$1'
 else if test "${CURL}" != ":" ; then
   DOWNLOAD="${CURL} -O --progress-bar -w \"%{url_effective}\n\""
-  DOWNLOAD_TO_STDOUT="${CURL} -L --progress-bar"
+  DOWNLOAD_TO_STDOUT="${CURL} -Ls"
   DOWNLOAD_TIMEOUT='--max-time $(or $2,$1)'
 else
   AC_PATH_PROG([FETCH], [fetch], [:])
@@ -540,6 +519,7 @@ AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_EVSUB_GRP_LOCK], [PJSIP EVSUB Group Lock suppo
 AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_INV_SESSION_REF], [PJSIP INVITE Session Reference Count support], [PJPROJECT], [pjsip])
 AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_AUTH_CLT_DEINIT], [pjsip_auth_clt_deinit support], [PJPROJECT], [pjsip])
 AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_EVSUB_SET_UAS_TIMEOUT], [PJSIP EVSUB Set UAS Timeout support], [PJPROJECT], [pjsip])
+AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_TSX_LAYER_FIND_TSX2], [pjsip_tsx_layer_find_tsx2 support], [PJPROJECT], [pjsip])
 fi
 
 AST_EXT_LIB_SETUP([POPT], [popt], [popt])
@@ -1194,29 +1174,6 @@ AC_COMPILE_IFELSE(
 CFLAGS="${saved_sanitize_CFLAGS}"
 LDFLAGS="${saved_sanitize_LDFLAGS}"
 AC_SUBST(AST_UNDEFINED_SANITIZER)
-
-AC_MSG_CHECKING(for -ffunction-sections support)
-saved_CFLAGS="${CFLAGS}"
-CFLAGS="${CFLAGS} -ffunction-sections"
-AC_COMPILE_IFELSE(
-	[AC_LANG_PROGRAM([], [int x = 1;])],
-	AC_MSG_RESULT(yes)
-	[saved_LDFLAGS="${LDFLAGS}"]
-	[LDFLAGS="${LDFLAGS} -Wl,--gc-sections"]
-	AC_MSG_CHECKING(for --gc-sections support)
-	AC_LINK_IFELSE(
-		[AC_LANG_PROGRAM([], [int x = 1;])],
-		AC_MSG_RESULT(yes)
-		[GC_CFLAGS="-ffunction-sections"]
-		[[GC_LDFLAGS="-Wl,--gc-sections"]],
-		AC_MSG_RESULT(no)
-	)
-	[LDFLAGS="${saved_LDFLAGS}"],
-	AC_MSG_RESULT(no)
-)
-CFLAGS="${saved_CFLAGS}"
-AC_SUBST(GC_CFLAGS)
-AC_SUBST(GC_LDFLAGS)
 
 AC_MSG_CHECKING(for -Wdeclaration-after-statement support)
 if $(${CC} -Wdeclaration-after-statement -S -o /dev/null -xc /dev/null > /dev/null 2>&1); then
@@ -2251,6 +2208,7 @@ if test "$USE_PJPROJECT" != "no" ; then
       AST_EXT_LIB_CHECK([PJSIP_INV_SESSION_REF], [pjsip], [pjsip_inv_add_ref], [pjsip.h], [$PJPROJECT_LIB], [$PJPROJECT_CFLAGS])
       AST_EXT_LIB_CHECK([PJSIP_AUTH_CLT_DEINIT], [pjsip], [pjsip_auth_clt_deinit], [pjsip.h], [$PJPROJECT_LIB], [$PJPROJECT_CFLAGS])
       AST_EXT_LIB_CHECK([PJSIP_EVSUB_SET_UAS_TIMEOUT], [pjsip], [pjsip_evsub_set_uas_timeout], [pjsip.h], [$PJPROJECT_LIB], [$PJPROJECT_CFLAGS])
+      AST_EXT_LIB_CHECK([PJSIP_TSX_LAYER_FIND_TSX2], [pjsip], [pjsip_tsx_layer_find_tsx2], [pjsip.h], [$PJPROJECT_LIB], [$PJPROJECT_CFLAGS])
    fi
 fi
 

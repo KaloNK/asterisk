@@ -254,9 +254,6 @@ SUBDIRS_INSTALL:=$(SUBDIRS:%=%-install)
 SUBDIRS_CLEAN:=$(SUBDIRS:%=%-clean)
 SUBDIRS_DIST_CLEAN:=$(SUBDIRS:%=%-dist-clean)
 SUBDIRS_UNINSTALL:=$(SUBDIRS:%=%-uninstall)
-MOD_SUBDIRS_EMBED_LDSCRIPT:=$(MOD_SUBDIRS:%=%-embed-ldscript)
-MOD_SUBDIRS_EMBED_LDFLAGS:=$(MOD_SUBDIRS:%=%-embed-ldflags)
-MOD_SUBDIRS_EMBED_LIBS:=$(MOD_SUBDIRS:%=%-embed-libs)
 MOD_SUBDIRS_MENUSELECT_TREE:=$(MOD_SUBDIRS:%=%-menuselect-tree)
 
 ifneq ($(findstring darwin,$(OSARCH)),)
@@ -345,41 +342,14 @@ ifeq ($(filter %menuselect,$(MAKECMDGOALS)),)
 	menuselect/menuselect --check-deps $@
 endif
 
-$(MOD_SUBDIRS_EMBED_LDSCRIPT):
-	+@echo "EMBED_LDSCRIPTS+="`$(SILENTMAKE) -C $(@:-embed-ldscript=) SUBDIR=$(@:-embed-ldscript=) __embed_ldscript` >> makeopts.embed_rules
-
-$(MOD_SUBDIRS_EMBED_LDFLAGS):
-	+@echo "EMBED_LDFLAGS+="`$(SILENTMAKE) -C $(@:-embed-ldflags=) SUBDIR=$(@:-embed-ldflags=) __embed_ldflags` >> makeopts.embed_rules
-
-$(MOD_SUBDIRS_EMBED_LIBS):
-	+@echo "EMBED_LIBS+="`$(SILENTMAKE) -C $(@:-embed-libs=) SUBDIR=$(@:-embed-libs=) __embed_libs` >> makeopts.embed_rules
-
 $(MOD_SUBDIRS_MENUSELECT_TREE):
 	+@$(SUBMAKE) -C $(@:-menuselect-tree=) SUBDIR=$(@:-menuselect-tree=) moduleinfo
 	+@$(SUBMAKE) -C $(@:-menuselect-tree=) SUBDIR=$(@:-menuselect-tree=) makeopts
 
-makeopts.embed_rules: menuselect.makeopts
-	@echo "Generating embedded module rules ..."
-	@rm -f $@
-	+@$(SUBMAKE) $(MOD_SUBDIRS_EMBED_LDSCRIPT)
-	+@$(SUBMAKE) $(MOD_SUBDIRS_EMBED_LDFLAGS)
-	+@$(SUBMAKE) $(MOD_SUBDIRS_EMBED_LIBS)
-
-$(SUBDIRS): makeopts .lastclean main/version.c include/asterisk/build.h include/asterisk/buildopts.h defaults.h makeopts.embed_rules
+$(SUBDIRS): makeopts .lastclean main/version.c include/asterisk/build.h include/asterisk/buildopts.h defaults.h
 
 ifeq ($(findstring $(OSARCH), mingw32 cygwin ),)
-  ifeq ($(shell grep ^MENUSELECT_EMBED=$$ menuselect.makeopts 2>/dev/null),)
-    # Non-windows:
-    # ensure that all module subdirectories are processed before 'main' during
-    # a parallel build, since if there are modules selected to be embedded the
-    # directories containing them must be completed before the main Asterisk
-    # binary can be built.
-    # If MENUSELECT_EMBED is empty, we don't need this and allow 'main' to be
-    # be built with only third_party first.
-main: $(filter-out main,$(MOD_SUBDIRS))
-  else
 main: third-party
-  endif
 else
     # Windows: we need to build main (i.e. the asterisk dll) first,
     # followed by res, followed by the other directories, because
@@ -444,7 +414,6 @@ distclean: $(SUBDIRS_DIST_CLEAN) _clean
 	@$(MAKE) -C menuselect dist-clean
 	@$(MAKE) -C sounds dist-clean
 	rm -f menuselect.makeopts makeopts menuselect-tree menuselect.makedeps
-	rm -f makeopts.embed_rules
 	rm -f config.log config.status config.cache
 	rm -rf autom4te.cache
 	rm -f include/asterisk/autoconfig.h
@@ -638,20 +607,77 @@ oldmodcheck:
 
 ld-cache-update:
 ifneq ($(LDCONFIG),)
+ifeq ($(DESTDIR),)  # DESTDIR means binary archive creation; ldconfig should be run on postinst
 	@if [ $${EUID} -eq 0 ] ; then \
-		$(LDCONFIG) "$(DESTDIR)$(ASTLIBDIR)/" ; \
+		$(LDCONFIG) "$(ASTLIBDIR)/" ; \
 	else \
 		echo " WARNING WARNING WARNING" ;\
 		echo "" ;\
 		echo " You cannot rebuild the system linker cache unless you are root. " ;\
-		echo " You MUST do one of the follwing..." ;\
+		echo " You MUST do one of the following..." ;\
 		echo "  * Re-run 'make install' as root. " ;\
-		echo "  * Run 'ldconfig $(DESTDIR)$(ASTLIBDIR)' as root. " ;\
-		echo "  * Run asterisk with 'LD_LIBRARY_PATH=$(DESTDIR)$(ASTLIBDIR) asterisk' " ;\
+		echo "  * Run 'ldconfig $(ASTLIBDIR)' as root. " ;\
+		echo "  * Run asterisk with 'LD_LIBRARY_PATH=$(ASTLIBDIR) asterisk' " ;\
 		echo "" ;\
 		echo " WARNING WARNING WARNING" ;\
 	fi
 endif
+endif
+
+export _oldlibdir =
+export _oldmoddir =
+ifeq ($(findstring 64,$(HOST_CPU)),64)
+    # Strip any trailing '/' so the dir and notdir functions work correctly
+    _current_libdir = $(patsubst %/,%,$(DESTDIR)$(ASTLIBDIR))
+
+    # Only process if the paths end in lib64 or lib.
+    # If we're installing to lib64, check lib for orphans.
+    # If we're installing to lib, check lib64 for orphans.
+    # Otherwise, leave _oldlibdir empty.
+    ifeq ($(notdir $(_current_libdir)),lib64)
+        _oldlibdir = $(dir $(_current_libdir))lib
+    else ifeq ($(notdir $(_current_libdir)),lib)
+        _oldlibdir = $(dir $(_current_libdir))lib64
+    endif
+
+    # Strip any trailing '/' so the dir and notdir functions work correctly
+    _current_moddir = $(patsubst %/,%,$(DESTDIR)$(ASTMODDIR))
+
+    # Only process if the paths contain /lib64/ or /lib/.
+    # If we're installing to lib64, check lib for orphans.
+    # If we're installing to lib, check lib64 for orphans.
+    # Otherwise, leave _oldmoddir empty.
+    ifeq ($(findstring /lib64/,$(_current_moddir)),/lib64/)
+        _oldmoddir = $(subst /lib64/,/lib/,$(_current_moddir))
+    else ifeq ($(findstring /lib/,$(_current_moddir)),/lib/)
+        _oldmoddir = $(subst /lib/,/lib64/,$(_current_moddir))
+    endif
+endif
+
+check-old-libdir:
+	@test -n "$(_oldlibdir)" -a -d "$(_oldlibdir)" || exit 0 ;\
+	oldfiles=`find "$(_oldlibdir)" -name libasterisk* -print -quit -o \( -path *asterisk/modules/* -a -name *.so \) -print -quit 2>/dev/null` ;\
+	if [ "x$$oldfiles" != "x" ] ; then \
+		echo " WARNING WARNING WARNING" ;\
+		echo "" ;\
+		echo " Installation is to: " ;\
+		echo "   $(DESTDIR)$(ASTLIBDIR)" ;\
+		echo " but there are asterisk shared libraries in: " ;\
+		echo "   $(_oldlibdir)" ;\
+		echo " or" ;\
+		echo "   $(_oldlibdir)/asterisk/modules" ;\
+		echo "" ;\
+		echo " It is unlikely that asterisk will start." ;\
+		echo "" ;\
+		echo " You should do one of the following..." ;\
+		echo "  * Run 'make uninstall' to remove the incorrect libraries" ;\
+		echo "    then run 'make install' again." ;\
+		echo "  * Manually remove the libraries from" ;\
+		echo "   $(_oldlibdir)" ;\
+		echo "   and run 'ldconfig' to rebuild the linker cache." ;\
+		echo "" ;\
+		echo " WARNING WARNING WARNING" ;\
+	fi
 
 badshell:
 ifneq ($(filter ~%,$(DESTDIR)),)
@@ -692,6 +718,7 @@ install: badshell bininstall datafiles
 	@echo " +-------------------------------------------+"
 	@$(MAKE) -s oldmodcheck
 	@$(MAKE) -s ld-cache-update
+	@$(MAKE) -s check-old-libdir
 
 isntall: install
 
@@ -912,6 +939,7 @@ main-binuninstall:
 
 _uninstall: $(SUBDIRS_UNINSTALL) main-binuninstall
 	rm -f "$(DESTDIR)$(ASTMODDIR)/"*
+	test -n "$(_oldmoddir)" -a -d "$(_oldmoddir)" && rm -f "$(_oldmoddir)/"* || :
 	rm -f "$(DESTDIR)$(ASTSBINDIR)/astgenkey"
 	rm -f "$(DESTDIR)$(ASTSBINDIR)/autosupport"
 	rm -rf "$(DESTDIR)$(ASTHEADERDIR)"
@@ -944,6 +972,7 @@ uninstall: _uninstall
 
 uninstall-all: _uninstall
 	rm -rf "$(DESTDIR)$(ASTMODDIR)"
+	test -n "$(_oldmoddir)" -a -d "$(_oldmoddir)" && rm -rf "$(_oldmoddir)" || :
 	rm -rf "$(DESTDIR)$(ASTVARLIBDIR)"
 	rm -rf "$(DESTDIR)$(ASTDATADIR)"
 	rm -rf "$(DESTDIR)$(ASTSPOOLDIR)"
@@ -1000,7 +1029,7 @@ menuselect/nmenuselect: menuselect/makeopts .lastclean
 menuselect/makeopts: makeopts .lastclean
 	+$(MAKE_MENUSELECT) makeopts
 
-menuselect-tree: $(foreach dir,$(filter-out main,$(MOD_SUBDIRS)),$(wildcard $(dir)/*.c) $(wildcard $(dir)/*.cc) $(wildcard $(dir)/*.xml)) build_tools/cflags.xml build_tools/cflags-devmode.xml sounds/sounds.xml build_tools/embed_modules.xml utils/utils.xml agi/agi.xml configure makeopts
+menuselect-tree: $(foreach dir,$(filter-out main,$(MOD_SUBDIRS)),$(wildcard $(dir)/*.c) $(wildcard $(dir)/*.cc) $(wildcard $(dir)/*.xml)) build_tools/cflags.xml build_tools/cflags-devmode.xml sounds/sounds.xml utils/utils.xml agi/agi.xml configure makeopts
 	@echo "Generating input for menuselect ..."
 	@echo "<?xml version=\"1.0\"?>" > $@
 	@echo >> $@
@@ -1013,7 +1042,6 @@ menuselect-tree: $(foreach dir,$(filter-out main,$(MOD_SUBDIRS)),$(wildcard $(di
 	fi
 	@cat utils/utils.xml >> $@
 	@cat agi/agi.xml >> $@
-	@cat build_tools/embed_modules.xml >> $@
 	@cat sounds/sounds.xml >> $@
 	@echo "</menu>" >> $@
 
@@ -1058,14 +1086,12 @@ check-alembic: makeopts
 .PHONY: basic-pbx
 .PHONY: check-alembic
 .PHONY: ld-cache-update
+.PHONY: check-old-libdir
 .PHONY: $(SUBDIRS_INSTALL)
 .PHONY: $(SUBDIRS_DIST_CLEAN)
 .PHONY: $(SUBDIRS_CLEAN)
 .PHONY: $(SUBDIRS_UNINSTALL)
 .PHONY: $(SUBDIRS)
-.PHONY: $(MOD_SUBDIRS_EMBED_LDSCRIPT)
-.PHONY: $(MOD_SUBDIRS_EMBED_LDFLAGS)
-.PHONY: $(MOD_SUBDIRS_EMBED_LIBS)
 
 FORCE:
 
