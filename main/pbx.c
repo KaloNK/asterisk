@@ -657,7 +657,7 @@ static int ast_add_extension2_lockopt(struct ast_context *con,
 static struct ast_context *find_context_locked(const char *context);
 static struct ast_context *find_context(const char *context);
 static void get_device_state_causing_channels(struct ao2_container *c);
-static int ext_strncpy(char *dst, const char *src, int len, int nofluff);
+static unsigned int ext_strncpy(char *dst, const char *src, size_t dst_size, int nofluff);
 
 /*!
  * \internal
@@ -3967,7 +3967,6 @@ static int ast_add_hint(struct ast_exten *e)
 			hint_new->last_presence_state = presence_state;
 			hint_new->last_presence_subtype = subtype;
 			hint_new->last_presence_message = message;
-			message = subtype = NULL;
 		}
 	}
 
@@ -6981,32 +6980,51 @@ int ast_async_goto_by_name(const char *channame, const char *context, const char
 	return res;
 }
 
-/*! \brief copy a string skipping whitespace and dashes */
-static int ext_strncpy(char *dst, const char *src, int len, int nofluff)
+/*!
+ * \internal
+ * \brief Copy a string skipping whitespace and optionally dashes.
+ *
+ * \param dst Destination buffer to copy src string.
+ * \param src Null terminated string to copy.
+ * \param dst_size Number of bytes in the dst buffer.
+ * \param nofluf Nonzero if '-' chars are not copied.
+ *
+ * \return Number of bytes written to dst including null terminator.
+ */
+static unsigned int ext_strncpy(char *dst, const char *src, size_t dst_size, int nofluff)
 {
-	int count = 0;
-	int insquares = 0;
+	unsigned int count;
+	unsigned int insquares;
+	unsigned int is_pattern;
 
-	while (*src && (count < len - 1)) {
+	if (!dst_size--) {
+		/* There really is no dst buffer */
+		return 0;
+	}
+
+	count = 0;
+	insquares = 0;
+	is_pattern = *src == '_';
+	while (*src && count < dst_size) {
 		if (*src == '[') {
-			insquares = 1;
+			if (is_pattern) {
+				insquares = 1;
+			}
 		} else if (*src == ']') {
 			insquares = 0;
 		} else if (*src == ' ' && !insquares) {
-			src++;
+			++src;
 			continue;
 		} else if (*src == '-' && !insquares && nofluff) {
-			src++;
+			++src;
 			continue;
 		}
-		*dst = *src;
-		dst++;
-		src++;
-		count++;
+		*dst++ = *src++;
+		++count;
 	}
 	*dst = '\0';
 
-	return count;
+	return count + 1;
 }
 
 /*!
@@ -7323,10 +7341,10 @@ static int ast_add_extension2_lockopt(struct ast_context *con,
 		p += strlen(label) + 1;
 	}
 	tmp->name = p;
-	p += ext_strncpy(p, extension, strlen(extension) + 1, 0) + 1;
+	p += ext_strncpy(p, extension, strlen(extension) + 1, 0);
 	if (exten_fluff) {
 		tmp->exten = p;
-		p += ext_strncpy(p, extension, strlen(extension) + 1, 1) + 1;
+		p += ext_strncpy(p, extension, strlen(extension) + 1 - exten_fluff, 1);
 	} else {
 		/* no fluff, we don't need a copy. */
 		tmp->exten = tmp->name;
@@ -7336,10 +7354,10 @@ static int ast_add_extension2_lockopt(struct ast_context *con,
 
 	/* Blank callerid and NULL callerid are two SEPARATE things.  Do NOT confuse the two!!! */
 	if (callerid) {
-		p += ext_strncpy(p, callerid, strlen(callerid) + 1, 0) + 1;
+		p += ext_strncpy(p, callerid, strlen(callerid) + 1, 0);
 		if (callerid_fluff) {
 			tmp->cidmatch = p;
-			p += ext_strncpy(p, callerid, strlen(callerid) + 1, 1) + 1;
+			p += ext_strncpy(p, callerid, strlen(callerid) + 1 - callerid_fluff, 1);
 		}
 		tmp->matchcid = AST_EXT_MATCHCID_ON;
 	} else {
@@ -7511,8 +7529,8 @@ struct pbx_outgoing {
 	int dial_res;
 	/*! \brief Set when dialing is completed */
 	unsigned int dialed:1;
-	/*! \brief Set when execution is completed */
-	unsigned int executed:1;
+	/*! \brief Set if we've spawned a thread to do our work */
+	unsigned int in_separate_thread:1;
 };
 
 /*! \brief Destructor for outgoing structure */
@@ -7535,13 +7553,19 @@ static void *pbx_outgoing_exec(void *data)
 	RAII_VAR(struct pbx_outgoing *, outgoing, data, ao2_cleanup);
 	enum ast_dial_result res;
 
-	/* Notify anyone interested that dialing is complete */
 	res = ast_dial_run(outgoing->dial, NULL, 0);
-	ao2_lock(outgoing);
-	outgoing->dial_res = res;
-	outgoing->dialed = 1;
-	ast_cond_signal(&outgoing->cond);
-	ao2_unlock(outgoing);
+
+	if (outgoing->in_separate_thread) {
+		/* Notify anyone interested that dialing is complete */
+		ao2_lock(outgoing);
+		outgoing->dial_res = res;
+		outgoing->dialed = 1;
+		ast_cond_signal(&outgoing->cond);
+		ao2_unlock(outgoing);
+	} else {
+		/* We still need the dial result, but we don't need to lock */
+		outgoing->dial_res = res;
+	}
 
 	/* If the outgoing leg was not answered we can immediately return and go no further */
 	if (res != AST_DIAL_RESULT_ANSWERED) {
@@ -7580,12 +7604,6 @@ static void *pbx_outgoing_exec(void *data)
 			ast_dial_answered_steal(outgoing->dial);
 		}
 	}
-
-	/* Notify anyone else again that may be interested that execution is complete */
-	ao2_lock(outgoing);
-	outgoing->executed = 1;
-	ast_cond_signal(&outgoing->cond);
-	ao2_unlock(outgoing);
 
 	return NULL;
 }
@@ -7792,34 +7810,42 @@ static int pbx_outgoing_attempt(const char *type, struct ast_format_cap *cap,
 		}
 	}
 
+	/* This extra reference is dereferenced by pbx_outgoing_exec */
 	ao2_ref(outgoing, +1);
-	if (ast_pthread_create_detached(&thread, NULL, pbx_outgoing_exec, outgoing)) {
-		ast_log(LOG_WARNING, "Unable to spawn dialing thread for '%s/%s'\n", type, addr);
-		ao2_ref(outgoing, -1);
-		if (locked_channel) {
-			if (!synchronous) {
-				ast_channel_unlock(dialed);
+
+	if (synchronous == AST_OUTGOING_WAIT_COMPLETE) {
+		/*
+		 * Because we are waiting until this is complete anyway, there is no
+		 * sense in creating another thread that we will just need to wait
+		 * for, so instead we commandeer the current thread.
+		 */
+		pbx_outgoing_exec(outgoing);
+	} else {
+		outgoing->in_separate_thread = 1;
+
+		if (ast_pthread_create_detached(&thread, NULL, pbx_outgoing_exec, outgoing)) {
+			ast_log(LOG_WARNING, "Unable to spawn dialing thread for '%s/%s'\n", type, addr);
+			ao2_ref(outgoing, -1);
+			if (locked_channel) {
+				if (!synchronous) {
+					ast_channel_unlock(dialed);
+				}
+				ast_channel_unref(dialed);
 			}
-			ast_channel_unref(dialed);
+			return -1;
 		}
-		return -1;
+
+		if (synchronous) {
+			ao2_lock(outgoing);
+			/* Wait for dialing to complete */
+			while (!outgoing->dialed) {
+				ast_cond_wait(&outgoing->cond, ao2_object_get_lockaddr(outgoing));
+			}
+			ao2_unlock(outgoing);
+		}
 	}
 
 	if (synchronous) {
-		ao2_lock(outgoing);
-		/* Wait for dialing to complete */
-		while (!outgoing->dialed) {
-			ast_cond_wait(&outgoing->cond, ao2_object_get_lockaddr(outgoing));
-		}
-		if (1 < synchronous
-			&& outgoing->dial_res == AST_DIAL_RESULT_ANSWERED) {
-			/* Wait for execution to complete */
-			while (!outgoing->executed) {
-				ast_cond_wait(&outgoing->cond, ao2_object_get_lockaddr(outgoing));
-			}
-		}
-		ao2_unlock(outgoing);
-
 		/* Determine the outcome of the dialing attempt up to it being answered. */
 		if (reason) {
 			*reason = pbx_dial_reason(outgoing->dial_res,

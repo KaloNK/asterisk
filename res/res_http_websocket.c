@@ -529,10 +529,12 @@ static inline int ws_safe_read(struct ast_websocket *session, char *buf, int len
 				return -1;
 			}
 		}
-		xlen = xlen - rlen;
-		rbuf = rbuf + rlen;
-		if (!xlen) {
-			break;
+		if (rlen > 0) {
+			xlen = xlen - rlen;
+			rbuf = rbuf + rlen;
+			if (!xlen) {
+				break;
+			}
 		}
 		if (ast_wait_for_input(ast_iostream_get_fd(session->stream), 1000) < 0) {
 			ast_log(LOG_ERROR, "ast_wait_for_input returned err: %s\n", strerror(errno));
@@ -1439,7 +1441,7 @@ static int load_module(void)
 {
 	websocketuri.data = websocket_server_internal_create();
 	if (!websocketuri.data) {
-		return AST_MODULE_LOAD_FAILURE;
+		return AST_MODULE_LOAD_DECLINE;
 	}
 	ast_http_uri_link(&websocketuri);
 	websocket_add_protocol_internal("echo", websocket_echo_callback);

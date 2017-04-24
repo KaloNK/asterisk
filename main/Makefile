@@ -11,7 +11,7 @@
 # the GNU General Public License
 #
 
--include $(ASTTOPDIR)/menuselect.makeopts $(ASTTOPDIR)/menuselect.makedeps $(ASTTOPDIR)/makeopts.embed_rules $(ASTTOPDIR)/makeopts
+-include $(ASTTOPDIR)/menuselect.makeopts $(ASTTOPDIR)/menuselect.makedeps $(ASTTOPDIR)/makeopts
 
 all: asterisk
 
@@ -48,9 +48,7 @@ AST_LIBS+=$(RT_LIB)
 AST_LIBS+=$(SYSTEMD_LIB)
 
 ifneq ($(findstring $(OSARCH), linux-gnu uclinux linux-uclibc linux-musl kfreebsd-gnu),)
-  ifneq ($(findstring LOADABLE_MODULES,$(MENUSELECT_CFLAGS)),)
   AST_LIBS+=-ldl
-  endif
   ifneq (x$(CAP_LIB),x)
     AST_LIBS+=$(CAP_LIB)
   endif
@@ -69,11 +67,7 @@ ifneq ($(findstring darwin,$(OSARCH)),)
   ASTLINK+=/usr/lib/bundle1.o
 else
 # These are used for all but Darwin
-  ifneq ($(findstring LOADABLE_MODULES,$(MENUSELECT_CFLAGS)),)
-    ASTLINK+=-Wl,--export-dynamic
-  else
-    ASTLINK+=${GC_LDFLAGS}
-  endif
+  ASTLINK+=-Wl,--export-dynamic
   ifneq ($(findstring BSD,$(OSARCH)),)
     LDFLAGS+=-L/usr/local/lib
   endif
@@ -172,9 +166,6 @@ endif
 
 stdtime/localtime.o: _ASTCFLAGS+=$(AST_NO_STRICT_OVERFLOW) -Wno-format-nonliteral
 
-AST_EMBED_LDSCRIPTS:=$(sort $(EMBED_LDSCRIPTS))
-AST_EMBED_LDFLAGS:=$(foreach dep,$(EMBED_LDFLAGS),$(value $(dep)))
-AST_EMBED_LIBS:=$(foreach dep,$(EMBED_LIBS),$(value $(dep)))
 OBJS:=$(sort $(OBJS))
 
 ifneq ($(findstring $(OSARCH), mingw32 cygwin ),)
@@ -325,10 +316,10 @@ endif
 
 tcptls.o: _ASTCFLAGS+=$(OPENSSL_INCLUDE)
 
-$(MAIN_TGT): $(OBJS) $(ASTSSL_LIB) $(ASTPJ_LIB) $(LIBEDIT_OBJ) $(AST_EMBED_LDSCRIPTS)
+$(MAIN_TGT): $(OBJS) $(ASTSSL_LIB) $(ASTPJ_LIB) $(LIBEDIT_OBJ)
 	@$(CC) -c -o buildinfo.o $(_ASTCFLAGS) buildinfo.c $(ASTCFLAGS)
-	$(ECHO_PREFIX) echo "   [LD] $(OBJS) $(LIBEDIT_OBJ) $(AST_EMBED_LDSCRIPTS) -> $@"
-	$(CMD_PREFIX) $(CXX) $(STATIC_BUILD) -o $@ $(ASTLINK) $(AST_EMBED_LDFLAGS) $(_ASTLDFLAGS) $(ASTLDFLAGS) $(OBJS) $(ASTSSL_LDLIBS) $(ASTPJ_LDLIBS) $(LIBEDIT_OBJ) $(AST_EMBED_LDSCRIPTS) buildinfo.o $(AST_LIBS) $(AST_EMBED_LIBS) $(GMIMELDFLAGS) $(LIBEDIT_LIB)
+	$(ECHO_PREFIX) echo "   [LD] $(OBJS) $(LIBEDIT_OBJ) -> $@"
+	$(CMD_PREFIX) $(CXX) $(STATIC_BUILD) -o $@ $(ASTLINK) $(_ASTLDFLAGS) $(ASTLDFLAGS) $(OBJS) $(ASTSSL_LDLIBS) $(ASTPJ_LDLIBS) $(LIBEDIT_OBJ) buildinfo.o $(AST_LIBS) $(GMIMELDFLAGS) $(LIBEDIT_LIB)
 
 ifeq ($(GNU_LD),1)
 $(MAIN_TGT): asterisk.exports
@@ -359,16 +350,8 @@ endif
 binuninstall:
 	rm -f "$(DESTDIR)$(ASTSBINDIR)/$(MAIN_TGT)"
 	rm -f "$(DESTDIR)$(ASTSBINDIR)/rasterisk"
-ifneq ($(ASTSSL_LIB).$(ASTSSL_SO_VERSION),.)
-#   ASTSSL_SO_VERSION may not exist on Darwin
-	rm -f "$(DESTDIR)$(ASTLIBDIR)/$(ASTSSL_LIB).$(ASTSSL_SO_VERSION)" || :
-	rm -f "$(DESTDIR)$(ASTLIBDIR)/$(ASTSSL_LIB)"
-endif
-ifneq ($(ASTPJ_LIB).$(ASTPJ_SO_VERSION),.)
-#   ASTSSL_SO_VERSION may not exist on Darwin
-	rm -f "$(DESTDIR)$(ASTLIBDIR)/$(ASTPJ_LIB).$(ASTPJ_SO_VERSION)" || :
-	rm -f "$(DESTDIR)$(ASTLIBDIR)/$(ASTPJ_LIB)"
-endif
+	rm -f "$(DESTDIR)$(ASTLIBDIR)/libasterisk"* || :
+	test -n "$(_oldlibdir)" -a -d "$(_oldlibdir)" && rm -f "$(_oldlibdir)/libasterisk"* || :
 
 clean::
 	rm -f asterisk libasteriskssl.o

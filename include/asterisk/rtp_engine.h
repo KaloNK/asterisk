@@ -237,6 +237,15 @@ enum ast_rtp_instance_stat {
 	AST_RTP_INSTANCE_STAT_RXOCTETCOUNT,
 };
 
+enum ast_rtp_instance_rtcp {
+	/*! RTCP should not be sent/received */
+	AST_RTP_INSTANCE_RTCP_DISABLED = 0,
+	/*! RTCP should be sent/received based on standard port rules */
+	AST_RTP_INSTANCE_RTCP_STANDARD,
+	/*! RTCP should be sent/received on the same port as RTP */
+	AST_RTP_INSTANCE_RTCP_MUX,
+};
+
 /* Codes for RTP-specific data - not defined by our AST_FORMAT codes */
 /*! DTMF (RFC2833) */
 #define AST_RTP_DTMF                    (1 << 0)
@@ -447,6 +456,8 @@ struct ast_rtp_engine_ice {
 	void (*turn_request)(struct ast_rtp_instance *instance, enum ast_rtp_ice_component_type component,
 		enum ast_transport transport, const char *server, unsigned int port,
 		const char *username, const char *password);
+	/*! Callback to alter the number of ICE components on a session */
+	void (*change_components)(struct ast_rtp_instance *instance, int num_components);
 };
 
 /*! \brief DTLS setup types */
@@ -1432,7 +1443,8 @@ unsigned int ast_rtp_codecs_get_framing(struct ast_rtp_codecs *codecs);
  *
  * \since 1.8
  */
-unsigned int ast_rtp_lookup_sample_rate2(int asterisk_format, struct ast_format *format, int code);
+unsigned int ast_rtp_lookup_sample_rate2(int asterisk_format,
+	const struct ast_format *format, int code);
 
 /*!
  * \brief Retrieve all formats that were found
@@ -1537,7 +1549,8 @@ int ast_rtp_codecs_find_payload_code(struct ast_rtp_codecs *codecs, int payload)
  *
  * \since 1.8
  */
-const char *ast_rtp_lookup_mime_subtype2(const int asterisk_format, struct ast_format *format, int code, enum ast_rtp_options options);
+const char *ast_rtp_lookup_mime_subtype2(const int asterisk_format,
+	const struct ast_format *format, int code, enum ast_rtp_options options);
 
 /*!
  * \brief Convert formats into a string and put them into a buffer

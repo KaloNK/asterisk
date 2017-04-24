@@ -973,32 +973,10 @@ int ast_sip_session_refresh(struct ast_sip_session *session,
 	return 0;
 }
 
-/*!
- * \internal
- * \brief Wrapper for pjsip_inv_send_msg
- *
- * This function (re)sets the transport before sending to catch cases
- * where the transport might have changed.
- *
- * If pjproject gives us the ability to resend, we'll only reset the transport
- * if PJSIP_ETPNOTAVAIL is returned from send.
- *
- * \returns pj_status_t
- */
-static pj_status_t internal_pjsip_inv_send_msg(pjsip_inv_session *inv, const char *transport_name, pjsip_tx_data *tdata)
-{
-	pjsip_tpselector selector = { .type = PJSIP_TPSELECTOR_NONE, };
-
-	ast_sip_set_tpselector_from_transport_name(transport_name, &selector);
-	pjsip_dlg_set_transport(inv->dlg, &selector);
-
-	return pjsip_inv_send_msg(inv, tdata);
-}
-
 void ast_sip_session_send_response(struct ast_sip_session *session, pjsip_tx_data *tdata)
 {
 	handle_outgoing_response(session, tdata);
-	internal_pjsip_inv_send_msg(session->inv_session, session->endpoint->transport, tdata);
+	pjsip_inv_send_msg(session->inv_session, tdata);
 	return;
 }
 
@@ -1220,8 +1198,13 @@ void ast_sip_session_send_request_with_cb(struct ast_sip_session *session, pjsip
 {
 	pjsip_inv_session *inv_session = session->inv_session;
 
-	if (inv_session->state == PJSIP_INV_STATE_DISCONNECTED) {
-		/* Don't try to do anything with a hung-up call */
+	/* For every request except BYE we disallow sending of the message when
+	 * the session has been disconnected. A BYE request is special though
+	 * because it can be sent again after the session is disconnected except
+	 * with credentials.
+	 */
+	if (inv_session->state == PJSIP_INV_STATE_DISCONNECTED &&
+		tdata->msg->line.req.method.id != PJSIP_BYE_METHOD) {
 		return;
 	}
 
@@ -1229,7 +1212,7 @@ void ast_sip_session_send_request_with_cb(struct ast_sip_session *session, pjsip
 			     MOD_DATA_ON_RESPONSE, on_response);
 
 	handle_outgoing_request(session, tdata);
-	internal_pjsip_inv_send_msg(session->inv_session, session->endpoint->transport, tdata);
+	pjsip_inv_send_msg(session->inv_session, tdata);
 
 	return;
 }
@@ -2008,10 +1991,17 @@ static enum sip_get_destination_result get_destination(struct ast_sip_session *s
 
 		return SIP_GET_DEST_EXTEN_FOUND;
 	}
-	/* XXX In reality, we'll likely have further options so that partial matches
-	 * can be indicated here, but for getting something up and running, we're going
-	 * to return a "not exists" error here.
+
+	/*
+	 * Check for partial match via overlap dialling (if enabled)
 	 */
+	if (session->endpoint->allow_overlap && (
+		!strncmp(session->exten, pickupexten, strlen(session->exten)) ||
+		ast_canmatch_extension(NULL, session->endpoint->context, session->exten, 1, NULL))) {
+		/* Overlap partial match */
+		return SIP_GET_DEST_EXTEN_PARTIAL;
+	}
+
 	return SIP_GET_DEST_EXTEN_NOT_FOUND;
 }
 
@@ -2051,7 +2041,7 @@ static pjsip_inv_session *pre_session_setup(pjsip_rx_data *rdata, const struct a
 		if (pjsip_inv_initial_answer(inv_session, rdata, 500, NULL, NULL, &tdata) != PJ_SUCCESS) {
 			pjsip_inv_terminate(inv_session, 500, PJ_FALSE);
 		}
-		internal_pjsip_inv_send_msg(inv_session, endpoint->transport, tdata);
+		pjsip_inv_send_msg(inv_session, tdata);
 		return NULL;
 	}
 	return inv_session;
@@ -2128,8 +2118,17 @@ static int new_invite(void *data)
 			pjsip_inv_terminate(invite->session->inv_session, 416, PJ_TRUE);
 		}
 		goto end;
-	case SIP_GET_DEST_EXTEN_NOT_FOUND:
 	case SIP_GET_DEST_EXTEN_PARTIAL:
+		ast_debug(1, "Call from '%s' (%s:%s:%d) to extension '%s' - partial match\n", ast_sorcery_object_get_id(invite->session->endpoint),
+			invite->rdata->tp_info.transport->type_name, invite->rdata->pkt_info.src_name, invite->rdata->pkt_info.src_port, invite->session->exten);
+
+		if (pjsip_inv_initial_answer(invite->session->inv_session, invite->rdata, 484, NULL, NULL, &tdata) == PJ_SUCCESS) {
+			ast_sip_session_send_response(invite->session, tdata);
+		} else  {
+			pjsip_inv_terminate(invite->session->inv_session, 484, PJ_TRUE);
+		}
+		goto end;
+	case SIP_GET_DEST_EXTEN_NOT_FOUND:
 	default:
 		ast_log(LOG_NOTICE, "Call from '%s' (%s:%s:%d) to extension '%s' rejected because extension not found in context '%s'.\n",
 			ast_sorcery_object_get_id(invite->session->endpoint), invite->rdata->tp_info.transport->type_name, invite->rdata->pkt_info.src_name,
@@ -2222,7 +2221,7 @@ static void handle_new_invite_request(pjsip_rx_data *rdata)
 			if (pjsip_inv_initial_answer(inv_session, rdata, 500, NULL, NULL, &tdata) == PJ_SUCCESS) {
 				pjsip_inv_terminate(inv_session, 500, PJ_FALSE);
 			} else {
-				internal_pjsip_inv_send_msg(inv_session, endpoint->transport, tdata);
+				pjsip_inv_send_msg(inv_session, tdata);
 			}
 		}
 		return;
@@ -2234,7 +2233,7 @@ static void handle_new_invite_request(pjsip_rx_data *rdata)
 		if (pjsip_inv_initial_answer(inv_session, rdata, 500, NULL, NULL, &tdata) == PJ_SUCCESS) {
 			pjsip_inv_terminate(inv_session, 500, PJ_FALSE);
 		} else {
-			internal_pjsip_inv_send_msg(inv_session, endpoint->transport, tdata);
+			pjsip_inv_send_msg(inv_session, tdata);
 		}
 #ifdef HAVE_PJSIP_INV_SESSION_REF
 		pjsip_inv_dec_ref(inv_session);
@@ -2247,7 +2246,7 @@ static void handle_new_invite_request(pjsip_rx_data *rdata)
 		if (pjsip_inv_initial_answer(inv_session, rdata, 500, NULL, NULL, &tdata) == PJ_SUCCESS) {
 			pjsip_inv_terminate(inv_session, 500, PJ_FALSE);
 		} else {
-			internal_pjsip_inv_send_msg(inv_session, endpoint->transport, tdata);
+			pjsip_inv_send_msg(inv_session, tdata);
 		}
 #ifdef HAVE_PJSIP_INV_SESSION_REF
 		pjsip_inv_dec_ref(inv_session);
@@ -3148,7 +3147,10 @@ static void session_outgoing_nat_hook(pjsip_tx_data *tdata, struct ast_sip_trans
 		ast_copy_pj_str(host, &sdp->conn->addr, sizeof(host));
 		ast_sockaddr_parse(&addr, host, PARSE_PORT_FORBID);
 
-		if (ast_apply_ha(transport_state->localnet, &addr) != AST_SENSE_ALLOW) {
+		if (!transport_state->localnet
+			|| (transport_state->localnet
+				&& ast_apply_ha(transport_state->localnet, &addr) == AST_SENSE_ALLOW)) {
+			ast_debug(5, "Setting external media address to %s\n", transport->external_media_address);
 			pj_strdup2(tdata->pool, &sdp->conn->addr, transport->external_media_address);
 		}
 	}

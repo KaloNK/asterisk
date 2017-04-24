@@ -7639,7 +7639,6 @@ static void *accept_thread(void *ignore)
 	struct sockaddr_in sin;
 	socklen_t sinlen;
 	struct skinnysession *s;
-	struct protoent *p;
 	int arg = 1;
 
 	for (;;) {
@@ -7656,12 +7655,10 @@ static void *accept_thread(void *ignore)
 			continue;
 		}
 
-		p = getprotobyname("tcp");
-		if(p) {
-			if( setsockopt(as, p->p_proto, TCP_NODELAY, (char *)&arg, sizeof(arg) ) < 0 ) {
-				ast_log(LOG_WARNING, "Failed to set Skinny tcp connection to TCP_NODELAY mode: %s\n", strerror(errno));
-			}
+		if (setsockopt(as, IPPROTO_TCP, TCP_NODELAY, (char *) &arg, sizeof(arg)) < 0) {
+			ast_log(LOG_WARNING, "Failed to set TCP_NODELAY on Skinny TCP connection: %s\n", strerror(errno));
 		}
+
 		if (!(s = ast_calloc(1, sizeof(struct skinnysession)))) {
 			close(as);
 			ast_atomic_fetchadd_int(&unauth_sessions, -1);
@@ -8701,7 +8698,7 @@ static int load_module(void)
 		ao2_ref(skinny_tech.capabilities, -1);
 		ao2_ref(default_cap, -1);
 		ast_log(LOG_WARNING, "Unable to create schedule context\n");
-		return AST_MODULE_LOAD_FAILURE;
+		return AST_MODULE_LOAD_DECLINE;
 	}
 
 	/* Make sure we can register our skinny channel type */
@@ -8709,7 +8706,7 @@ static int load_module(void)
 		ao2_ref(default_cap, -1);
 		ao2_ref(skinny_tech.capabilities, -1);
 		ast_log(LOG_ERROR, "Unable to register channel class 'Skinny'\n");
-		return -1;
+		return AST_MODULE_LOAD_DECLINE;
 	}
 
 	ast_rtp_glue_register(&skinny_rtp_glue);
@@ -8726,7 +8723,7 @@ static int load_module(void)
 		ast_channel_unregister(&skinny_tech);
 		ao2_ref(default_cap, -1);
 		ao2_ref(skinny_tech.capabilities, -1);
-		return AST_MODULE_LOAD_FAILURE;
+		return AST_MODULE_LOAD_DECLINE;
 	}
 
 	return AST_MODULE_LOAD_SUCCESS;

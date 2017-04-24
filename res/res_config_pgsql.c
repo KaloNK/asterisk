@@ -733,6 +733,7 @@ static int update_pgsql(const char *database, const char *tablename, const char 
 	ast_mutex_lock(&pgsql_lock);
 	if (!pgsql_reconnect(database)) {
 		ast_mutex_unlock(&pgsql_lock);
+		release_table(table);
 		return -1;
 	}
 
@@ -878,6 +879,7 @@ static int update2_pgsql(const char *database, const char *tablename, const stru
 	ast_mutex_lock(&pgsql_lock);
 	if (!pgsql_reconnect(database)) {
 		ast_mutex_unlock(&pgsql_lock);
+		release_table(table);
 		return -1;
 	}
 
@@ -1282,6 +1284,7 @@ static int require_pgsql(const char *database, const char *tablename, va_list ap
 		if (!column) {
 			if (requirements == RQ_WARN) {
 				ast_log(LOG_WARNING, "Table %s requires a column '%s' of size '%d', but no such column exists.\n", tablename, elm, size);
+				res = -1;
 			} else {
 				struct ast_str *sql = ast_str_create(100);
 				char fieldtype[15];
@@ -1322,6 +1325,7 @@ static int require_pgsql(const char *database, const char *tablename, va_list ap
 
 			        if (pgsql_exec(database, tablename, ast_str_buffer(sql), &result) != 0) {
 					ast_mutex_unlock(&pgsql_lock);
+					release_table(table);
 				        return -1;
 			        }
 
