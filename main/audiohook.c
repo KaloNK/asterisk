@@ -942,6 +942,17 @@ static struct ast_frame *audio_audiohook_write_list(struct ast_channel *chan, st
 	if (!(middle_frame = audiohook_list_translate_to_slin(audiohook_list, direction, start_frame))) {
 		return frame;
 	}
+
+	/* If the translation resulted in an interpolated frame then immediately return as audiohooks
+	 * rely on actual media being present to do things.
+	 */
+	if (!middle_frame->data.ptr) {
+		if (middle_frame != start_frame) {
+			ast_frfree(middle_frame);
+		}
+		return start_frame;
+	}
+
 	samples = middle_frame->samples;
 
 	/*

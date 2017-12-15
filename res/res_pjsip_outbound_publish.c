@@ -18,6 +18,7 @@
 
 /*** MODULEINFO
 	<depend>pjproject</depend>
+	<depend>res_pjproject</depend>
 	<depend>res_pjsip</depend>
 	<support_level>core</support_level>
  ***/
@@ -33,6 +34,7 @@
 #include "asterisk/taskprocessor.h"
 #include "asterisk/threadpool.h"
 #include "asterisk/datastore.h"
+#include "res_pjsip/include/res_pjsip_private.h"
 
 /*** DOCUMENTATION
 	<configInfo name="res_pjsip_outbound_publish" language="en_US">
@@ -1115,8 +1117,25 @@ static int validate_publish_config(struct ast_sip_outbound_publish *publish)
 		ast_log(LOG_ERROR, "No server URI specified on outbound publish '%s'\n",
 			ast_sorcery_object_get_id(publish));
 		return -1;
+	} else if (ast_sip_validate_uri_length(publish->server_uri)) {
+		ast_log(LOG_ERROR, "Server URI or hostname length exceeds pjproject limit or is not a sip(s) uri: '%s' on outbound publish '%s'\n",
+			publish->server_uri,
+			ast_sorcery_object_get_id(publish));
+		return -1;
 	} else if (ast_strlen_zero(publish->event)) {
 		ast_log(LOG_ERROR, "No event type specified for outbound publish '%s'\n",
+			ast_sorcery_object_get_id(publish));
+		return -1;
+	} else if (!ast_strlen_zero(publish->from_uri)
+		&& ast_sip_validate_uri_length(publish->from_uri)) {
+		ast_log(LOG_ERROR, "From URI or hostname length exceeds pjproject limit or is not a sip(s) uri: '%s' on outbound publish '%s'\n",
+			publish->from_uri,
+			ast_sorcery_object_get_id(publish));
+		return -1;
+	} else if (!ast_strlen_zero(publish->to_uri)
+		&& ast_sip_validate_uri_length(publish->to_uri)) {
+		ast_log(LOG_ERROR, "To URI or hostname length exceeds pjproject limit or is not a sip(s) uri: '%s' on outbound publish '%s'\n",
+			publish->to_uri,
 			ast_sorcery_object_get_id(publish));
 		return -1;
 	}
@@ -1315,6 +1334,7 @@ static int reload_module(void)
 }
 
 AST_MODULE_INFO(ASTERISK_GPL_KEY, AST_MODFLAG_GLOBAL_SYMBOLS | AST_MODFLAG_LOAD_ORDER, "PJSIP Outbound Publish Support",
+		.support_level = AST_MODULE_SUPPORT_CORE,
 		.load = load_module,
 		.reload = reload_module,
 		.unload = unload_module,

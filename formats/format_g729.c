@@ -19,7 +19,7 @@
 /*! \file
  *
  * \brief Save to raw, headerless G729 data.
- * \note This is not an encoder/decoder. The codec fo g729 is only
+ * \note This is not an encoder/decoder. The codec for g729 is only
  * available with a commercial license from Digium, due to patent
  * restrictions. Check http://www.digium.com for information.
  * \arg Extensions: g729 
@@ -48,13 +48,17 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 
 static struct ast_frame *g729_read(struct ast_filestream *s, int *whennext)
 {
-	int res;
+	size_t res;
+
 	/* Send a frame from the file to the appropriate channel */
 	s->fr.samples = G729A_SAMPLES;
 	AST_FRAME_SET_BUFFER(&s->fr, s->buf, AST_FRIENDLY_OFFSET, BUF_SIZE);
 	if ((res = fread(s->fr.data.ptr, 1, s->fr.datalen, s->f)) != s->fr.datalen) {
-		if (res && (res != 10))	/* XXX what for ? */
-			ast_log(LOG_WARNING, "Short read (%d) (%s)!\n", res, strerror(errno));
+		if (res && res != 10) /* XXX what for ? */ {
+			ast_log(LOG_WARNING, "Short read of %s data (expected %d bytes, read %zu): %s\n",
+					ast_format_get_name(s->fr.subclass.format), s->fr.datalen, res,
+					strerror(errno));
+		}
 		return NULL;
 	}
 	*whennext = s->fr.samples;

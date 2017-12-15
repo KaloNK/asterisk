@@ -2254,20 +2254,23 @@ static char *sla_show_stations(struct ast_cli_entry *e, int cmd, struct ast_cli_
 			if (trunk_ref->ring_timeout) {
 				snprintf(ring_timeout, sizeof(ring_timeout),
 					"%u", trunk_ref->ring_timeout);
-			} else
+			} else {
 				strcpy(ring_timeout, "(none)");
+			}
 			if (trunk_ref->ring_delay) {
 				snprintf(ring_delay, sizeof(ring_delay),
 					"%u", trunk_ref->ring_delay);
-			} else
+			} else {
 				strcpy(ring_delay, "(none)");
-				ast_cli(a->fd, "===    ==> Trunk Name: %s\n"
-			            "===       ==> State:       %s\n"
-			            "===       ==> RingTimeout: %s\n"
-			            "===       ==> RingDelay:   %s\n",
-			            trunk_ref->trunk->name,
-			            trunkstate2str(trunk_ref->state),
-			            ring_timeout, ring_delay);
+			}
+
+			ast_cli(a->fd, "===    ==> Trunk Name: %s\n"
+	            "===       ==> State:       %s\n"
+	            "===       ==> RingTimeout: %s\n"
+	            "===       ==> RingDelay:   %s\n",
+	            trunk_ref->trunk->name,
+	            trunkstate2str(trunk_ref->state),
+	            ring_timeout, ring_delay);
 		}
 		ast_cli(a->fd, "=== ---------------------------------------------------------\n"
 		            "===\n");
@@ -3198,11 +3201,11 @@ static int conf_run(struct ast_channel *chan, struct ast_conference *conf, struc
 	struct timeval now;
 	struct ast_dsp *dsp = NULL;
 	struct ast_app *agi_app;
-	char *agifile, *mod_speex;
+	char *agifile;
 	const char *agifiledefault = "conf-background.agi", *tmpvar;
 	char meetmesecs[30] = "";
 	char exitcontext[AST_MAX_CONTEXT] = "";
-	char recordingtmp[AST_MAX_EXTENSION] = "";
+	char recordingtmp[AST_MAX_EXTENSION * 2] = "";
 	char members[10] = "";
 	int dtmf = 0, opt_waitmarked_timeout = 0;
 	time_t timeout = 0;
@@ -3588,9 +3591,7 @@ static int conf_run(struct ast_channel *chan, struct ast_conference *conf, struc
 	}
 
 	/* Reduce background noise from each participant */
-	if (!ast_test_flag64(confflags, CONFFLAG_DONT_DENOISE) &&
-		(mod_speex = ast_module_helper("", "func_speex", 0, 0, 0, 0))) {
-		ast_free(mod_speex);
+	if (!ast_test_flag64(confflags, CONFFLAG_DONT_DENOISE) && ast_module_check("func_speex.so")) {
 		ast_func_write(chan, "DENOISE(rx)", "on");
 	}
 
@@ -4520,7 +4521,7 @@ static struct ast_conference *find_conf_realtime(struct ast_channel *chan, char 
 		char currenttime[32] = "";
 		char eatime[32] = "";
 		char bookid[51] = "";
-		char recordingtmp[AST_MAX_EXTENSION] = "";
+		char recordingtmp[AST_MAX_EXTENSION * 2] = "";
 		char useropts[OPTIONS_LEN + 1] = ""; /* Used for RealTime conferences */
 		char adminopts[OPTIONS_LEN + 1] = "";
 		struct ast_tm tm, etm;
@@ -4663,7 +4664,7 @@ static struct ast_conference *find_conf_realtime(struct ast_channel *chan, char 
 	if (cnf) {
 		if (confflags->flags && !cnf->chan &&
 		    !ast_test_flag64(confflags, CONFFLAG_QUIET) &&
-		    ast_test_flag64(confflags, CONFFLAG_INTROUSER | CONFFLAG_INTROUSERNOREVIEW) | CONFFLAG_INTROUSER_VMREC) {
+		    ast_test_flag64(confflags, CONFFLAG_INTROUSER | CONFFLAG_INTROUSERNOREVIEW | CONFFLAG_INTROUSER_VMREC)) {
 			ast_log(LOG_WARNING, "No DAHDI channel available for conference, user introduction disabled (is chan_dahdi loaded?)\n");
 			ast_clear_flag64(confflags, CONFFLAG_INTROUSER | CONFFLAG_INTROUSERNOREVIEW | CONFFLAG_INTROUSER_VMREC);
 		}

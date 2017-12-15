@@ -56,9 +56,11 @@ static int find_transport_state_in_use(void *obj, void *arg, int flags)
 	return 0;
 }
 
+#define DOMAIN_NAME_LEN 255
+
 static struct ast_sip_endpoint *anonymous_identify(pjsip_rx_data *rdata)
 {
-	char domain_name[64], id[AST_UUID_STR_LEN];
+	char domain_name[DOMAIN_NAME_LEN + 1];
 	struct ast_sip_endpoint *endpoint;
 	RAII_VAR(struct ast_sip_domain_alias *, alias, NULL, ao2_cleanup);
 	RAII_VAR(struct ao2_container *, transport_states, NULL, ao2_cleanup);
@@ -70,6 +72,8 @@ static struct ast_sip_endpoint *anonymous_identify(pjsip_rx_data *rdata)
 	}
 
 	if (!ast_sip_get_disable_multi_domain()) {
+		char id[sizeof("anonymous@") + DOMAIN_NAME_LEN];
+
 		/* Attempt to find the endpoint given the name and domain provided */
 		snprintf(id, sizeof(id), "anonymous@%s", domain_name);
 		if ((endpoint = ast_sorcery_retrieve_by_id(ast_sip_get_sorcery(), "endpoint", id))) {
@@ -124,9 +128,8 @@ static int unload_module(void)
 	return 0;
 }
 
-AST_MODULE_INFO(ASTERISK_GPL_KEY, AST_MODFLAG_LOAD_ORDER, "PJSIP Anonymous endpoint identifier",
+AST_MODULE_INFO(ASTERISK_GPL_KEY, AST_MODFLAG_DEFAULT, "PJSIP Anonymous endpoint identifier",
 		.support_level = AST_MODULE_SUPPORT_CORE,
 		.load = load_module,
 		.unload = unload_module,
-		.load_pri = AST_MODPRI_DEFAULT,
 	       );

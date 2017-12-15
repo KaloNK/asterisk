@@ -26,6 +26,7 @@
  */
 
 /*** MODULEINFO
+	<use type="external">openssl</use>
 	<support_level>core</support_level>
  ***/
 
@@ -82,6 +83,39 @@ struct ast_tcptls_stream {
 	/*! TRUE if stream can exclusively wait for fd input. */
 	int exclusive_input;
 };
+
+#if defined(DO_SSL)
+AST_THREADSTORAGE(err2str_threadbuf);
+#define ERR2STR_BUFSIZE   128
+
+static const char *ssl_error_to_string(int sslerr, int ret)
+{
+	switch (sslerr) {
+	case SSL_ERROR_SSL:
+		return "Internal SSL error";
+	case SSL_ERROR_SYSCALL:
+		if (!ret) {
+			return "System call EOF";
+		} else if (ret == -1) {
+			char *buf;
+
+			buf = ast_threadstorage_get(&err2str_threadbuf, ERR2STR_BUFSIZE);
+			if (!buf) {
+				return "Unknown";
+			}
+
+			snprintf(buf, ERR2STR_BUFSIZE, "Underlying BIO error: %s", strerror(errno));
+			return buf;
+		} else {
+			return "System call other";
+		}
+	default:
+		break;
+	}
+
+	return "Unknown";
+}
+#endif
 
 void ast_tcptls_stream_set_timeout_disable(struct ast_tcptls_stream *stream)
 {
@@ -151,12 +185,17 @@ static HOOK_T tcptls_stream_read(void *cookie, char *buf, LEN_T size)
 #if defined(DO_SSL)
 	if (stream->ssl) {
 		for (;;) {
+			int sslerr;
+			char err[256];
+
 			res = SSL_read(stream->ssl, buf, size);
 			if (0 < res) {
 				/* We read some payload data. */
 				return res;
 			}
-			switch (SSL_get_error(stream->ssl, res)) {
+
+			sslerr = SSL_get_error(stream->ssl, res);
+			switch (sslerr) {
 			case SSL_ERROR_ZERO_RETURN:
 				/* Report EOF for a shutdown */
 				ast_debug(1, "TLS clean shutdown alert reading data\n");
@@ -204,7 +243,8 @@ static HOOK_T tcptls_stream_read(void *cookie, char *buf, LEN_T size)
 				break;
 			default:
 				/* Report EOF for an undecoded SSL or transport error. */
-				ast_debug(1, "TLS transport or SSL error reading data\n");
+				ast_debug(1, "TLS transport or SSL error reading data: %s, %s\n", ERR_error_string(sslerr, err),
+					ssl_error_to_string(sslerr, res));
 				return 0;
 			}
 			if (!ms) {
@@ -279,6 +319,9 @@ static HOOK_T tcptls_stream_write(void *cookie, const char *buf, LEN_T size)
 		written = 0;
 		remaining = size;
 		for (;;) {
+			int sslerr;
+			char err[256];
+
 			res = SSL_write(stream->ssl, buf + written, remaining);
 			if (res == remaining) {
 				/* Everything was written. */
@@ -290,7 +333,8 @@ static HOOK_T tcptls_stream_write(void *cookie, const char *buf, LEN_T size)
 				remaining -= res;
 				continue;
 			}
-			switch (SSL_get_error(stream->ssl, res)) {
+			sslerr = SSL_get_error(stream->ssl, res);
+			switch (sslerr) {
 			case SSL_ERROR_ZERO_RETURN:
 				ast_debug(1, "TLS clean shutdown alert writing data\n");
 				if (written) {
@@ -319,7 +363,8 @@ static HOOK_T tcptls_stream_write(void *cookie, const char *buf, LEN_T size)
 				break;
 			default:
 				/* Undecoded SSL or transport error. */
-				ast_debug(1, "TLS transport or SSL error writing data\n");
+				ast_debug(1, "TLS transport or SSL error writing data: %s, %s\n", ERR_error_string(sslerr, err),
+					ssl_error_to_string(sslerr, res));
 				if (written) {
 					/* Report partial write. */
 					return written;
@@ -396,17 +441,20 @@ static int tcptls_stream_close(void *cookie)
 			 */
 			res = SSL_shutdown(stream->ssl);
 			if (res < 0) {
-				ast_log(LOG_ERROR, "SSL_shutdown() failed: %d\n",
-					SSL_get_error(stream->ssl, res));
+				int sslerr = SSL_get_error(stream->ssl, res);
+				char err[256];
+
+				ast_log(LOG_ERROR, "SSL_shutdown() failed: %s, %s\n",
+					ERR_error_string(sslerr, err), ssl_error_to_string(sslerr, res));
 			}
 
-#if defined(OPENSSL_VERSION_NUMBER) && OPENSSL_VERSION_NUMBER >= 0x10100000L
+#if defined(OPENSSL_VERSION_NUMBER) && OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
 			if (!SSL_is_server(stream->ssl)) {
 #else
 			if (!stream->ssl->server) {
 #endif
 				/* For client threads, ensure that the error stack is cleared */
-#if !defined(OPENSSL_VERSION_NUMBER) || OPENSSL_VERSION_NUMBER < 0x10100000L
+#if !defined(OPENSSL_VERSION_NUMBER) || OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
 #if defined(OPENSSL_VERSION_NUMBER) && OPENSSL_VERSION_NUMBER >= 0x10000000L
 				ERR_remove_thread_state(NULL);
 #else
@@ -604,7 +652,6 @@ static void *handle_tcptls_connection(void *data)
 #ifdef DO_SSL
 	int (*ssl_setup)(SSL *) = (tcptls_session->client) ? SSL_connect : SSL_accept;
 	int ret;
-	char err[256];
 #endif
 
 	/* TCP/TLS connections are associated with external protocols, and
@@ -642,7 +689,11 @@ static void *handle_tcptls_connection(void *data)
 	else if ( (tcptls_session->ssl = SSL_new(tcptls_session->parent->tls_cfg->ssl_ctx)) ) {
 		SSL_set_fd(tcptls_session->ssl, tcptls_session->fd);
 		if ((ret = ssl_setup(tcptls_session->ssl)) <= 0) {
-			ast_log(LOG_ERROR, "Problem setting up ssl connection: %s\n", ERR_error_string(ERR_get_error(), err));
+			char err[256];
+			int sslerr = SSL_get_error(tcptls_session->ssl, ret);
+
+			ast_log(LOG_ERROR, "Problem setting up ssl connection: %s, %s\n", ERR_error_string(sslerr, err),
+				ssl_error_to_string(sslerr, ret));
 		} else if ((tcptls_session->f = tcptls_stream_fopen(tcptls_session->stream_cookie,
 			tcptls_session->ssl, tcptls_session->fd, -1))) {
 			if ((tcptls_session->client && !ast_test_flag(&tcptls_session->parent->tls_cfg->flags, AST_SSL_DONT_VERIFY_SERVER))
@@ -754,7 +805,7 @@ void *ast_tcptls_server_root(void *data)
 	pthread_t launched;
 
 	for (;;) {
-		int i, flags;
+		int i;
 
 		if (desc->periodic_fn) {
 			desc->periodic_fn(desc);
@@ -792,8 +843,7 @@ void *ast_tcptls_server_root(void *data)
 			close(fd);
 			continue;
 		}
-		flags = fcntl(fd, F_GETFL);
-		fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+		ast_fd_clear_flags(fd, O_NONBLOCK);
 		tcptls_session->fd = fd;
 		tcptls_session->parent = desc;
 		ast_sockaddr_copy(&tcptls_session->remote_address, &addr);
@@ -823,7 +873,10 @@ void *ast_tcptls_server_root(void *data)
 static int __ssl_setup(struct ast_tls_config *cfg, int client)
 {
 #ifndef DO_SSL
-	cfg->enabled = 0;
+	if (cfg->enabled) {
+		ast_log(LOG_NOTICE, "Configured without OpenSSL Development Headers");
+		cfg->enabled = 0;
+	}
 	return 0;
 #else
 	int disable_ssl = 0;
@@ -997,7 +1050,7 @@ int ast_ssl_setup(struct ast_tls_config *cfg)
 void ast_ssl_teardown(struct ast_tls_config *cfg)
 {
 #ifdef DO_SSL
-	if (cfg->ssl_ctx) {
+	if (cfg && cfg->ssl_ctx) {
 		SSL_CTX_free(cfg->ssl_ctx);
 		cfg->ssl_ctx = NULL;
 	}
@@ -1007,7 +1060,6 @@ void ast_ssl_teardown(struct ast_tls_config *cfg)
 struct ast_tcptls_session_instance *ast_tcptls_client_start(struct ast_tcptls_session_instance *tcptls_session)
 {
 	struct ast_tcptls_session_args *desc;
-	int flags;
 
 	if (!(desc = tcptls_session->parent)) {
 		goto client_start_error;
@@ -1021,8 +1073,7 @@ struct ast_tcptls_session_instance *ast_tcptls_client_start(struct ast_tcptls_se
 		goto client_start_error;
 	}
 
-	flags = fcntl(desc->accept_fd, F_GETFL);
-	fcntl(desc->accept_fd, F_SETFL, flags & ~O_NONBLOCK);
+	ast_fd_clear_flags(desc->accept_fd, O_NONBLOCK);
 
 	if (desc->tls_cfg) {
 		desc->tls_cfg->enabled = 1;
@@ -1069,7 +1120,8 @@ struct ast_tcptls_session_instance *ast_tcptls_client_create(struct ast_tcptls_s
 
 	/* if a local address was specified, bind to it so the connection will
 	   originate from the desired address */
-	if (!ast_sockaddr_isnull(&desc->local_address)) {
+	if (!ast_sockaddr_isnull(&desc->local_address) &&
+	    !ast_sockaddr_is_any(&desc->local_address)) {
 		setsockopt(desc->accept_fd, SOL_SOCKET, SO_REUSEADDR, &x, sizeof(x));
 		if (ast_bind(desc->accept_fd, &desc->local_address)) {
 			ast_log(LOG_ERROR, "Unable to bind %s to %s: %s\n",
@@ -1109,7 +1161,6 @@ error:
 
 void ast_tcptls_server_start(struct ast_tcptls_session_args *desc)
 {
-	int flags;
 	int x = 1;
 	int tls_changed = 0;
 
@@ -1212,8 +1263,7 @@ void ast_tcptls_server_start(struct ast_tcptls_session_args *desc)
 		ast_log(LOG_ERROR, "Unable to listen for %s!\n", desc->name);
 		goto error;
 	}
-	flags = fcntl(desc->accept_fd, F_GETFL);
-	fcntl(desc->accept_fd, F_SETFL, flags | O_NONBLOCK);
+	ast_fd_set_flags(desc->accept_fd, O_NONBLOCK);
 	if (ast_pthread_create_background(&desc->master, NULL, desc->accept_fn, desc)) {
 		ast_log(LOG_ERROR, "Unable to launch thread for %s on %s: %s\n",
 			desc->name,

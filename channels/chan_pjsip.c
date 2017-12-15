@@ -511,6 +511,11 @@ static struct ast_channel *chan_pjsip_new(struct ast_sip_session *session, int s
 	ast_party_id_copy(&ast_channel_caller(chan)->id, &session->id);
 	ast_party_id_copy(&ast_channel_caller(chan)->ani, &session->id);
 
+	if (!ast_strlen_zero(exten)) {
+		/* Set provided DNID on the new channel. */
+		ast_channel_dialed(chan)->number.str = ast_strdup(exten);
+	}
+
 	ast_channel_priority_set(chan, 1);
 
 	ast_channel_callgroup_set(chan, session->endpoint->pickup.callgroup);
@@ -583,7 +588,19 @@ static int answer(void *data)
 	pjsip_inv_dec_ref(session->inv_session);
 #endif
 
-	return (status == PJ_SUCCESS) ? 0 : -1;
+	if (status != PJ_SUCCESS) {
+		char err[PJ_ERR_MSG_SIZE];
+
+		pj_strerror(status, err, sizeof(err));
+		ast_log(LOG_WARNING,"Cannot answer '%s': %s\n",
+			ast_channel_name(session->channel), err);
+		/*
+		 * Return this value so we can distinguish between this
+		 * failure and the threadpool synchronous push failing.
+		 */
+		return -2;
+	}
+	return 0;
 }
 
 /*! \brief Function called by core when we should answer a PJSIP session */
@@ -591,6 +608,7 @@ static int chan_pjsip_answer(struct ast_channel *ast)
 {
 	struct ast_sip_channel_pvt *channel = ast_channel_tech_pvt(ast);
 	struct ast_sip_session *session;
+	int res;
 
 	if (ast_channel_state(ast) == AST_STATE_UP) {
 		return 0;
@@ -611,11 +629,15 @@ static int chan_pjsip_answer(struct ast_channel *ast)
 	   can occur between this thread and bridging (specifically when native bridging
 	   attempts to do direct media) */
 	ast_channel_unlock(ast);
-	if (ast_sip_push_task_synchronous(session->serializer, answer, session)) {
-		ast_log(LOG_WARNING, "Unable to push answer task to the threadpool. Cannot answer call\n");
+	res = ast_sip_push_task_synchronous(session->serializer, answer, session);
+	if (res) {
+		if (res == -1) {
+			ast_log(LOG_ERROR,"Cannot answer '%s': Unable to push answer task to the threadpool.\n",
+				ast_channel_name(session->channel));
 #ifdef HAVE_PJSIP_INV_SESSION_REF
-		pjsip_inv_dec_ref(session->inv_session);
+			pjsip_inv_dec_ref(session->inv_session);
 #endif
+		}
 		ao2_ref(session, -1);
 		ast_channel_lock(ast);
 		return -1;
@@ -727,25 +749,43 @@ static struct ast_frame *chan_pjsip_read(struct ast_channel *ast)
 
 	session = channel->session;
 
+	/*
+	 * Asymmetric RTP only has one native format set at a time.
+	 * Therefore we need to update the native format to the current
+	 * raw read format BEFORE the native format check
+	 */
+	if (!session->endpoint->asymmetric_rtp_codec &&
+		ast_format_cmp(ast_channel_rawwriteformat(ast), f->subclass.format) == AST_FORMAT_CMP_NOT_EQUAL) {
+		struct ast_format_cap *caps;
+
+		/* For maximum compatibility we ensure that the formats match that of the received media */
+		ast_debug(1, "Oooh, got a frame with format of %s on channel '%s' when we're sending '%s', switching to match\n",
+			ast_format_get_name(f->subclass.format), ast_channel_name(ast),
+			ast_format_get_name(ast_channel_rawwriteformat(ast)));
+
+		caps = ast_format_cap_alloc(AST_FORMAT_CAP_FLAG_DEFAULT);
+		if (caps) {
+			ast_format_cap_append_from_cap(caps, ast_channel_nativeformats(ast), AST_MEDIA_TYPE_UNKNOWN);
+			ast_format_cap_remove_by_type(caps, AST_MEDIA_TYPE_AUDIO);
+			ast_format_cap_append(caps, f->subclass.format, 0);
+			ast_channel_nativeformats_set(ast, caps);
+			ao2_ref(caps, -1);
+		}
+
+		ast_set_write_format_path(ast, ast_channel_writeformat(ast), f->subclass.format);
+		ast_set_read_format_path(ast, ast_channel_readformat(ast), f->subclass.format);
+
+		if (ast_channel_is_bridged(ast)) {
+			ast_channel_set_unbridged_nolock(ast, 1);
+		}
+	}
+
 	if (ast_format_cap_iscompatible_format(ast_channel_nativeformats(ast), f->subclass.format) == AST_FORMAT_CMP_NOT_EQUAL) {
 		ast_debug(1, "Oooh, got a frame with format of %s on channel '%s' when it has not been negotiated\n",
 			ast_format_get_name(f->subclass.format), ast_channel_name(ast));
 
 		ast_frfree(f);
 		return &ast_null_frame;
-	}
-
-	if (!session->endpoint->asymmetric_rtp_codec &&
-		ast_format_cmp(ast_channel_rawwriteformat(ast), f->subclass.format) == AST_FORMAT_CMP_NOT_EQUAL) {
-		/* For maximum compatibility we ensure that the write format matches that of the received media */
-		ast_debug(1, "Oooh, got a frame with format of %s on channel '%s' when we're sending '%s', switching to match\n",
-			ast_format_get_name(f->subclass.format), ast_channel_name(ast),
-			ast_format_get_name(ast_channel_rawwriteformat(ast)));
-		ast_set_write_format_path(ast, ast_channel_writeformat(ast), f->subclass.format);
-
-		if (ast_channel_is_bridged(ast)) {
-			ast_channel_set_unbridged_nolock(ast, 1);
-		}
 	}
 
 	if (session->dsp) {
@@ -826,6 +866,8 @@ static int chan_pjsip_write(struct ast_channel *ast, struct ast_frame *frame)
 		}
 		break;
 	case AST_FRAME_MODEM:
+		break;
+	case AST_FRAME_CNG:
 		break;
 	default:
 		ast_log(LOG_WARNING, "Can't send %u type frames with PJSIP\n", frame->frametype);
@@ -1259,8 +1301,7 @@ static int update_connected_line_information(void *data)
 			int generate_new_sdp;
 
 			method = session->endpoint->id.refresh_method;
-			if (session->inv_session->invite_tsx
-				&& (session->inv_session->options & PJSIP_INV_SUPPORT_UPDATE)) {
+			if (session->inv_session->options & PJSIP_INV_SUPPORT_UPDATE) {
 				method = AST_SIP_SESSION_REFRESH_METHOD_UPDATE;
 			}
 
@@ -1356,6 +1397,7 @@ static int chan_pjsip_indicate(struct ast_channel *ast, int condition, const voi
 		} else {
 			res = -1;
 		}
+		ast_devstate_changed(AST_DEVICE_UNKNOWN, AST_DEVSTATE_CACHABLE, "PJSIP/%s", ast_sorcery_object_get_id(channel->session->endpoint));
 		break;
 	case AST_CONTROL_VIDUPDATE:
 		media = pvt->media[SIP_MEDIA_VIDEO];
@@ -1363,7 +1405,8 @@ static int chan_pjsip_indicate(struct ast_channel *ast, int condition, const voi
 			/* FIXME: Only use this for VP8. Additional work would have to be done to
 			 * fully support other video codecs */
 
-			if (ast_format_cap_iscompatible_format(ast_channel_nativeformats(ast), ast_format_vp8) != AST_FORMAT_CMP_NOT_EQUAL) {
+			if (ast_format_cap_iscompatible_format(ast_channel_nativeformats(ast), ast_format_vp8) != AST_FORMAT_CMP_NOT_EQUAL ||
+				ast_format_cap_iscompatible_format(ast_channel_nativeformats(ast), ast_format_vp9) != AST_FORMAT_CMP_NOT_EQUAL) {
 				/* FIXME Fake RTP write, this will be sent as an RTCP packet. Ideally the
 				 * RTP engine would provide a way to externally write/schedule RTCP
 				 * packets */
@@ -1687,21 +1730,27 @@ static int chan_pjsip_digit_begin(struct ast_channel *chan, char digit)
 	struct ast_sip_session_media *media = pvt->media[SIP_MEDIA_AUDIO];
 	int res = 0;
 
-	switch (channel->session->endpoint->dtmf) {
+	switch (channel->session->dtmf) {
 	case AST_SIP_DTMF_RFC_4733:
 		if (!media || !media->rtp) {
 			return -1;
 		}
 
 		ast_rtp_instance_dtmf_begin(media->rtp, digit);
-                break;
+		break;
 	case AST_SIP_DTMF_AUTO:
-                       if (!media || !media->rtp || (ast_rtp_instance_dtmf_mode_get(media->rtp) == AST_RTP_DTMF_MODE_INBAND)) {
-                        return -1;
-                }
+		if (!media || !media->rtp || (ast_rtp_instance_dtmf_mode_get(media->rtp) == AST_RTP_DTMF_MODE_INBAND)) {
+			return -1;
+		}
 
-                ast_rtp_instance_dtmf_begin(media->rtp, digit);
-                break;
+		ast_rtp_instance_dtmf_begin(media->rtp, digit);
+		break;
+	case AST_SIP_DTMF_AUTO_INFO:
+		if (!media || !media->rtp || (ast_rtp_instance_dtmf_mode_get(media->rtp) == AST_RTP_DTMF_MODE_NONE)) {
+			return -1;
+		}
+		ast_rtp_instance_dtmf_begin(media->rtp, digit);
+		break;
 	case AST_SIP_DTMF_NONE:
 		break;
 	case AST_SIP_DTMF_INBAND:
@@ -1801,7 +1850,21 @@ static int chan_pjsip_digit_end(struct ast_channel *ast, char digit, unsigned in
 	struct ast_sip_session_media *media = pvt->media[SIP_MEDIA_AUDIO];
 	int res = 0;
 
-	switch (channel->session->endpoint->dtmf) {
+	switch (channel->session->dtmf) {
+	case AST_SIP_DTMF_AUTO_INFO:
+	{
+		if (!media || !media->rtp) {
+			return -1;
+		}
+		if (ast_rtp_instance_dtmf_mode_get(media->rtp) != AST_RTP_DTMF_MODE_NONE) {
+			ast_debug(3, "Told to send end of digit on Auto-Info channel %s RFC4733 negotiated so using it.\n", ast_channel_name(ast));
+			ast_rtp_instance_dtmf_end_with_duration(media->rtp, digit, duration);
+			break;
+		}
+		/* If RFC_4733 was not negotiated, fail through to the DTMF_INFO processing */
+		ast_debug(3, "Told to send end of digit on Auto-Info channel %s RFC4733 NOT negotiated using INFO instead.\n", ast_channel_name(ast));
+	}
+
 	case AST_SIP_DTMF_INFO:
 	{
 		struct info_dtmf_data *dtmf_data = info_dtmf_data_alloc(channel->session, digit, duration);
@@ -1834,14 +1897,15 @@ static int chan_pjsip_digit_end(struct ast_channel *ast, char digit, unsigned in
 		}
 
 		ast_rtp_instance_dtmf_end_with_duration(media->rtp, digit, duration);
-                break;
-        case AST_SIP_DTMF_AUTO:
-                if (!media || !media->rtp || (ast_rtp_instance_dtmf_mode_get(media->rtp) == AST_RTP_DTMF_MODE_INBAND)) {
-                        return -1;
-                }
+		break;
+	case AST_SIP_DTMF_AUTO:
+		if (!media || !media->rtp || (ast_rtp_instance_dtmf_mode_get(media->rtp) == AST_RTP_DTMF_MODE_INBAND)) {
+			 return -1;
+		}
 
-                ast_rtp_instance_dtmf_end_with_duration(media->rtp, digit, duration);
-                break;
+		ast_rtp_instance_dtmf_end_with_duration(media->rtp, digit, duration);
+		break;
+
 
 	case AST_SIP_DTMF_NONE:
 		break;
@@ -2005,11 +2069,16 @@ static int hangup(void *data)
 	struct ast_sip_session *session = channel->session;
 	int cause = h_data->cause;
 
-	ast_sip_session_terminate(session, cause);
+	/*
+	 * It's possible that session_terminate might cause the session to be destroyed
+	 * immediately so we need to keep a reference to it so we can NULL session->channel
+	 * afterwards.
+	 */
+	ast_sip_session_terminate(ao2_bump(session), cause);
 	clear_session_and_channel(session, ast, pvt);
+	ao2_cleanup(session);
 	ao2_cleanup(channel);
 	ao2_cleanup(h_data);
-
 	return 0;
 }
 
@@ -2146,6 +2215,8 @@ static struct ast_channel *chan_pjsip_request(const char *type, struct ast_forma
 
 	req_data.caps = cap;
 	req_data.dest = data;
+	/* Default failure value in case ast_sip_push_task_synchronous() itself fails. */
+	req_data.cause = AST_CAUSE_FAILURE;
 
 	if (ast_sip_push_task_synchronous(NULL, request, &req_data)) {
 		*cause = req_data.cause;
@@ -2593,6 +2664,12 @@ static struct ast_custom_function media_offer_function = {
 	.write = pjsip_acf_media_offer_write
 };
 
+static struct ast_custom_function dtmf_mode_function = {
+	.name = "PJSIP_DTMF_MODE",
+	.read = pjsip_acf_dtmf_mode_read,
+	.write = pjsip_acf_dtmf_mode_write
+};
+
 static struct ast_custom_function session_refresh_function = {
 	.name = "PJSIP_SEND_SESSION_REFRESH",
 	.write = pjsip_acf_session_refresh_write,
@@ -2634,6 +2711,11 @@ static int load_module(void)
 
 	if (ast_custom_function_register(&media_offer_function)) {
 		ast_log(LOG_WARNING, "Unable to register PJSIP_MEDIA_OFFER dialplan function\n");
+		goto end;
+	}
+
+	if (ast_custom_function_register(&dtmf_mode_function)) {
+		ast_log(LOG_WARNING, "Unable to register PJSIP_DTMF_MODE dialplan function\n");
 		goto end;
 	}
 
@@ -2696,6 +2778,7 @@ static int load_module(void)
 end:
 	ao2_cleanup(pjsip_uids_onhold);
 	pjsip_uids_onhold = NULL;
+	ast_custom_function_unregister(&dtmf_mode_function);
 	ast_custom_function_unregister(&media_offer_function);
 	ast_custom_function_unregister(&chan_pjsip_dial_contacts_function);
 	ast_custom_function_unregister(&session_refresh_function);
@@ -2718,6 +2801,7 @@ static int unload_module(void)
 	ast_sip_session_unregister_supplement(&chan_pjsip_ack_supplement);
 	ast_sip_session_unregister_supplement(&call_pickup_supplement);
 
+	ast_custom_function_unregister(&dtmf_mode_function);
 	ast_custom_function_unregister(&media_offer_function);
 	ast_custom_function_unregister(&chan_pjsip_dial_contacts_function);
 	ast_custom_function_unregister(&session_refresh_function);

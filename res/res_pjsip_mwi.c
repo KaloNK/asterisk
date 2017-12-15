@@ -1102,6 +1102,13 @@ static int create_mwi_subscriptions_for_endpoint(void *obj, void *arg, int flags
 	}
 
 	if (endpoint->subscription.mwi.aggregate) {
+		const char *endpoint_id = ast_sorcery_object_get_id(endpoint);
+
+		/* Check if subscription exists */
+		aggregate_sub = ao2_find(unsolicited_mwi, endpoint_id, OBJ_SEARCH_KEY | OBJ_NOLOCK);
+		if (aggregate_sub) {
+			return 0;
+		}
 		aggregate_sub = mwi_subscription_alloc(endpoint, 0, NULL);
 		if (!aggregate_sub) {
 			return 0;
@@ -1113,7 +1120,9 @@ static int create_mwi_subscriptions_for_endpoint(void *obj, void *arg, int flags
 		struct mwi_subscription *sub;
 		struct mwi_stasis_subscription *mwi_stasis_sub;
 
-		if (ast_strlen_zero(mailbox)) {
+		/* check if subscription exists */
+		if (ast_strlen_zero(mailbox) ||
+			(!aggregate_sub && endpoint_receives_unsolicited_mwi_for_mailbox(endpoint, mailbox))) {
 			continue;
 		}
 
@@ -1189,31 +1198,79 @@ static int send_contact_notify(void *obj, void *arg, int flags)
 	return 0;
 }
 
+/*! \brief Create mwi subscriptions and notify */
+static void mwi_contact_changed(const struct ast_sip_contact *contact)
+{
+	char *id = ast_strdupa(ast_sorcery_object_get_id(contact));
+	char *aor = NULL;
+	struct ast_sip_endpoint *endpoint = NULL;
+
+	if (contact->endpoint) {
+		endpoint = ao2_bump(contact->endpoint);
+	} else {
+		if (!ast_strlen_zero(contact->endpoint_name)) {
+			endpoint = ast_sorcery_retrieve_by_id(ast_sip_get_sorcery(), "endpoint", contact->endpoint_name);
+		}
+	}
+
+	if (!endpoint || ast_strlen_zero(endpoint->subscription.mwi.mailboxes)) {
+		ao2_cleanup(endpoint);
+		return;
+	}
+
+	ao2_lock(unsolicited_mwi);
+	create_mwi_subscriptions_for_endpoint(endpoint, NULL, 0);
+	ao2_unlock(unsolicited_mwi);
+	ao2_cleanup(endpoint);
+
+	aor = strsep(&id, ";@");
+	ao2_callback(unsolicited_mwi, OBJ_NODATA, send_contact_notify, aor);
+}
+
 /*! \brief Function called when a contact is updated */
 static void mwi_contact_updated(const void *object)
 {
-	char *id = ast_strdupa(ast_sorcery_object_get_id(object)), *aor = NULL;
-
-	aor = strsep(&id, ";@");
-
-	ao2_callback(unsolicited_mwi, OBJ_NODATA, send_contact_notify, aor);
+	mwi_contact_changed(object);
 }
 
 /*! \brief Function called when a contact is added */
 static void mwi_contact_added(const void *object)
 {
+	mwi_contact_changed(object);
+}
+
+/*! \brief Function called when a contact is deleted */
+static void mwi_contact_deleted(const void *object)
+{
 	const struct ast_sip_contact *contact = object;
 	struct ao2_iterator *mwi_subs;
 	struct mwi_subscription *mwi_sub;
-	const char *endpoint_id = ast_sorcery_object_get_id(contact->endpoint);
+	struct ast_sip_endpoint *endpoint = NULL;
+	struct ast_sip_contact *found_contact;
 
-	if (ast_strlen_zero(contact->endpoint->subscription.mwi.mailboxes)) {
+	if (contact->endpoint) {
+		endpoint = ao2_bump(contact->endpoint);
+	} else {
+		if (!ast_strlen_zero(contact->endpoint_name)) {
+			endpoint = ast_sorcery_retrieve_by_id(ast_sip_get_sorcery(), "endpoint", contact->endpoint_name);
+		}
+	}
+
+	if (!endpoint || ast_strlen_zero(endpoint->subscription.mwi.mailboxes)) {
+		ao2_cleanup(endpoint);
+		return;
+	}
+
+	/* Check if there is another contact */
+	found_contact = ast_sip_location_retrieve_contact_from_aor_list(endpoint->aors);
+	ao2_cleanup(endpoint);
+	if (found_contact) {
+		ao2_cleanup(found_contact);
 		return;
 	}
 
 	ao2_lock(unsolicited_mwi);
-
-	mwi_subs = ao2_find(unsolicited_mwi, endpoint_id,
+	mwi_subs = ao2_find(unsolicited_mwi, contact->endpoint_name,
 		OBJ_SEARCH_KEY | OBJ_MULTIPLE | OBJ_NOLOCK | OBJ_UNLINK);
 	if (mwi_subs) {
 		for (; (mwi_sub = ao2_iterator_next(mwi_subs)); ao2_cleanup(mwi_sub)) {
@@ -1221,18 +1278,14 @@ static void mwi_contact_added(const void *object)
 		}
 		ao2_iterator_destroy(mwi_subs);
 	}
-
-	create_mwi_subscriptions_for_endpoint(contact->endpoint, NULL, 0);
-
 	ao2_unlock(unsolicited_mwi);
-
-	mwi_contact_updated(object);
 }
 
 /*! \brief Observer for contacts so unsolicited MWI is sent when a contact changes */
 static const struct ast_sorcery_observer mwi_contact_observer = {
 	.created = mwi_contact_added,
 	.updated = mwi_contact_updated,
+	.deleted = mwi_contact_deleted,
 };
 
 /*! \brief Task invoked to send initial MWI NOTIFY for unsolicited */
@@ -1278,7 +1331,9 @@ static struct ast_sorcery_observer global_observer = {
 
 static int reload(void)
 {
-	create_mwi_subscriptions();
+	if (!ast_sip_get_mwi_disable_initial_unsolicited()) {
+		create_mwi_subscriptions();
+	}
 	return 0;
 }
 
@@ -1301,13 +1356,13 @@ static int load_module(void)
 		ast_sip_unregister_subscription_handler(&mwi_handler);
 		return AST_MODULE_LOAD_DECLINE;
 	}
-	create_mwi_subscriptions();
 
 	ast_sorcery_observer_add(ast_sip_get_sorcery(), "contact", &mwi_contact_observer);
 	ast_sorcery_observer_add(ast_sip_get_sorcery(), "global", &global_observer);
 	ast_sorcery_reload_object(ast_sip_get_sorcery(), "global");
 
 	if (!ast_sip_get_mwi_disable_initial_unsolicited()) {
+		create_mwi_subscriptions();
 		if (ast_test_flag(&ast_options, AST_OPT_FLAG_FULLY_BOOTED)) {
 			ast_sip_push_task(NULL, send_initial_notify_all, NULL);
 		} else {

@@ -34,6 +34,7 @@
  */
 
 /*** MODULEINFO
+	<use type="module">func_periodic_hook</use>
 	<support_level>core</support_level>
  ***/
 
@@ -138,6 +139,11 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 				<para>Will be executed when the recording is over.</para>
 				<para>Any strings matching <literal>^{X}</literal> will be unescaped to <variable>X</variable>.</para>
 				<para>All variables will be evaluated at the time MixMonitor is called.</para>
+				<warning><para>Do not use untrusted strings such as <variable>CALLERID(num)</variable>
+				or <variable>CALLERID(name)</variable> as part of the command parameters.  You
+				risk a command injection attack executing arbitrary commands if the untrusted
+				strings aren't filtered to remove dangerous characters.  See function
+				<variable>FILTER()</variable>.</para></warning>
 			</parameter>
 		</syntax>
 		<description>
@@ -150,6 +156,11 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 					<para>Will contain the filename used to record.</para>
 				</variable>
 			</variablelist>
+			<warning><para>Do not use untrusted strings such as <variable>CALLERID(num)</variable>
+			or <variable>CALLERID(name)</variable> as part of ANY of the application's
+			parameters.  You risk a command injection attack executing arbitrary commands
+			if the untrusted strings aren't filtered to remove dangerous characters.  See
+			function <variable>FILTER()</variable>.</para></warning>
 		</description>
 		<see-also>
 			<ref type="application">Monitor</ref>
@@ -224,6 +235,11 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 				<para>Will be executed when the recording is over.
 				Any strings matching <literal>^{X}</literal> will be unescaped to <variable>X</variable>.
 				All variables will be evaluated at the time MixMonitor is called.</para>
+				<warning><para>Do not use untrusted strings such as <variable>CALLERID(num)</variable>
+				or <variable>CALLERID(name)</variable> as part of the command parameters.  You
+				risk a command injection attack executing arbitrary commands if the untrusted
+				strings aren't filtered to remove dangerous characters.  See function
+				<variable>FILTER()</variable>.</para></warning>
 			</parameter>
 		</syntax>
 		<description>
@@ -802,6 +818,8 @@ static int setup_mixmonitor_ds(struct mixmonitor *mixmonitor, struct ast_channel
 
 	if (ast_asprintf(datastore_id, "%p", mixmonitor_ds) == -1) {
 		ast_log(LOG_ERROR, "Failed to allocate memory for MixMonitor ID.\n");
+		ast_free(mixmonitor_ds);
+		return -1;
 	}
 
 	ast_mutex_init(&mixmonitor_ds->lock);

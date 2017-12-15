@@ -25,6 +25,7 @@
  */
 
 /*** MODULEINFO
+	<depend>res_speech</depend>
 	<support_level>core</support_level>
  ***/
 
@@ -451,13 +452,34 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 			Records to a given file.
 		</synopsis>
 		<syntax>
-			<parameter name="filename" required="true" />
-			<parameter name="format" required="true" />
-			<parameter name="escape_digits" required="true" />
-			<parameter name="timeout" required="true" />
-			<parameter name="offset samples" />
-			<parameter name="BEEP" />
-			<parameter name="s=silence" />
+			<parameter name="filename" required="true">
+				<para>The destination filename of the recorded audio.</para>
+			</parameter>
+			<parameter name="format" required="true">
+				<para>The audio format in which to save the resulting file.</para>
+			</parameter>
+			<parameter name="escape_digits" required="true">
+				<para>The DTMF digits that will terminate the recording process.</para>
+			</parameter>
+			<parameter name="timeout" required="true">
+				<para>The maximum recording time in milliseconds. Set to -1 for no
+				limit.</para>
+			</parameter>
+			<parameter name="offset_samples">
+				<para>Causes the recording to first seek to the specified offset before
+				recording begins.</para>
+			</parameter>
+			<parameter name="beep">
+				<para>Causes Asterisk to play a beep as recording begins. This argument
+				can take any value.</para>
+			</parameter>
+			<parameter name="s=silence">
+				<para>The number of seconds of silence that are permitted before the
+				recording is terminated, regardless of the
+				<replaceable>escape_digits</replaceable> or <replaceable>timeout</replaceable>
+				arguments. If specified, this parameter must be preceded by
+				<literal>s=</literal>.</para>
+			</parameter>
 		</syntax>
 		<description>
 			<para>Record to a file until a given dtmf digit in the sequence is received.
@@ -465,7 +487,9 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 			will be recorded. The <replaceable>timeout</replaceable> is the maximum record time in
 			milliseconds, or <literal>-1</literal> for no <replaceable>timeout</replaceable>.
 			<replaceable>offset samples</replaceable> is optional, and, if provided, will seek
-			to the offset without exceeding the end of the file. <replaceable>silence</replaceable> is
+			to the offset without exceeding the end of the
+			file. <replaceable>beep</replaceable> can take any value, and causes Asterisk
+			to play a beep to the channel that is about to be recorded. <replaceable>silence</replaceable> is
 			the number of seconds of silence allowed before the function returns despite the
 			lack of dtmf digits or reaching <replaceable>timeout</replaceable>. <replaceable>silence</replaceable>
 			value must be preceded by <literal>s=</literal> and is also optional.</para>
@@ -2024,7 +2048,7 @@ static int handle_connection(const char *agiurl, const struct ast_sockaddr addr,
 	FastAGI defaults to port 4573 */
 static enum agi_result launch_netscript(char *agiurl, char *argv[], int *fds)
 {
-	int s = 0, flags;
+	int s = 0;
 	char *host, *script;
 	int num_addrs = 0, i = 0;
 	struct ast_sockaddr *addrs;
@@ -2054,14 +2078,7 @@ static enum agi_result launch_netscript(char *agiurl, char *argv[], int *fds)
 			continue;
 		}
 
-		if ((flags = fcntl(s, F_GETFL)) < 0) {
-			ast_log(LOG_WARNING, "fcntl(F_GETFL) failed: %s\n", strerror(errno));
-			close(s);
-			continue;
-		}
-
-		if (fcntl(s, F_SETFL, flags | O_NONBLOCK) < 0) {
-			ast_log(LOG_WARNING, "fnctl(F_SETFL) failed: %s\n", strerror(errno));
+		if (ast_fd_set_flags(s, O_NONBLOCK)) {
 			close(s);
 			continue;
 		}
@@ -2227,9 +2244,8 @@ static enum agi_result launch_script(struct ast_channel *chan, char *script, int
 			close(toast[1]);
 			return AGI_RESULT_FAILURE;
 		}
-		res = fcntl(audio[1], F_GETFL);
-		if (res > -1)
-			res = fcntl(audio[1], F_SETFL, res | O_NONBLOCK);
+
+		res = ast_fd_set_flags(audio[1], O_NONBLOCK);
 		if (res < 0) {
 			ast_log(LOG_WARNING, "unable to set audio pipe parameters: %s\n", strerror(errno));
 			close(fromast[0]);
@@ -3121,12 +3137,14 @@ static int handle_exec(struct ast_channel *chan, AGI *agi, int argc, const char 
 	ast_verb(3, "AGI Script Executing Application: (%s) Options: (%s)\n", argv[1], argc >= 3 ? argv[2] : "");
 
 	if ((app_to_exec = pbx_findapp(argv[1]))) {
+		ast_channel_lock(chan);
 		if (!(workaround = ast_test_flag(ast_channel_flags(chan), AST_FLAG_DISABLE_WORKAROUNDS))) {
 			ast_set_flag(ast_channel_flags(chan), AST_FLAG_DISABLE_WORKAROUNDS);
 		}
+		ast_channel_unlock(chan);
 		res = pbx_exec(chan, app_to_exec, argc == 2 ? "" : argv[2]);
 		if (!workaround) {
-			ast_clear_flag(ast_channel_flags(chan), AST_FLAG_DISABLE_WORKAROUNDS);
+			ast_channel_clear_flag(chan, AST_FLAG_DISABLE_WORKAROUNDS);
 		}
 	} else {
 		ast_log(LOG_WARNING, "Could not find application (%s)\n", argv[1]);
@@ -3185,6 +3203,10 @@ static int handle_channelstatus(struct ast_channel *chan, AGI *agi, int argc, co
 
 static int handle_setvariable(struct ast_channel *chan, AGI *agi, int argc, const char * const argv[])
 {
+	if (argc != 4) {
+		return RESULT_SHOWUSAGE;
+	}
+
 	if (argv[3])
 		pbx_builtin_setvar_helper(chan, argv[2], argv[3]);
 
@@ -4003,7 +4025,7 @@ static void publish_async_exec_end(struct ast_channel *chan, int command_id, con
 
 static enum agi_result agi_handle_command(struct ast_channel *chan, AGI *agi, char *buf, int dead)
 {
-	const char *argv[MAX_ARGS];
+	const char *argv[MAX_ARGS] = {0};
 	int argc = MAX_ARGS;
 	int res;
 	agi_command *c;
@@ -4039,7 +4061,7 @@ static enum agi_result agi_handle_command(struct ast_channel *chan, AGI *agi, ch
 				ast_agi_send(agi->fd, chan, "520 Invalid command syntax.  Proper usage not available.\n");
 			} else {
 				ast_agi_send(agi->fd, chan, "520-Invalid command syntax.  Proper usage follows:\n");
-				ast_agi_send(agi->fd, chan, "%s", c->usage);
+				ast_agi_send(agi->fd, chan, "%s\n", c->usage);
 				ast_agi_send(agi->fd, chan, "520 End of proper usage.\n");
 			}
 
@@ -4554,15 +4576,30 @@ static int eagi_exec(struct ast_channel *chan, const char *data)
 {
 	int res;
 	struct ast_format *readformat;
+	struct ast_format *requested_format = NULL;
+	const char *requested_format_name;
 
 	if (ast_check_hangup(chan)) {
 		ast_log(LOG_ERROR, "EAGI cannot be run on a dead/hungup channel, please use AGI.\n");
 		return 0;
 	}
+
+	requested_format_name = pbx_builtin_getvar_helper(chan, "EAGI_AUDIO_FORMAT");
+	if (requested_format_name) {
+		requested_format = ast_format_cache_get(requested_format_name);
+		if (requested_format) {
+			ast_verb(3, "<%s> Setting EAGI audio pipe format to %s\n",
+					 ast_channel_name(chan), ast_format_get_name(requested_format));
+		} else {
+			ast_log(LOG_ERROR, "Could not find requested format: %s\n", requested_format_name);
+		}
+	}
+
 	readformat = ao2_bump(ast_channel_readformat(chan));
-	if (ast_set_read_format(chan, ast_format_slin)) {
+	if (ast_set_read_format(chan, requested_format ?: ast_format_slin)) {
 		ast_log(LOG_WARNING, "Unable to set channel '%s' to linear mode\n", ast_channel_name(chan));
-		ao2_ref(readformat, -1);
+		ao2_cleanup(requested_format);
+		ao2_cleanup(readformat);
 		return -1;
 	}
 	res = agi_exec_full(chan, data, 1, 0);
@@ -4572,7 +4609,8 @@ static int eagi_exec(struct ast_channel *chan, const char *data)
 				ast_format_get_name(readformat));
 		}
 	}
-	ao2_ref(readformat, -1);
+	ao2_cleanup(requested_format);
+	ao2_cleanup(readformat);
 	return res;
 }
 
@@ -4670,6 +4708,10 @@ static int load_module(void)
 		unload_module();
 		return AST_MODULE_LOAD_DECLINE;
 	}
+
+	/* For Optional API. */
+	ast_module_shutdown_ref(ast_module_info->self);
+
 	return AST_MODULE_LOAD_SUCCESS;
 }
 

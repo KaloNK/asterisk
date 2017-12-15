@@ -462,7 +462,7 @@ struct ast_json *ast_json_vstringf(const char *format, va_list args)
 
 	if (format) {
 		int err = ast_vasprintf(&str, format, args);
-		if (err > 0) {
+		if (err >= 0) {
 			ret = json_string(str);
 			ast_free(str);
 		}
@@ -825,6 +825,7 @@ struct ast_json *ast_json_vpack(char const *format, va_list ap)
 			ast_log(LOG_ERROR,
 				"Error building JSON from '%s': %s.\n",
 				format, error.text);
+			ast_log_backtrace();
 		}
 	}
 	return r;

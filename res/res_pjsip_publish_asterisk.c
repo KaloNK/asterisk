@@ -20,6 +20,7 @@
 	<depend>pjproject</depend>
 	<depend>res_pjsip</depend>
 	<depend>res_pjsip_outbound_publish</depend>
+	<depend>res_pjsip_pubsub</depend>
 	<support_level>core</support_level>
  ***/
 
@@ -605,8 +606,7 @@ static int asterisk_publication_devicestate_state_change(struct ast_sip_publicat
 	}
 
 	/* We only accept JSON for content */
-	if (pj_strcmp2(&body->content_type.type, "application") ||
-		pj_strcmp2(&body->content_type.subtype, "json")) {
+	if (!ast_sip_is_content_type(&body->content_type, "application", "json")) {
 		ast_debug(2, "Received unsupported content type for Asterisk event on resource '%s'\n",
 			ast_sorcery_object_get_id(config));
 		return -1;
@@ -697,8 +697,7 @@ static int asterisk_publication_mwi_state_change(struct ast_sip_publication *pub
 	}
 
 	/* We only accept JSON for content */
-	if (pj_strcmp2(&body->content_type.type, "application") ||
-		pj_strcmp2(&body->content_type.subtype, "json")) {
+	if (!ast_sip_is_content_type(&body->content_type, "application", "json")) {
 		ast_debug(2, "Received unsupported content type for Asterisk event on resource '%s'\n",
 			ast_sorcery_object_get_id(config));
 		return -1;
@@ -930,6 +929,7 @@ static int unload_module(void)
 }
 
 AST_MODULE_INFO(ASTERISK_GPL_KEY, AST_MODFLAG_LOAD_ORDER, "PJSIP Asterisk Event PUBLISH Support",
+	.support_level = AST_MODULE_SUPPORT_CORE,
 	.load = load_module,
 	.reload = reload_module,
 	.unload = unload_module,

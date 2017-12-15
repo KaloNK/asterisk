@@ -314,7 +314,7 @@ regex:
 	}
 
 equals:
-	scan_numeric = (sscanf(left, "%lf", &left_num) && sscanf(internal_right, "%lf", &right_num));
+	scan_numeric = (sscanf(left, "%lf", &left_num) > 0 && sscanf(internal_right, "%lf", &right_num) > 0);
 
 	if (internal_op[0] == '=') {
 		if (ast_strlen_zero(left) && ast_strlen_zero(internal_right)) {
@@ -371,4 +371,23 @@ equals:
 	return 0;
 }
 
+char *ast_read_line_from_buffer(char **buffer)
+{
+	char *start = *buffer;
 
+	if (!buffer || !*buffer || *(*buffer) == '\0') {
+		return NULL;
+	}
+
+	while (*(*buffer) && *(*buffer) != '\n' ) {
+		(*buffer)++;
+	}
+
+	*(*buffer) = '\0';
+	if (*(*buffer - 1) == '\r') {
+		*(*buffer - 1) = '\0';
+	}
+	(*buffer)++;
+
+	return start;
+}

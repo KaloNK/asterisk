@@ -2137,9 +2137,84 @@ static int conf_rec_name(struct confbridge_user *user, const char *conf_name)
 	}
 
 	if (res == -1) {
+		ast_filedelete(user->name_rec_location, NULL);
 		user->name_rec_location[0] = '\0';
 		return -1;
 	}
+	return 0;
+}
+
+struct async_delete_name_rec_task_data {
+	struct confbridge_conference *conference;
+	char filename[0];
+};
+
+static struct async_delete_name_rec_task_data *async_delete_name_rec_task_data_alloc(
+	struct confbridge_conference *conference, const char *filename)
+{
+	struct async_delete_name_rec_task_data *atd;
+
+	atd = ast_malloc(sizeof(*atd) + strlen(filename) + 1);
+	if (!atd) {
+		return NULL;
+	}
+
+	/* Safe */
+	strcpy(atd->filename, filename);
+	atd->conference = conference;
+
+	return atd;
+}
+
+static void async_delete_name_rec_task_data_destroy(struct async_delete_name_rec_task_data *atd)
+{
+	ast_free(atd);
+}
+
+/*!
+ * \brief Delete user's name file asynchronously
+ *
+ * This runs in the playback queue taskprocessor. This ensures that
+ * sound file is removed after playback is finished and not before.
+ *
+ * \param data An async_delete_name_rec_task_data
+ * \return 0
+ */
+static int async_delete_name_rec_task(void *data)
+{
+	struct async_delete_name_rec_task_data *atd = data;
+
+	ast_filedelete(atd->filename, NULL);
+	ast_log(LOG_DEBUG, "Conference '%s' removed user name file '%s'\n",
+		atd->conference->name, atd->filename);
+
+	async_delete_name_rec_task_data_destroy(atd);
+	return 0;
+}
+
+static int async_delete_name_rec(struct confbridge_conference *conference,
+	const char *filename)
+{
+	struct async_delete_name_rec_task_data *atd;
+
+	if (ast_strlen_zero(filename)) {
+		return 0;
+	} else if (!sound_file_exists(filename)) {
+		return 0;
+	}
+
+	atd = async_delete_name_rec_task_data_alloc(conference, filename);
+	if (!atd) {
+		return -1;
+	}
+
+	if (ast_taskprocessor_push(conference->playback_queue, async_delete_name_rec_task, atd)) {
+		ast_log(LOG_WARNING, "Conference '%s' was unable to remove user name file '%s'\n",
+			conference->name, filename);
+		async_delete_name_rec_task_data_destroy(atd);
+		return -1;
+	}
+
 	return 0;
 }
 
@@ -2154,6 +2229,7 @@ static int confbridge_exec(struct ast_channel *chan, const char *data)
 {
 	int res = 0, volume_adjustments[2];
 	int quiet = 0;
+	int async_delete_task_pushed = 0;
 	char *parse;
 	const char *b_profile_name = NULL;
 	const char *u_profile_name = NULL;
@@ -2241,7 +2317,11 @@ static int confbridge_exec(struct ast_channel *chan, const char *data)
 	if (!quiet &&
 		(ast_test_flag(&user.u_profile, USER_OPT_ANNOUNCE_JOIN_LEAVE) ||
 		(ast_test_flag(&user.u_profile, USER_OPT_ANNOUNCE_JOIN_LEAVE_REVIEW)))) {
-		conf_rec_name(&user, args.conf_name);
+		if (conf_rec_name(&user, args.conf_name)) {
+			pbx_builtin_setvar_helper(chan, "CONFBRIDGE_RESULT", "FAILED");
+			res = -1; /* Hangup during name recording */
+			goto confbridge_cleanup;
+		}
 	}
 
 	/* menu name */
@@ -2297,21 +2377,12 @@ static int confbridge_exec(struct ast_channel *chan, const char *data)
 		user.tech_args.drop_silence = 1;
 	}
 
-	if (ast_test_flag(&user.u_profile, USER_OPT_JITTERBUFFER)) {
-		char *func_jb;
-		if ((func_jb = ast_module_helper("", "func_jitterbuffer", 0, 0, 0, 0))) {
-			ast_free(func_jb);
-			ast_func_write(chan, "JITTERBUFFER(adaptive)", "default");
-		}
+	if (ast_test_flag(&user.u_profile, USER_OPT_JITTERBUFFER) && ast_module_check("func_jitterbuffer.so")) {
+		ast_func_write(chan, "JITTERBUFFER(adaptive)", "default");
 	}
 
-	if (ast_test_flag(&user.u_profile, USER_OPT_DENOISE)) {
-		char *mod_speex;
-		/* Reduce background noise from each participant */
-		if ((mod_speex = ast_module_helper("", "codec_speex", 0, 0, 0, 0))) {
-			ast_free(mod_speex);
-			ast_func_write(chan, "DENOISE(rx)", "on");
-		}
+	if (ast_test_flag(&user.u_profile, USER_OPT_DENOISE) && ast_module_check("codec_speex.so")) {
+		ast_func_write(chan, "DENOISE(rx)", "on");
 	}
 
 	/* if this user has a intro, play it before entering */
@@ -2398,6 +2469,8 @@ static int confbridge_exec(struct ast_channel *chan, const char *data)
 		async_play_sound_file(conference, user.name_rec_location, NULL);
 		async_play_sound_file(conference,
 			conf_get_sound(CONF_SOUND_HAS_LEFT, conference->b_profile.sounds), NULL);
+		async_delete_name_rec(conference, user.name_rec_location);
+		async_delete_task_pushed = 1;
 	}
 
 	/* play the leave sound */
@@ -2425,11 +2498,10 @@ static int confbridge_exec(struct ast_channel *chan, const char *data)
 		ast_audiohook_volume_set(chan, AST_AUDIOHOOK_DIRECTION_WRITE, volume_adjustments[1]);
 	}
 
-	if (!ast_strlen_zero(user.name_rec_location)) {
+confbridge_cleanup:
+	if (!async_delete_task_pushed && !ast_strlen_zero(user.name_rec_location)) {
 		ast_filedelete(user.name_rec_location, NULL);
 	}
-
-confbridge_cleanup:
 	ast_bridge_features_cleanup(&user.features);
 	conf_bridge_profile_destroy(&user.b_profile);
 	return res;

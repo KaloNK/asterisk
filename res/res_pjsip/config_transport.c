@@ -248,8 +248,11 @@ static int destroy_sip_transport_state(void *data)
 	ast_free(transport_state->id);
 	ast_free_ha(transport_state->localnet);
 
-	if (transport_state->external_address_refresher) {
-		ast_dnsmgr_release(transport_state->external_address_refresher);
+	if (transport_state->external_signaling_address_refresher) {
+		ast_dnsmgr_release(transport_state->external_signaling_address_refresher);
+	}
+	if (transport_state->external_media_address_refresher) {
+		ast_dnsmgr_release(transport_state->external_media_address_refresher);
 	}
 	if (transport_state->transport) {
 		pjsip_transport_shutdown(transport_state->transport);
@@ -399,8 +402,8 @@ static void copy_state_to_transport(struct ast_sip_transport *transport)
 	memcpy(&transport->tls, &transport->state->tls, sizeof(transport->tls));
 	memcpy(&transport->ciphers, &transport->state->ciphers, sizeof(transport->ciphers));
 	transport->localnet = transport->state->localnet;
-	transport->external_address_refresher = transport->state->external_address_refresher;
-	memcpy(&transport->external_address, &transport->state->external_address, sizeof(transport->external_address));
+	transport->external_address_refresher = transport->state->external_signaling_address_refresher;
+	memcpy(&transport->external_address, &transport->state->external_signaling_address, sizeof(transport->external_signaling_address));
 }
 
 static int has_state_changed(struct ast_sip_transport_state *a, struct ast_sip_transport_state *b)
@@ -421,7 +424,11 @@ static int has_state_changed(struct ast_sip_transport_state *a, struct ast_sip_t
 		return -1;
 	}
 
-	if (ast_sockaddr_cmp(&a->external_address, &b->external_address)) {
+	if (ast_sockaddr_cmp(&a->external_signaling_address, &b->external_signaling_address)) {
+		return -1;
+	}
+
+	if (ast_sockaddr_cmp(&a->external_media_address, &b->external_media_address)) {
 		return -1;
 	}
 
@@ -515,20 +522,37 @@ static int transport_apply(const struct ast_sorcery *sorcery, void *obj)
 		pj_sockaddr_set_port(&temp_state->state->host, (transport->type == AST_TRANSPORT_TLS) ? 5061 : 5060);
 	}
 
-	/* Now that we know what address family we can set up a dnsmgr refresh for the external media address if present */
+	/* Now that we know what address family we can set up a dnsmgr refresh for the external addresses if present */
 	if (!ast_strlen_zero(transport->external_signaling_address)) {
 		if (temp_state->state->host.addr.sa_family == pj_AF_INET()) {
-			temp_state->state->external_address.ss.ss_family = AF_INET;
+			temp_state->state->external_signaling_address.ss.ss_family = AF_INET;
 		} else if (temp_state->state->host.addr.sa_family == pj_AF_INET6()) {
-			temp_state->state->external_address.ss.ss_family = AF_INET6;
+			temp_state->state->external_signaling_address.ss.ss_family = AF_INET6;
 		} else {
 			ast_log(LOG_ERROR, "Unknown address family for transport '%s', could not get external signaling address\n",
 					transport_id);
 			return -1;
 		}
 
-		if (ast_dnsmgr_lookup(transport->external_signaling_address, &temp_state->state->external_address, &temp_state->state->external_address_refresher, NULL) < 0) {
+		if (ast_dnsmgr_lookup(transport->external_signaling_address, &temp_state->state->external_signaling_address, &temp_state->state->external_signaling_address_refresher, NULL) < 0) {
 			ast_log(LOG_ERROR, "Could not create dnsmgr for external signaling address on '%s'\n", transport_id);
+			return -1;
+		}
+	}
+
+	if (!ast_strlen_zero(transport->external_media_address)) {
+		if (temp_state->state->host.addr.sa_family == pj_AF_INET()) {
+			temp_state->state->external_media_address.ss.ss_family = AF_INET;
+		} else if (temp_state->state->host.addr.sa_family == pj_AF_INET6()) {
+			temp_state->state->external_media_address.ss.ss_family = AF_INET6;
+		} else {
+			ast_log(LOG_ERROR, "Unknown address family for transport '%s', could not get external media address\n",
+					transport_id);
+			return -1;
+		}
+
+		if (ast_dnsmgr_lookup(transport->external_media_address, &temp_state->state->external_media_address, &temp_state->state->external_media_address_refresher, NULL) < 0) {
+			ast_log(LOG_ERROR, "Could not create dnsmgr for external media address on '%s'\n", transport_id);
 			return -1;
 		}
 	}
@@ -657,6 +681,11 @@ static int transport_tls_file_handler(const struct aco_option *opt, struct ast_v
 
 	if (!state) {
 		return -1;
+	}
+
+	if (ast_strlen_zero(var->value)) {
+		/* Ignore empty options */
+		return 0;
 	}
 
 	if (!ast_file_is_readable(var->value)) {
@@ -888,6 +917,12 @@ static int transport_tls_method_handler(const struct aco_option *opt, struct ast
 		state->tls.method = PJSIP_SSL_UNSPECIFIED_METHOD;
 	} else if (!strcasecmp(var->value, "tlsv1")) {
 		state->tls.method = PJSIP_TLSV1_METHOD;
+#ifdef HAVE_PJSIP_TLS_TRANSPORT_PROTO
+	} else if (!strcasecmp(var->value, "tlsv1_1")) {
+		state->tls.method = PJSIP_TLSV1_1_METHOD;
+	} else if (!strcasecmp(var->value, "tlsv1_2")) {
+		state->tls.method = PJSIP_TLSV1_2_METHOD;
+#endif
 	} else if (!strcasecmp(var->value, "sslv2")) {
 		state->tls.method = PJSIP_SSLV2_METHOD;
 	} else if (!strcasecmp(var->value, "sslv3")) {
@@ -904,6 +939,10 @@ static int transport_tls_method_handler(const struct aco_option *opt, struct ast
 static const char *tls_method_map[] = {
 	[PJSIP_SSL_UNSPECIFIED_METHOD] = "unspecified",
 	[PJSIP_TLSV1_METHOD] = "tlsv1",
+#ifdef HAVE_PJSIP_TLS_TRANSPORT_PROTO
+	[PJSIP_TLSV1_1_METHOD] = "tlsv1_1",
+	[PJSIP_TLSV1_2_METHOD] = "tlsv1_2",
+#endif
 	[PJSIP_SSLV2_METHOD] = "sslv2",
 	[PJSIP_SSLV3_METHOD] = "sslv3",
 	[PJSIP_SSLV23_METHOD] = "sslv23",
@@ -1103,7 +1142,9 @@ static int transport_localnet_handler(const struct aco_option *opt, struct ast_v
 		return 0;
 	}
 
-	if (!(state->localnet = ast_append_ha("d", var->value, state->localnet, &error))) {
+	/* We use only the ast_apply_ha() which defaults to ALLOW
+	 * ("permit"), so we add DENY rules. */
+	if (!(state->localnet = ast_append_ha("deny", var->value, state->localnet, &error))) {
 		return -1;
 	}
 

@@ -17,10 +17,9 @@ AC_CANONICAL_HOST
 # check existence of the package
 AC_CONFIG_SRCDIR([main/asterisk.c])
 
-AC_CONFIG_AUX_DIR(`pwd`)
+AC_CONFIG_AUX_DIR()
 
 AC_COPYRIGHT("Asterisk")
-AC_REVISION($Revision$)
 
 # preserve any CFLAGS or LDFLAGS that may be set
 # NOTE: This must be done before calling any macros that end up
@@ -265,6 +264,7 @@ AC_SUBST(GNU_LD)
 AC_PATH_PROG([BISON], [bison], :)
 AC_PATH_PROG([CMP], [cmp], :)
 AC_PATH_PROG([CAT], [cat], :)
+AC_PATH_PROG([CUT], [cut], :)
 AC_PATH_PROG([FLEX], [flex], :)
 AC_PATH_PROG([GREP], [grep], :)
 AC_PATH_PROG([PYTHON], [python], :)
@@ -408,6 +408,7 @@ AC_SUBST(NOISY_BUILD)
 AC_SUBST(AST_DEVMODE)
 AC_SUBST(AST_DEVMODE_STRICT)
 
+AST_OPTION_ONLY([download-cache], [AST_DOWNLOAD_CACHE], [cached sound AND external module tarfiles], [])
 AST_OPTION_ONLY([sounds-cache], [SOUNDS_CACHE_DIR], [cached sound tarfiles], [])
 AST_OPTION_ONLY([externals-cache], [EXTERNALS_CACHE_DIR], [cached external module tarfiles], [])
 
@@ -502,6 +503,7 @@ AST_EXT_LIB_SETUP([NEWT], [newt], [newt])
 AST_EXT_LIB_SETUP([OGG], [OGG], [ogg])
 AST_EXT_LIB_SETUP([OPENR2], [MFR2], [openr2])
 AST_EXT_LIB_SETUP([OPUS], [Opus], [opus])
+AST_EXT_LIB_SETUP([OPUSFILE], [Opusfile], [opusfile])
 AST_EXT_LIB_SETUP([OSPTK], [OSP Toolkit], [osptk])
 AST_EXT_LIB_SETUP([OSS], [Open Sound System], [oss])
 AST_EXT_LIB_SETUP([PGSQL], [PostgreSQL], [postgres])
@@ -518,7 +520,6 @@ AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_TLS_TRANSPORT_PROTO], [PJSIP TLS Transport pro
 AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_EVSUB_GRP_LOCK], [PJSIP EVSUB Group Lock support], [PJPROJECT], [pjsip])
 AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_INV_SESSION_REF], [PJSIP INVITE Session Reference Count support], [PJPROJECT], [pjsip])
 AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_AUTH_CLT_DEINIT], [pjsip_auth_clt_deinit support], [PJPROJECT], [pjsip])
-AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_EVSUB_SET_UAS_TIMEOUT], [PJSIP EVSUB Set UAS Timeout support], [PJPROJECT], [pjsip])
 AST_EXT_LIB_SETUP_OPTIONAL([PJSIP_TSX_LAYER_FIND_TSX2], [pjsip_tsx_layer_find_tsx2 support], [PJPROJECT], [pjsip])
 fi
 
@@ -658,12 +659,14 @@ AC_ARG_ENABLE([xmldoc],
 	[AS_HELP_STRING([--disable-xmldoc],
 		[Explicitly disable XML documentation])],
 	[case "${enableval}" in
-		y|ye|yes) disable_xmldoc=no ;;
-		n|no)  disable_xmldoc=yes ;;
+		y|ye|yes) DISABLE_XMLDOC=no ;;
+		n|no)  DISABLE_XMLDOC=yes ;;
 		*) AC_MSG_ERROR(bad value ${enableval} for --disable-xmldoc)  ;;
-	esac], [disable_xmldoc=no])
+	esac], [DISABLE_XMLDOC=no])
 
-if test "${disable_xmldoc}" != "yes"; then
+AC_SUBST([DISABLE_XMLDOC])
+if test "${DISABLE_XMLDOC}" != "yes"; then
+        AC_DEFINE([AST_XML_DOCS], 1, [Define to enable XML documentation.])
         AST_EXT_LIB_CHECK([LIBXSLT], [xslt], [xsltLoadStylesheetPI], [libxslt/xsltInternals.h], [${LIBXML2_LIB}], [${LIBXML2_INCLUDE}])
         AST_EXT_LIB_CHECK([LIBXSLT_CLEANUP], [xslt], [xsltCleanupGlobals], [libxslt/xsltInternals.h], [${LIBXML2_LIB}], [${LIBXML2_INCLUDE}])
 
@@ -1098,6 +1101,16 @@ if test "${ac_cv_have_variable_fdset}x" = "0x"; then
 		AC_DEFINE([CONFIGURE_RAN_AS_ROOT], 1, [Some configure tests will unexpectedly fail if configure is run by a non-root user.  These may be able to be tested at runtime.]))
 fi
 
+AC_MSG_CHECKING([if we have usable eventfd support])
+AC_RUN_IFELSE(
+  [AC_LANG_PROGRAM([#include <sys/eventfd.h>],
+      [return eventfd(0, EFD_NONBLOCK | EFD_SEMAPHORE) == -1;])],
+  AC_MSG_RESULT(yes)
+  AC_DEFINE([HAVE_EVENTFD], 1, [Define to 1 if your system supports eventfd and the EFD_NONBLOCK and EFD_SEMAPHORE flags.]),
+  AC_MSG_RESULT(no),
+  AC_MSG_RESULT(cross-compile)
+)
+
 AST_GCC_ATTRIBUTE(pure)
 AST_GCC_ATTRIBUTE(malloc)
 AST_GCC_ATTRIBUTE(const)
@@ -1108,7 +1121,14 @@ AST_GCC_ATTRIBUTE(sentinel)
 AST_GCC_ATTRIBUTE(warn_unused_result)
 AST_GCC_ATTRIBUTE(may_alias)
 AST_GCC_ATTRIBUTE(constructor)
+if test "$ax_cv_have_func_attribute_constructor" != "1"; then
+	AC_MSG_ERROR([*** Function constructor attribute is not supported by your compiler.])
+fi
+
 AST_GCC_ATTRIBUTE(destructor)
+if test "$ax_cv_have_func_attribute_destructor" != "1"; then
+	AC_MSG_ERROR([*** Function destructor attribute is not supported by your compiler.])
+fi
 AST_GCC_ATTRIBUTE(noreturn,noreturn)
 
 AC_MSG_CHECKING(for -fsanitize=address support)
@@ -1214,6 +1234,16 @@ else
 	AST_NO_STRICT_OVERFLOW=
 fi
 AC_SUBST(AST_NO_STRICT_OVERFLOW)
+
+AC_MSG_CHECKING(for -Wno-format-truncation)
+if $(${CC} -O2 -Wno-format-truncation -S -o /dev/null -xc /dev/null > /dev/null 2>&1); then
+	AC_MSG_RESULT(yes)
+	AST_NO_FORMAT_TRUNCATION=-Wno-format-truncation
+else
+	AC_MSG_RESULT(no)
+	AST_NO_FORMAT_TRUNCATION=
+fi
+AC_SUBST(AST_NO_FORMAT_TRUNCATION)
 
 AC_MSG_CHECKING(for -Wshadow)
 if $(${CC} -Wshadow -S -o /dev/null -xc /dev/null > /dev/null 2>&1); then
@@ -1323,6 +1353,18 @@ AC_LINK_IFELSE(
 	),
 	AC_MSG_RESULT(no)
 )
+
+AC_MSG_CHECKING(for BIND_8_COMPAT required)
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+[[
+#undef BIND_8_COMPAT
+#include <arpa/nameser.h>
+]],
+[[int x = NXDOMAIN]])],
+AC_MSG_RESULT(no),
+AC_MSG_RESULT(yes)
+[BIND8_CFLAGS=-DBIND_8_COMPAT])
+AC_SUBST(BIND8_CFLAGS)
 
 AST_C_DEFINE_CHECK([GLOB_NOMAGIC], [GLOB_NOMAGIC], [glob.h])
 
@@ -2274,6 +2316,13 @@ AST_EXT_LIB_CHECK([SS7], [ss7], [ss7_set_isup_timer], [libss7.h])
 AST_EXT_LIB_CHECK([OPENR2], [openr2], [openr2_chan_new], [openr2.h])
 
 AST_EXT_LIB_CHECK([OPUS], [opus], [opus_encoder_create], [opus/opus.h])
+# opusfile.h includes <opus_multistream.h> so we need to make sure that
+# either $OPUS_INCLUDE or /usr/include/opus is added to the search path.
+__opus_include=${OPUS_INCLUDE}
+if test -z "$__opus_include" -o x"$__opus_include" = x" " ; then
+	__opus_include=-I/usr/include/opus
+fi
+AST_EXT_LIB_CHECK([OPUSFILE], [opusfile], [op_open_callbacks], [opus/opusfile.h], [], [$__opus_include])
 
 if test "${USE_PWLIB}" != "no"; then
 	if test -n "${PWLIB_DIR}"; then
@@ -2341,7 +2390,7 @@ else
 	AST_EXT_LIB_CHECK([RADIUS], [radiusclient-ng], [rc_read_config], [radiusclient-ng.h])
 fi
 
-AST_EXT_LIB_CHECK([COROSYNC], [cpg], [cpg_join], [corosync/cpg.h], [-lcfg])
+AST_EXT_LIB_CHECK([COROSYNC], [cpg], [cpg_join], [corosync/cpg.h], [-lcpg -lcfg])
 AST_EXT_LIB_CHECK([COROSYNC_CFG_STATE_TRACK], [cfg], [corosync_cfg_state_track], [corosync/cfg.h], [-lcfg])
 
 AST_EXT_LIB_CHECK([SPEEX], [speex], [speex_encode], [speex/speex.h], [-lm])
@@ -2416,48 +2465,61 @@ then
         AST_C_DEFINE_CHECK([SSL_OP_NO_TLSV1_2], [SSL_OP_NO_TLSv1_2], [openssl/ssl.h])
 fi
 
-AST_EXT_LIB_CHECK([SRTP], [srtp], [srtp_init], [srtp/srtp.h])
+AST_EXT_LIB_CHECK([SRTP], [srtp2], [srtp_init], [srtp2/srtp.h], [], [], [2])
+AST_EXT_LIB_CHECK_SHARED([SRTP], [srtp2], [srtp_init], [srtp2/srtp.h], [], [], [], [
+    AC_MSG_WARN([***])
+    AC_MSG_WARN([*** libsrtp2 could not be linked as a shared object.])
+    AC_MSG_WARN([*** Try compiling libsrtp2 manually. Configure libsrtp2])
+    AC_MSG_WARN([*** with ./configure --prefix=/usr replacing /usr with])
+    AC_MSG_WARN([*** the prefix of your choice, and then make with])
+    AC_MSG_WARN([*** 'make libsrtp2.so'])
+    AC_MSG_WARN([***])
+    AC_MSG_WARN([*** After re-installing libsrtp2, re-run the Asterisk])
+    AC_MSG_WARN([*** configure script.])
+    AC_MSG_WARN([***])
+    AC_MSG_WARN([*** If you do not need SRTP support re-run configure])
+    AC_MSG_WARN([*** with the --without-srtp option.])
+    exit 1
+])
 
-if test "$PBX_SRTP" = "1";
+if test "x$PBX_SRTP" = x1;
 then
-    saved_libs="${LIBS}"
-    saved_ldflags="${LDFLAGS}"
-    saved_cflags="${CFLAGS}"
-    LIBS="${LIBS} ${SRTP_LIB}"
-    LDFLAGS="${LDFLAGS} -shared -fPIC"
-    CFLAGS="${CFLAGS} ${SRTP_INCLUDE}"
-    AC_MSG_CHECKING(for the ability of -lsrtp to be linked in a shared object)
-    AC_LINK_IFELSE(
-    [
-        AC_LANG_PROGRAM(
-            [#include <srtp/srtp.h>],
-            [srtp_init();]
-        )
-    ],
-    [ AC_MSG_RESULT(yes) ],
-    [
-        AC_MSG_RESULT(no)
-        AC_MSG_WARN(***)
-        AC_MSG_WARN(*** libsrtp could not be linked as a shared object.)
-        AC_MSG_WARN(*** Try compiling libsrtp manually. Configure libsrtp)
-        AC_MSG_WARN(*** with ./configure CFLAGS=-fPIC --prefix=/usr)
-        AC_MSG_WARN(*** replacing /usr with the prefix of your choice.)
-        AC_MSG_WARN(*** After re-installing libsrtp, re-run the Asterisk)
-        AC_MSG_WARN(*** configure script.)
-        AC_MSG_WARN(***)
-        AC_MSG_WARN(*** If you do not need SRTP support re-run configure)
-        AC_MSG_WARN(*** with the --without-srtp option.)
-        exit 1
-    ]
-    )
-    LIBS="${saved_libs}"
-    LDFLAGS="${saved_ldflags}"
-    CFLAGS="${saved_cflags}"
+    AST_EXT_LIB_CHECK([SRTP_SHUTDOWN], [srtp2], [srtp_shutdown], [srtp2/srtp.h])
+
+    # libsrtp2 removed support for PRNG, so we require OpenSSL
+    if test "x$PBX_OPENSSL" != x1;
+    then
+        AC_MSG_WARN([***])
+        AC_MSG_WARN([*** OpenSSL required when using libsrtp2, checking for libsrtp instead.])
+        AC_MSG_WARN([***])
+        PBX_SRTP=0
+    fi
 fi
 
-AST_EXT_LIB_CHECK([SRTP_SHUTDOWN], [srtp], [srtp_shutdown], [srtp/srtp.h])
+if test "x$PBX_SRTP" != x1;
+then
+    AST_EXT_LIB_CHECK([SRTP], [srtp], [srtp_init], [srtp/srtp.h], [], [], [1])
+    AST_EXT_LIB_CHECK_SHARED([SRTP], [srtp], [srtp_init], [srtp/srtp.h], [], [], [], [
+        AC_MSG_WARN([***])
+        AC_MSG_WARN([*** libsrtp could not be linked as a shared object.])
+        AC_MSG_WARN([*** Try compiling libsrtp manually. Configure libsrtp])
+        AC_MSG_WARN([*** with ./configure CFLAGS=-fPIC --prefix=/usr])
+        AC_MSG_WARN([*** replacing /usr with the prefix of your choice.])
+        AC_MSG_WARN([*** After re-installing libsrtp, re-run the Asterisk])
+        AC_MSG_WARN([*** configure script.])
+        AC_MSG_WARN([***])
+        AC_MSG_WARN([*** If you do not need SRTP support re-run configure])
+        AC_MSG_WARN([*** with the --without-srtp option.])
+        exit 1
+    ])
 
-for ver in 2.0 2.2 2.4 2.6; do
+    if test "x$PBX_SRTP" = x1;
+    then
+        AST_EXT_LIB_CHECK([SRTP_SHUTDOWN], [srtp], [srtp_shutdown], [srtp/srtp.h])
+    fi
+fi
+
+for ver in 2.0 2.2 2.4 2.6 3.0; do
 	AST_PKG_CONFIG_CHECK([GMIME], gmime-$ver)
 	if test "$PBX_GMIME" = 1; then
 		break;

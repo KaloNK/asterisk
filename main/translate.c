@@ -34,6 +34,7 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <math.h>
+#include <stdlib.h>
 
 #include "asterisk/lock.h"
 #include "asterisk/channel.h"
@@ -444,8 +445,14 @@ struct ast_frame *ast_trans_frameout(struct ast_trans_pvt *pvt,
 	}
 	if (datalen) {
 		f->datalen = datalen;
+		f->data.ptr = pvt->outbuf.c;
 	} else {
 		f->datalen = pvt->datalen;
+		if (!f->datalen) {
+			f->data.ptr = NULL;
+		} else {
+			f->data.ptr = pvt->outbuf.c;
+		}
 		pvt->datalen = 0;
 	}
 
@@ -930,7 +937,8 @@ static void handle_cli_recalc(struct ast_cli_args *a)
 static char *handle_show_translation_table(struct ast_cli_args *a)
 {
 	int x, y, i, k;
-	int longest = 0, num_codecs = 0, curlen = 0;
+	int longest = 7; /* slin192 */
+	int num_codecs = 0, curlen = 0;
 	struct ast_str *out = ast_str_create(1024);
 	struct ast_codec *codec;
 
@@ -967,6 +975,7 @@ static char *handle_show_translation_table(struct ast_cli_args *a)
 
 		ast_str_set(&out, 0, " ");
 		for (k = 0; k < num_codecs; k++) {
+			int adjust = 0;
 			struct ast_codec *col = k ? ast_codec_get_by_id(k) : NULL;
 
 			y = -1;
@@ -982,6 +991,12 @@ static char *handle_show_translation_table(struct ast_cli_args *a)
 
 			if (k > 0) {
 				curlen = strlen(col->name);
+				if (!strcmp(col->name, "slin") ||
+					!strcmp(col->name, "speex") ||
+					!strcmp(col->name, "silk")) {
+					adjust = log10(col->sample_rate / 1000) + 1;
+					curlen = curlen + adjust;
+				}
 			}
 
 			if (curlen < 5) {
@@ -993,10 +1008,25 @@ static char *handle_show_translation_table(struct ast_cli_args *a)
 				ast_str_append(&out, 0, "%*u", curlen + 1, (matrix_get(x, y)->table_cost/100));
 			} else if (i == 0 && k > 0) {
 				/* Top row - use a dynamic size */
-				ast_str_append(&out, 0, "%*s", curlen + 1, col->name);
+				if (!strcmp(col->name, "slin") ||
+					!strcmp(col->name, "speex") ||
+					!strcmp(col->name, "silk")) {
+					ast_str_append(&out, 0, "%*s%u", curlen - adjust + 1,
+						col->name, col->sample_rate / 1000);
+				} else {
+					ast_str_append(&out, 0, "%*s", curlen + 1, col->name);
+				}
 			} else if (k == 0 && i > 0) {
 				/* Left column - use a static size. */
-				ast_str_append(&out, 0, "%*s", longest, row->name);
+				if (!strcmp(row->name, "slin") ||
+					!strcmp(row->name, "speex") ||
+					!strcmp(row->name, "silk")) {
+					int adjust_row = log10(row->sample_rate / 1000) + 1;
+					ast_str_append(&out, 0, "%*s%u", longest - adjust_row,
+						row->name, row->sample_rate / 1000);
+				} else {
+					ast_str_append(&out, 0, "%*s", longest, row->name);
+				}
 			} else if (x >= 0 && y >= 0) {
 				/* Codec not supported */
 				ast_str_append(&out, 0, "%*s", curlen + 1, "-");
@@ -1268,7 +1298,7 @@ int ast_unregister_translator(struct ast_translator *t)
 	}
 	AST_RWLIST_TRAVERSE_SAFE_END;
 
-	if (found) {
+	if (found && !ast_shutting_down()) {
 		matrix_rebuild(0);
 	}
 
@@ -1375,6 +1405,20 @@ int ast_translator_best_choice(struct ast_format_cap *dst_cap,
 				ao2_replace(bestdst, dst);
 				besttablecost = matrix_get(x, y)->table_cost;
 				beststeps = matrix_get(x, y)->multistep;
+			} else if (matrix_get(x, y)->table_cost == besttablecost
+					&& matrix_get(x, y)->multistep == beststeps) {
+				int gap_selected = abs(ast_format_get_sample_rate(best)
+					- ast_format_get_sample_rate(bestdst));
+				int gap_current = abs(ast_format_get_sample_rate(src)
+					- ast_format_get_sample_rate(dst));
+
+				if (gap_current < gap_selected) {
+					/* better than what we have so far */
+					ao2_replace(best, src);
+					ao2_replace(bestdst, dst);
+					besttablecost = matrix_get(x, y)->table_cost;
+					beststeps = matrix_get(x, y)->multistep;
+				}
 			}
 		}
 	}

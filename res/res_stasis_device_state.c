@@ -108,7 +108,6 @@ static int device_state_subscriptions_cmp(void *obj, void *arg, int flags)
 static void device_state_subscription_destroy(void *obj)
 {
 	struct device_state_subscription *sub = obj;
-	sub->sub = stasis_unsubscribe_and_join(sub->sub);
 	ast_string_field_free_memory(sub);
 }
 
@@ -154,6 +153,9 @@ static struct device_state_subscription *find_device_state_subscription(
 static void remove_device_state_subscription(
 	struct device_state_subscription *sub)
 {
+	if (sub->sub) {
+		sub->sub = stasis_unsubscribe_and_join(sub->sub);
+	}
 	ao2_unlink_flags(device_state_subscriptions, sub, OBJ_NOLOCK);
 }
 
@@ -168,22 +170,22 @@ struct ast_json *stasis_app_device_state_to_json(
 struct ast_json *stasis_app_device_states_to_json(void)
 {
 	struct ast_json *array = ast_json_array_create();
-	RAII_VAR(struct ast_db_entry *, tree,
-		 ast_db_gettree(DEVICE_STATE_FAMILY, NULL), ast_db_freetree);
+	struct ast_db_entry *tree;
 	struct ast_db_entry *entry;
 
+	tree = ast_db_gettree(DEVICE_STATE_FAMILY, NULL);
 	for (entry = tree; entry; entry = entry->next) {
 		const char *name = strrchr(entry->key, '/');
+
 		if (!ast_strlen_zero(name)) {
-			struct ast_str *device = ast_str_alloca(DEVICE_STATE_SIZE);
-			ast_str_set(&device, 0, "%s%s",
-				    DEVICE_STATE_SCHEME_STASIS, ++name);
-			ast_json_array_append(
-				array, stasis_app_device_state_to_json(
-					ast_str_buffer(device),
-					ast_device_state(ast_str_buffer(device))));
+			char device[DEVICE_STATE_SIZE];
+
+			snprintf(device, sizeof(device), "%s%s", DEVICE_STATE_SCHEME_STASIS, ++name);
+			ast_json_array_append(array,
+				stasis_app_device_state_to_json(device, ast_device_state(device)));
 		}
 	}
+	ast_db_freetree(tree);
 
 	return array;
 }
@@ -291,7 +293,7 @@ static void populate_cache(void)
 
 static enum ast_device_state stasis_device_state_cb(const char *data)
 {
-	char buf[DEVICE_STATE_SIZE] = "";
+	char buf[DEVICE_STATE_SIZE];
 
 	ast_db_get(DEVICE_STATE_FAMILY, data, buf, sizeof(buf));
 

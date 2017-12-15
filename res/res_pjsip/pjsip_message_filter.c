@@ -27,72 +27,78 @@
 
 #define MOD_DATA_RESTRICTIONS "restrictions"
 
-static pj_status_t multihomed_on_tx_message(pjsip_tx_data *tdata);
-static pj_bool_t multihomed_on_rx_message(pjsip_rx_data *rdata);
+static pj_status_t filter_on_tx_message(pjsip_tx_data *tdata);
+static pj_bool_t filter_on_rx_message(pjsip_rx_data *rdata);
 
 /*! \brief Outgoing message modification restrictions */
-struct multihomed_message_restrictions {
+struct filter_message_restrictions {
 	/*! \brief Disallow modification of the From domain */
 	unsigned int disallow_from_domain_modification;
 };
 
-static pjsip_module multihomed_module = {
-	.name = { "Multihomed Routing", 18 },
+static pjsip_module filter_module_transport = {
+	.name = { "Message Filtering Transport", 27 },
+	.id = -1,
+	.priority = PJSIP_MOD_PRIORITY_TRANSPORT_LAYER,
+	.on_rx_request = filter_on_rx_message,
+};
+
+static pjsip_module filter_module_tsx = {
+	.name = { "Message Filtering TSX", 21 },
 	.id = -1,
 	.priority = PJSIP_MOD_PRIORITY_TSX_LAYER - 1,
-	.on_tx_request = multihomed_on_tx_message,
-	.on_tx_response = multihomed_on_tx_message,
-	.on_rx_request = multihomed_on_rx_message,
+	.on_tx_request = filter_on_tx_message,
+	.on_tx_response = filter_on_tx_message,
 };
 
 /*! \brief Helper function to get (or allocate if not already present) restrictions on a message */
-static struct multihomed_message_restrictions *multihomed_get_restrictions(pjsip_tx_data *tdata)
+static struct filter_message_restrictions *get_restrictions(pjsip_tx_data *tdata)
 {
-	struct multihomed_message_restrictions *restrictions;
+	struct filter_message_restrictions *restrictions;
 
-	restrictions = ast_sip_mod_data_get(tdata->mod_data, multihomed_module.id, MOD_DATA_RESTRICTIONS);
+	restrictions = ast_sip_mod_data_get(tdata->mod_data, filter_module_tsx.id, MOD_DATA_RESTRICTIONS);
 	if (restrictions) {
 		return restrictions;
 	}
 
-	restrictions = PJ_POOL_ALLOC_T(tdata->pool, struct multihomed_message_restrictions);
-	ast_sip_mod_data_set(tdata->pool, tdata->mod_data, multihomed_module.id, MOD_DATA_RESTRICTIONS, restrictions);
+	restrictions = PJ_POOL_ALLOC_T(tdata->pool, struct filter_message_restrictions);
+	ast_sip_mod_data_set(tdata->pool, tdata->mod_data, filter_module_tsx.id, MOD_DATA_RESTRICTIONS, restrictions);
 
 	return restrictions;
 }
 
 /*! \brief Callback invoked on non-session outgoing messages */
-static void multihomed_outgoing_message(struct ast_sip_endpoint *endpoint, struct ast_sip_contact *contact, struct pjsip_tx_data *tdata)
+static void filter_outgoing_message(struct ast_sip_endpoint *endpoint, struct ast_sip_contact *contact, struct pjsip_tx_data *tdata)
 {
-	struct multihomed_message_restrictions *restrictions = multihomed_get_restrictions(tdata);
+	struct filter_message_restrictions *restrictions = get_restrictions(tdata);
 
 	restrictions->disallow_from_domain_modification = !ast_strlen_zero(endpoint->fromdomain);
 }
 
 /*! \brief PJSIP Supplement for tagging messages with restrictions */
-static struct ast_sip_supplement multihomed_supplement = {
+static struct ast_sip_supplement filter_supplement = {
 	.priority = AST_SIP_SUPPLEMENT_PRIORITY_FIRST,
-	.outgoing_request = multihomed_outgoing_message,
-	.outgoing_response = multihomed_outgoing_message,
+	.outgoing_request = filter_outgoing_message,
+	.outgoing_response = filter_outgoing_message,
 };
 
 /*! \brief Callback invoked on session outgoing messages */
-static void multihomed_session_outgoing_message(struct ast_sip_session *session, struct pjsip_tx_data *tdata)
+static void filter_session_outgoing_message(struct ast_sip_session *session, struct pjsip_tx_data *tdata)
 {
-	struct multihomed_message_restrictions *restrictions = multihomed_get_restrictions(tdata);
+	struct filter_message_restrictions *restrictions = get_restrictions(tdata);
 
 	restrictions->disallow_from_domain_modification = !ast_strlen_zero(session->endpoint->fromdomain);
 }
 
 /*! \brief PJSIP Session Supplement for tagging messages with restrictions */
-static struct ast_sip_session_supplement multihomed_session_supplement = {
+static struct ast_sip_session_supplement filter_session_supplement = {
 	.priority = 1,
-	.outgoing_request = multihomed_session_outgoing_message,
-	.outgoing_response = multihomed_session_outgoing_message,
+	.outgoing_request = filter_session_outgoing_message,
+	.outgoing_response = filter_session_outgoing_message,
 };
 
 /*! \brief Helper function which returns a UDP transport bound to the given address and port */
-static pjsip_transport *multihomed_get_udp_transport(pj_str_t *address, int port)
+static pjsip_transport *get_udp_transport(pj_str_t *address, int port)
 {
 	struct ao2_container *transport_states = ast_sip_get_transport_states();
 	struct ast_sip_transport_state *transport_state;
@@ -121,7 +127,7 @@ static pjsip_transport *multihomed_get_udp_transport(pj_str_t *address, int port
 }
 
 /*! \brief Helper function which determines if a transport is bound to any */
-static int multihomed_bound_any(pjsip_transport *transport)
+static int is_bound_any(pjsip_transport *transport)
 {
 	pj_uint32_t loop6[4] = {0, 0, 0, 0};
 
@@ -153,37 +159,61 @@ static int multihomed_rewrite_sdp(struct pjmedia_sdp_session *sdp)
 	return 0;
 }
 
-static void sanitize_tdata(pjsip_tx_data *tdata)
+#define is_sip_uri(uri) \
+	(PJSIP_URI_SCHEME_IS_SIP(uri) || PJSIP_URI_SCHEME_IS_SIPS(uri))
+
+static void print_sanitize_debug(char *msg, pjsip_uri_context_e context, pjsip_sip_uri *uri)
+{
+#ifdef AST_DEVMODE
+	char hdrbuf[512];
+	int hdrbuf_len;
+
+	hdrbuf_len = pjsip_uri_print(context, uri, hdrbuf, 512);
+	hdrbuf[hdrbuf_len] = '\0';
+	ast_debug(2, "%s: %s\n", msg, hdrbuf);
+#endif
+}
+
+/* If in DEVMODE, prevent inlining to assist in debugging */
+#ifdef AST_DEVMODE
+#define FUNC_ATTRS __attribute__ ((noinline))
+#else
+#define FUNC_ATTRS
+#endif
+
+static void FUNC_ATTRS sanitize_tdata(pjsip_tx_data *tdata)
 {
 	static const pj_str_t x_name = { AST_SIP_X_AST_TXP, AST_SIP_X_AST_TXP_LEN };
 	pjsip_param *x_transport;
 	pjsip_sip_uri *uri;
-	pjsip_fromto_hdr *fromto;
-	pjsip_contact_hdr *contact;
 	pjsip_hdr *hdr;
 
 	if (tdata->msg->type == PJSIP_REQUEST_MSG) {
-		uri = pjsip_uri_get_uri(tdata->msg->line.req.uri);
-		x_transport = pjsip_param_find(&uri->other_param, &x_name);
-		if (x_transport) {
-			pj_list_erase(x_transport);
+		if (is_sip_uri(tdata->msg->line.req.uri)) {
+			uri = pjsip_uri_get_uri(tdata->msg->line.req.uri);
+			print_sanitize_debug("Sanitizing Request", PJSIP_URI_IN_REQ_URI, uri);
+			while ((x_transport = pjsip_param_find(&uri->other_param, &x_name))) {
+				pj_list_erase(x_transport);
+			}
 		}
 	}
 
 	for (hdr = tdata->msg->hdr.next; hdr != &tdata->msg->hdr; hdr = hdr->next) {
 		if (hdr->type == PJSIP_H_TO || hdr->type == PJSIP_H_FROM) {
-			fromto = (pjsip_fromto_hdr *) hdr;
-			uri = pjsip_uri_get_uri(fromto->uri);
-			x_transport = pjsip_param_find(&uri->other_param, &x_name);
-			if (x_transport) {
-				pj_list_erase(x_transport);
+			if (is_sip_uri(((pjsip_fromto_hdr *) hdr)->uri)) {
+				uri = pjsip_uri_get_uri(((pjsip_fromto_hdr *) hdr)->uri);
+				print_sanitize_debug("Sanitizing From/To header", PJSIP_URI_IN_FROMTO_HDR, uri);
+				while ((x_transport = pjsip_param_find(&uri->other_param, &x_name))) {
+					pj_list_erase(x_transport);
+				}
 			}
 		} else if (hdr->type == PJSIP_H_CONTACT) {
-			contact = (pjsip_contact_hdr *) hdr;
-			uri = pjsip_uri_get_uri(contact->uri);
-			x_transport = pjsip_param_find(&uri->other_param, &x_name);
-			if (x_transport) {
-				pj_list_erase(x_transport);
+			if (!((pjsip_contact_hdr *) hdr)->star && is_sip_uri(((pjsip_contact_hdr *) hdr)->uri)) {
+				uri = pjsip_uri_get_uri(((pjsip_contact_hdr *) hdr)->uri);
+				print_sanitize_debug("Sanitizing Contact header", PJSIP_URI_IN_CONTACT_HDR, uri);
+				while ((x_transport = pjsip_param_find(&uri->other_param, &x_name))) {
+					pj_list_erase(x_transport);
+				}
 			}
 		}
 	}
@@ -191,9 +221,10 @@ static void sanitize_tdata(pjsip_tx_data *tdata)
 	pjsip_tx_data_invalidate_msg(tdata);
 }
 
-static pj_status_t multihomed_on_tx_message(pjsip_tx_data *tdata)
+static pj_status_t filter_on_tx_message(pjsip_tx_data *tdata)
 {
-	struct multihomed_message_restrictions *restrictions = ast_sip_mod_data_get(tdata->mod_data, multihomed_module.id, MOD_DATA_RESTRICTIONS);
+	struct filter_message_restrictions *restrictions =
+		ast_sip_mod_data_get(tdata->mod_data, filter_module_transport.id, MOD_DATA_RESTRICTIONS);
 	pjsip_tpmgr_fla2_param prm;
 	pjsip_cseq_hdr *cseq;
 	pjsip_via_hdr *via;
@@ -205,7 +236,7 @@ static pj_status_t multihomed_on_tx_message(pjsip_tx_data *tdata)
 	pjsip_tpmgr_fla2_param_default(&prm);
 	prm.tp_type = tdata->tp_info.transport->key.type;
 	pj_strset2(&prm.dst_host, tdata->tp_info.dst_name);
-	prm.local_if = PJ_TRUE;
+	prm.local_if = is_bound_any(tdata->tp_info.transport);
 
 	/* If we can't get the local address use best effort and let it pass */
 	if (pjsip_tpmgr_find_local_addr2(pjsip_endpt_get_tpmgr(ast_sip_get_pjsip_endpoint()), tdata->pool, &prm) != PJ_SUCCESS) {
@@ -226,7 +257,7 @@ static pj_status_t multihomed_on_tx_message(pjsip_tx_data *tdata)
 			tdata->tp_info.transport->key.type == PJSIP_TRANSPORT_UDP6) {
 			pjsip_transport *transport;
 
-			transport = multihomed_get_udp_transport(&prm.ret_addr, prm.ret_port);
+			transport = get_udp_transport(&prm.ret_addr, prm.ret_port);
 
 			if (transport) {
 				tdata->tp_info.transport = transport;
@@ -234,7 +265,7 @@ static pj_status_t multihomed_on_tx_message(pjsip_tx_data *tdata)
 		}
 
 		/* If the chosen transport is not bound to any we can't use the source address as it won't get back to us */
-		if (!multihomed_bound_any(tdata->tp_info.transport)) {
+		if (!is_bound_any(tdata->tp_info.transport)) {
 			pj_strassign(&prm.ret_addr, &tdata->tp_info.transport->local_name.host);
 		}
 	} else {
@@ -253,7 +284,7 @@ static pj_status_t multihomed_on_tx_message(pjsip_tx_data *tdata)
 			/* prm.ret_addr is allocated from the tdata pool OR the transport so it is perfectly fine to just do an assignment like this */
 			pj_strassign(&uri->host, &prm.ret_addr);
 			uri->port = prm.ret_port;
-			ast_debug(4, "Re-wrote Contact URI host/port to %.*s:%d\n",
+			ast_debug(5, "Re-wrote Contact URI host/port to %.*s:%d (this may be re-written again later)\n",
 				(int)pj_strlen(&uri->host), pj_strbuf(&uri->host), uri->port);
 
 			if (tdata->tp_info.transport->key.type == PJSIP_TRANSPORT_UDP ||
@@ -315,7 +346,104 @@ static pj_status_t multihomed_on_tx_message(pjsip_tx_data *tdata)
 	return PJ_SUCCESS;
 }
 
-static pj_bool_t multihomed_on_rx_message(pjsip_rx_data *rdata)
+enum uri_type {
+	URI_TYPE_REQUEST = -1,
+	URI_TYPE_TO = PJSIP_H_TO,
+	URI_TYPE_FROM = PJSIP_H_FROM,
+	URI_TYPE_CONTACT = PJSIP_H_CONTACT,
+};
+
+static void print_uri_debug(enum uri_type ut, pjsip_rx_data *rdata, pjsip_hdr *hdr)
+{
+#ifdef AST_DEVMODE
+	pjsip_uri *local_uri = NULL;
+	char hdrbuf[512];
+	int hdrbuf_len;
+	char *request_uri;
+	pjsip_uri_context_e context = PJSIP_URI_IN_OTHER;
+	char header_name[32];
+
+	switch (ut) {
+	case(URI_TYPE_REQUEST):
+		context = PJSIP_URI_IN_REQ_URI;
+		strcpy(header_name, "Request"); /* Safe */
+		local_uri = rdata->msg_info.msg->line.req.uri;
+		break;
+	case(PJSIP_H_FROM):
+		strcpy(header_name, "From"); /* Safe */
+		context = PJSIP_URI_IN_FROMTO_HDR;
+		local_uri = pjsip_uri_get_uri(((pjsip_from_hdr *)hdr)->uri);
+		break;
+	case(PJSIP_H_TO):
+		strcpy(header_name, "To"); /* Safe */
+		context = PJSIP_URI_IN_FROMTO_HDR;
+		local_uri = pjsip_uri_get_uri(((pjsip_to_hdr *)hdr)->uri);
+		break;
+	case(PJSIP_H_CONTACT):
+		strcpy(header_name, "Contact"); /* Safe */
+		context = PJSIP_URI_IN_CONTACT_HDR;
+		local_uri = pjsip_uri_get_uri(((pjsip_contact_hdr *)hdr)->uri);
+		break;
+	}
+
+	hdrbuf_len = pjsip_uri_print(PJSIP_URI_IN_REQ_URI, rdata->msg_info.msg->line.req.uri, hdrbuf, 512);
+	hdrbuf[hdrbuf_len] = '\0';
+	request_uri = ast_strdupa(hdrbuf);
+	hdrbuf_len = pjsip_uri_print(context, local_uri, hdrbuf, 512);
+	hdrbuf[hdrbuf_len] = '\0';
+
+	ast_debug(2, "There was a non sip(s) URI scheme in %s URI '%s' for request '%*.*s %s'\n",
+		header_name, hdrbuf,
+		(int)rdata->msg_info.msg->line.req.method.name.slen,
+		(int)rdata->msg_info.msg->line.req.method.name.slen,
+		rdata->msg_info.msg->line.req.method.name.ptr, request_uri);
+#endif
+}
+
+static pj_bool_t on_rx_process_uris(pjsip_rx_data *rdata)
+{
+	pjsip_contact_hdr *contact = NULL;
+
+	if (rdata->msg_info.msg->type != PJSIP_REQUEST_MSG) {
+		return PJ_FALSE;
+	}
+
+	if (!is_sip_uri(rdata->msg_info.msg->line.req.uri)) {
+		print_uri_debug(URI_TYPE_REQUEST, rdata, NULL);
+		pjsip_endpt_respond_stateless(ast_sip_get_pjsip_endpoint(), rdata,
+			PJSIP_SC_UNSUPPORTED_URI_SCHEME, NULL, NULL, NULL);
+		return PJ_TRUE;
+	}
+
+	if (!is_sip_uri(rdata->msg_info.from->uri)) {
+		print_uri_debug(URI_TYPE_FROM, rdata, (pjsip_hdr *)rdata->msg_info.from);
+		pjsip_endpt_respond_stateless(ast_sip_get_pjsip_endpoint(), rdata,
+			PJSIP_SC_UNSUPPORTED_URI_SCHEME, NULL, NULL, NULL);
+		return PJ_TRUE;
+	}
+
+	if (!is_sip_uri(rdata->msg_info.to->uri)) {
+		print_uri_debug(URI_TYPE_TO, rdata, (pjsip_hdr *)rdata->msg_info.to);
+		pjsip_endpt_respond_stateless(ast_sip_get_pjsip_endpoint(), rdata,
+			PJSIP_SC_UNSUPPORTED_URI_SCHEME, NULL, NULL, NULL);
+		return PJ_TRUE;
+	}
+
+	while ((contact =
+		(pjsip_contact_hdr *) pjsip_msg_find_hdr(rdata->msg_info.msg, PJSIP_H_CONTACT,
+			contact ? contact->next : NULL))) {
+		if (!contact->star && !is_sip_uri(contact->uri)) {
+			print_uri_debug(URI_TYPE_CONTACT, rdata, (pjsip_hdr *)contact);
+			pjsip_endpt_respond_stateless(ast_sip_get_pjsip_endpoint(), rdata,
+				PJSIP_SC_UNSUPPORTED_URI_SCHEME, NULL, NULL, NULL);
+			return PJ_TRUE;
+		}
+	}
+
+	return PJ_FALSE;
+}
+
+static pj_bool_t on_rx_process_symmetric_transport(pjsip_rx_data *rdata)
 {
 	pjsip_contact_hdr *contact;
 	pjsip_sip_uri *uri;
@@ -358,29 +486,45 @@ static pj_bool_t multihomed_on_rx_message(pjsip_rx_data *rdata)
 	return PJ_FALSE;
 }
 
-void ast_res_pjsip_cleanup_message_ip_updater(void)
+static pj_bool_t filter_on_rx_message(pjsip_rx_data *rdata)
 {
-	ast_sip_unregister_service(&multihomed_module);
-	ast_sip_unregister_supplement(&multihomed_supplement);
-	ast_sip_session_unregister_supplement(&multihomed_session_supplement);
+	pj_bool_t rc;
+
+	rc = on_rx_process_uris(rdata);
+	if (rc == PJ_TRUE) {
+		return rc;
+	}
+
+	rc = on_rx_process_symmetric_transport(rdata);
+	if (rc == PJ_TRUE) {
+		return rc;
+	}
+
+	return PJ_FALSE;
 }
 
-int ast_res_pjsip_init_message_ip_updater(void)
+void ast_res_pjsip_cleanup_message_filter(void)
 {
-	if (ast_sip_session_register_supplement(&multihomed_session_supplement)) {
-		ast_log(LOG_ERROR, "Could not register multihomed session supplement for outgoing requests\n");
+	internal_sip_unregister_service(&filter_module_tsx);
+	internal_sip_unregister_service(&filter_module_transport);
+	internal_sip_unregister_supplement(&filter_supplement);
+	internal_sip_session_unregister_supplement(&filter_session_supplement);
+}
+
+int ast_res_pjsip_init_message_filter(void)
+{
+	internal_sip_session_register_supplement(&filter_session_supplement);
+	internal_sip_register_supplement(&filter_supplement);
+
+	if (internal_sip_register_service(&filter_module_transport)) {
+		ast_log(LOG_ERROR, "Could not register message filter module for incoming and outgoing requests\n");
+		ast_res_pjsip_cleanup_message_filter();
 		return -1;
 	}
 
-	if (ast_sip_register_supplement(&multihomed_supplement)) {
-		ast_log(LOG_ERROR, "Could not register multihomed supplement for outgoing requests\n");
-		ast_res_pjsip_cleanup_message_ip_updater();
-		return -1;
-	}
-
-	if (ast_sip_register_service(&multihomed_module)) {
-		ast_log(LOG_ERROR, "Could not register multihomed module for incoming and outgoing requests\n");
-		ast_res_pjsip_cleanup_message_ip_updater();
+	if (internal_sip_register_service(&filter_module_tsx)) {
+		ast_log(LOG_ERROR, "Could not register message filter module for incoming and outgoing requests\n");
+		ast_res_pjsip_cleanup_message_filter();
 		return -1;
 	}
 

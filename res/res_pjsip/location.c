@@ -71,16 +71,17 @@ static void aor_deleted_observer(const void *object)
 {
 	const struct ast_sip_aor *aor = object;
 	const char *aor_id = ast_sorcery_object_get_id(object);
-	/* Give enough space for ^ at the beginning and ;@ at the end, since that is our object naming scheme */
-	char regex[strlen(aor_id) + 4];
+	/* Give enough space for ;@ at the end, since that is our object naming scheme */
+	size_t prefix_len = strlen(aor_id) + sizeof(";@") - 1;
+	char prefix[prefix_len + 1];
 	struct ao2_container *contacts;
 
 	if (aor->permanent_contacts) {
 		ao2_callback(aor->permanent_contacts, OBJ_NODATA | OBJ_MULTIPLE | OBJ_UNLINK, destroy_contact, NULL);
 	}
 
-	snprintf(regex, sizeof(regex), "^%s;@", aor_id);
-	if (!(contacts = ast_sorcery_retrieve_by_regex(ast_sip_get_sorcery(), "contact", regex))) {
+	sprintf(prefix, "%s;@", aor_id); /* Safe */
+	if (!(contacts = ast_sorcery_retrieve_by_prefix(ast_sip_get_sorcery(), "contact", prefix, prefix_len))) {
 		return;
 	}
 	/* Destroy any contacts that may still exist that were made for this AoR */
@@ -171,12 +172,36 @@ static int contact_link_static(void *obj, void *arg, int flags)
 	return 0;
 }
 
+/*! \brief Internal callback function which removes any contact which is unreachable */
+static int contact_remove_unreachable(void *obj, void *arg, int flags)
+{
+	struct ast_sip_contact *contact = obj;
+	struct ast_sip_contact_status *status;
+	int unreachable;
+
+	status = ast_res_pjsip_find_or_create_contact_status(contact);
+	if (!status) {
+		return 0;
+	}
+
+	unreachable = (status->status == UNAVAILABLE);
+	ao2_ref(status, -1);
+
+	return unreachable ? CMP_MATCH : 0;
+}
+
 struct ast_sip_contact *ast_sip_location_retrieve_first_aor_contact(const struct ast_sip_aor *aor)
+{
+	return ast_sip_location_retrieve_first_aor_contact_filtered(aor, AST_SIP_CONTACT_FILTER_DEFAULT);
+}
+
+struct ast_sip_contact *ast_sip_location_retrieve_first_aor_contact_filtered(const struct ast_sip_aor *aor,
+	unsigned int flags)
 {
 	struct ao2_container *contacts;
 	struct ast_sip_contact *contact = NULL;
 
-	contacts = ast_sip_location_retrieve_aor_contacts(aor);
+	contacts = ast_sip_location_retrieve_aor_contacts_filtered(aor, flags);
 	if (contacts && ao2_container_count(contacts)) {
 		/* Get the first AOR contact in the container. */
 		contact = ao2_callback(contacts, 0, NULL, NULL);
@@ -187,13 +212,19 @@ struct ast_sip_contact *ast_sip_location_retrieve_first_aor_contact(const struct
 
 struct ao2_container *ast_sip_location_retrieve_aor_contacts_nolock(const struct ast_sip_aor *aor)
 {
-	/* Give enough space for ^ at the beginning and ;@ at the end, since that is our object naming scheme */
-	char regex[strlen(ast_sorcery_object_get_id(aor)) + 4];
+	return ast_sip_location_retrieve_aor_contacts_nolock_filtered(aor, AST_SIP_CONTACT_FILTER_DEFAULT);
+}
+
+struct ao2_container *ast_sip_location_retrieve_aor_contacts_nolock_filtered(const struct ast_sip_aor *aor,
+	unsigned int flags)
+{
+	/* Give enough space for ;@ at the end, since that is our object naming scheme */
+	size_t prefix_len = strlen(ast_sorcery_object_get_id(aor)) + sizeof(";@") - 1;
+	char prefix[prefix_len + 1];
 	struct ao2_container *contacts;
 
-	snprintf(regex, sizeof(regex), "^%s;@", ast_sorcery_object_get_id(aor));
-
-	if (!(contacts = ast_sorcery_retrieve_by_regex(ast_sip_get_sorcery(), "contact", regex))) {
+	sprintf(prefix, "%s;@", ast_sorcery_object_get_id(aor)); /* Safe */
+	if (!(contacts = ast_sorcery_retrieve_by_prefix(ast_sip_get_sorcery(), "contact", prefix, prefix_len))) {
 		return NULL;
 	}
 
@@ -205,10 +236,20 @@ struct ao2_container *ast_sip_location_retrieve_aor_contacts_nolock(const struct
 		ao2_callback(aor->permanent_contacts, OBJ_NODATA, contact_link_static, contacts);
 	}
 
+	if (flags & AST_SIP_CONTACT_FILTER_REACHABLE) {
+		ao2_callback(contacts, OBJ_NODATA | OBJ_MULTIPLE | OBJ_UNLINK, contact_remove_unreachable, NULL);
+	}
+
 	return contacts;
 }
 
 struct ao2_container *ast_sip_location_retrieve_aor_contacts(const struct ast_sip_aor *aor)
+{
+	return ast_sip_location_retrieve_aor_contacts_filtered(aor, AST_SIP_CONTACT_FILTER_DEFAULT);
+}
+
+struct ao2_container *ast_sip_location_retrieve_aor_contacts_filtered(const struct ast_sip_aor *aor,
+	unsigned int flags)
 {
 	struct ao2_container *contacts;
 	struct ast_named_lock *lock;
@@ -219,15 +260,22 @@ struct ao2_container *ast_sip_location_retrieve_aor_contacts(const struct ast_si
 	}
 
 	ao2_lock(lock);
-	contacts = ast_sip_location_retrieve_aor_contacts_nolock(aor);
+	contacts = ast_sip_location_retrieve_aor_contacts_nolock_filtered(aor, flags);
 	ao2_unlock(lock);
 	ast_named_lock_put(lock);
 
 	return contacts;
 }
 
+
 void ast_sip_location_retrieve_contact_and_aor_from_list(const char *aor_list, struct ast_sip_aor **aor,
 	struct ast_sip_contact **contact)
+{
+	ast_sip_location_retrieve_contact_and_aor_from_list_filtered(aor_list, AST_SIP_CONTACT_FILTER_DEFAULT, aor, contact);
+}
+
+void ast_sip_location_retrieve_contact_and_aor_from_list_filtered(const char *aor_list, unsigned int flags,
+	struct ast_sip_aor **aor, struct ast_sip_contact **contact)
 {
 	char *aor_name;
 	char *rest;
@@ -247,7 +295,7 @@ void ast_sip_location_retrieve_contact_and_aor_from_list(const char *aor_list, s
 		if (!(*aor)) {
 			continue;
 		}
-		*contact = ast_sip_location_retrieve_first_aor_contact(*aor);
+		*contact = ast_sip_location_retrieve_first_aor_contact_filtered(*aor, flags);
 		/* If a valid contact is available use its URI for dialing */
 		if (*contact) {
 			break;
@@ -309,13 +357,12 @@ struct ast_sip_contact *ast_sip_location_retrieve_contact(const char *contact_na
 	return ast_sorcery_retrieve_by_id(ast_sip_get_sorcery(), "contact", contact_name);
 }
 
-int ast_sip_location_add_contact_nolock(struct ast_sip_aor *aor, const char *uri,
-		struct timeval expiration_time, const char *path_info, const char *user_agent,
-		const char *via_addr, int via_port, const char *call_id,
-		struct ast_sip_endpoint *endpoint)
+struct ast_sip_contact *ast_sip_location_create_contact(struct ast_sip_aor *aor,
+	const char *uri, struct timeval expiration_time, const char *path_info,
+	const char *user_agent, const char *via_addr, int via_port, const char *call_id,
+	int prune_on_boot, struct ast_sip_endpoint *endpoint)
 {
 	struct ast_sip_contact *contact;
-	int res;
 	char name[MAX_OBJECT_FIELD * 2 + 3];
 	char hash[33];
 
@@ -324,7 +371,7 @@ int ast_sip_location_add_contact_nolock(struct ast_sip_aor *aor, const char *uri
 
 	contact = ast_sorcery_alloc(ast_sip_get_sorcery(), "contact", name);
 	if (!contact) {
-		return -1;
+		return NULL;
 	}
 
 	ast_string_field_set(contact, uri, uri);
@@ -358,14 +405,30 @@ int ast_sip_location_add_contact_nolock(struct ast_sip_aor *aor, const char *uri
 	}
 
 	contact->endpoint = ao2_bump(endpoint);
-
 	if (endpoint) {
 		ast_string_field_set(contact, endpoint_name, ast_sorcery_object_get_id(endpoint));
 	}
 
-	res = ast_sorcery_create(ast_sip_get_sorcery(), contact);
-	ao2_ref(contact, -1);
-	return res;
+	contact->prune_on_boot = prune_on_boot;
+
+	if (ast_sorcery_create(ast_sip_get_sorcery(), contact)) {
+		ao2_ref(contact, -1);
+		return NULL;
+	}
+	return contact;
+}
+
+int ast_sip_location_add_contact_nolock(struct ast_sip_aor *aor, const char *uri,
+		struct timeval expiration_time, const char *path_info, const char *user_agent,
+		const char *via_addr, int via_port, const char *call_id,
+		struct ast_sip_endpoint *endpoint)
+{
+	struct ast_sip_contact *contact;
+
+	contact = ast_sip_location_create_contact(aor, uri, expiration_time, path_info,
+		user_agent, via_addr, via_port, call_id, 0, endpoint);
+	ao2_cleanup(contact);
+	return contact ? 0 : -1;
 }
 
 int ast_sip_location_add_contact(struct ast_sip_aor *aor, const char *uri,
@@ -399,6 +462,32 @@ int ast_sip_location_update_contact(struct ast_sip_contact *contact)
 int ast_sip_location_delete_contact(struct ast_sip_contact *contact)
 {
 	return ast_sorcery_delete(ast_sip_get_sorcery(), contact);
+}
+
+static int prune_boot_contacts_cb(void *obj, void *arg, int flags)
+{
+	struct ast_sip_contact *contact = obj;
+
+	if (contact->prune_on_boot
+		&& !strcmp(contact->reg_server, ast_config_AST_SYSTEM_NAME ?: "")) {
+		ast_verb(3, "Removed contact '%s' from AOR '%s' due to system boot\n",
+			contact->uri, contact->aor);
+		ast_sip_location_delete_contact(contact);
+	}
+
+	return 0;
+}
+
+void ast_sip_location_prune_boot_contacts(void)
+{
+	struct ao2_container *contacts;
+
+	contacts = ast_sorcery_retrieve_by_fields(ast_sip_get_sorcery(), "contact",
+		AST_RETRIEVE_FLAG_MULTIPLE | AST_RETRIEVE_FLAG_ALL, NULL);
+	if (contacts) {
+		ao2_callback(contacts, 0, prune_boot_contacts_cb, NULL);
+		ao2_ref(contacts, -1);
+	}
 }
 
 /*! \brief Custom handler for translating from a string timeval to actual structure */
@@ -532,7 +621,7 @@ static int permanent_uri_handler(const struct aco_option *opt, struct ast_variab
 		}
 
 		if (ast_sip_validate_uri_length(contact_uri)) {
-			ast_log(LOG_ERROR, "Contact uri or hostname length exceeds pjproject limit: %s\n", contact_uri);
+			ast_log(LOG_ERROR, "Contact uri or hostname length exceeds pjproject limit or is not a sip(s) uri: %s\n", contact_uri);
 			return -1;
 		}
 
@@ -1138,6 +1227,11 @@ static int contact_apply_handler(const struct ast_sorcery *sorcery, void *object
 	struct ast_sip_contact_status *status;
 	struct ast_sip_contact *contact = object;
 
+	if (ast_strlen_zero(contact->uri)) {
+		ast_log(LOG_ERROR, "A URI on dynamic contact '%s' is empty\n",
+			ast_sorcery_object_get_id(contact));
+		return -1;
+	}
 	status = ast_res_pjsip_find_or_create_contact_status(contact);
 	ao2_cleanup(status);
 
@@ -1181,6 +1275,7 @@ int ast_sip_initialize_sorcery_location(void)
 	ast_sorcery_object_field_register(sorcery, "contact", "via_addr", "", OPT_STRINGFIELD_T, 0, STRFLDSET(struct ast_sip_contact, via_addr));
 	ast_sorcery_object_field_register(sorcery, "contact", "via_port", "0", OPT_UINT_T, 0, FLDSET(struct ast_sip_contact, via_port));
 	ast_sorcery_object_field_register(sorcery, "contact", "call_id", "", OPT_STRINGFIELD_T, 0, STRFLDSET(struct ast_sip_contact, call_id));
+	ast_sorcery_object_field_register(sorcery, "contact", "prune_on_boot", "no", OPT_YESNO_T, 1, FLDSET(struct ast_sip_contact, prune_on_boot));
 
 	ast_sorcery_object_field_register(sorcery, "aor", "type", "", OPT_NOOP_T, 0, 0);
 	ast_sorcery_object_field_register(sorcery, "aor", "minimum_expiration", "60", OPT_UINT_T, 0, FLDSET(struct ast_sip_aor, minimum_expiration));

@@ -52,7 +52,7 @@
  */
 
 /*** MODULEINFO
-	<use type="external">crypto</use>
+	<use type="module">res_crypto</use>
 	<support_level>core</support_level>
  ***/
 
@@ -8571,7 +8571,7 @@ static int try_transfer(struct chan_iax2_pvt *pvt, struct iax_ies *ies)
 {
 	int newcall = 0;
 	struct iax_ie_data ied;
-	struct ast_sockaddr new;
+	struct ast_sockaddr new = { {0,} };
 
 	memset(&ied, 0, sizeof(ied));
 	if (!ast_sockaddr_isnull(&ies->apparent_addr)) {
@@ -13084,7 +13084,7 @@ static struct iax2_peer *build_peer(const char *name, struct ast_variable *v, st
 		ast_free_acl_list(oldacl);
 	}
 
-	if (!ast_strlen_zero(peer->mailbox)) {
+	if (!ast_strlen_zero(peer->mailbox) && !peer->mwi_event_sub) {
 		struct stasis_topic *mailbox_specific_topic;
 
 		mailbox_specific_topic = ast_mwi_topic(peer->mailbox);

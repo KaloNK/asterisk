@@ -1113,6 +1113,8 @@ static int control_streamfile(struct ast_channel *chan,
 		if (!strcasecmp(end, ":end")) {
 			*end = '\0';
 			end++;
+		} else {
+			end = NULL;
 		}
 	}
 
@@ -3069,19 +3071,32 @@ int ast_app_parse_timelen(const char *timestr, int *result, enum ast_timelen uni
 		case 'h':
 		case 'H':
 			unit = TIMELEN_HOURS;
+			if (u[1] != '\0') {
+				return -1;
+			}
 			break;
 		case 's':
 		case 'S':
 			unit = TIMELEN_SECONDS;
+			if (u[1] != '\0') {
+				return -1;
+			}
 			break;
 		case 'm':
 		case 'M':
 			if (toupper(u[1]) == 'S') {
 				unit = TIMELEN_MILLISECONDS;
+				if (u[2] != '\0') {
+					return -1;
+				}
 			} else if (u[1] == '\0') {
 				unit = TIMELEN_MINUTES;
+			} else {
+				return -1;
 			}
 			break;
+		default:
+			return -1;
 		}
 	}
 
@@ -3134,7 +3149,7 @@ struct stasis_topic *ast_mwi_topic(const char *uniqueid)
 
 struct ast_mwi_state *ast_mwi_create(const char *mailbox, const char *context)
 {
-	RAII_VAR(struct ast_mwi_state *, mwi_state, NULL, ao2_cleanup);
+	struct ast_mwi_state *mwi_state;
 
 	ast_assert(!ast_strlen_zero(mailbox));
 
@@ -3144,6 +3159,7 @@ struct ast_mwi_state *ast_mwi_create(const char *mailbox, const char *context)
 	}
 
 	if (ast_string_field_init(mwi_state, 256)) {
+		ao2_ref(mwi_state, -1);
 		return NULL;
 	}
 	if (!ast_strlen_zero(context)) {
@@ -3152,7 +3168,6 @@ struct ast_mwi_state *ast_mwi_create(const char *mailbox, const char *context)
 		ast_string_field_set(mwi_state, uniqueid, mailbox);
 	}
 
-	ao2_ref(mwi_state, +1);
 	return mwi_state;
 }
 
@@ -3325,8 +3340,8 @@ struct stasis_message *ast_mwi_blob_create(struct ast_mwi_state *mwi_state,
 					       struct stasis_message_type *message_type,
 					       struct ast_json *blob)
 {
-	RAII_VAR(struct ast_mwi_blob *, obj, NULL, ao2_cleanup);
-	RAII_VAR(struct stasis_message *, msg, NULL, ao2_cleanup);
+	struct ast_mwi_blob *obj;
+	struct stasis_message *msg;
 
 	ast_assert(blob != NULL);
 
@@ -3345,11 +3360,8 @@ struct stasis_message *ast_mwi_blob_create(struct ast_mwi_state *mwi_state,
 
 	/* This is not a normal MWI event.  Only used by the MinivmNotify app. */
 	msg = stasis_message_create(message_type, obj);
-	if (!msg) {
-		return NULL;
-	}
+	ao2_ref(obj, -1);
 
-	ao2_ref(msg, +1);
 	return msg;
 }
 

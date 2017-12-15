@@ -123,6 +123,7 @@ References:
 #ifndef _ASTERISK_CHANNEL_H
 #define _ASTERISK_CHANNEL_H
 
+#include "asterisk/alertpipe.h"
 #include "asterisk/abstract_jb.h"
 #include "asterisk/astobj2.h"
 #include "asterisk/poll-compat.h"
@@ -4223,12 +4224,6 @@ struct ast_namedgroups *ast_channel_named_pickupgroups(const struct ast_channel 
 void ast_channel_named_pickupgroups_set(struct ast_channel *chan, struct ast_namedgroups *value);
 
 /* Alertpipe accessors--the "internal" functions for channel.c use only */
-typedef enum {
-	AST_ALERT_READ_SUCCESS = 0,
-	AST_ALERT_NOT_READABLE,
-	AST_ALERT_READ_FAIL,
-	AST_ALERT_READ_FATAL,
-} ast_alert_status_t;
 int ast_channel_alert_write(struct ast_channel *chan);
 int ast_channel_alert_writable(struct ast_channel *chan);
 ast_alert_status_t ast_channel_internal_alert_flush(struct ast_channel *chan);
@@ -4336,6 +4331,31 @@ int ast_channel_dialed_causes_add(const struct ast_channel *chan, const struct a
 void ast_channel_dialed_causes_clear(const struct ast_channel *chan);
 
 struct ast_flags *ast_channel_flags(struct ast_channel *chan);
+
+/*!
+ * \since 13.17.0
+ * \brief Set a flag on a channel
+ *
+ * \param chan The channel to set the flag on
+ * \param flag The flag to set
+ *
+ * \note This will lock the channel internally. If the channel is already
+ * locked it is still safe to call.
+ */
+
+void ast_channel_set_flag(struct ast_channel *chan, unsigned int flag);
+
+/*!
+ * \since 13.17.0
+ * \param Clear a flag on a channel
+ *
+ * \param chan The channel to clear the flag from
+ * \param flag The flag to clear
+ *
+ * \note This will lock the channel internally. If the channel is already
+ * locked it is still safe to call.
+ */
+void ast_channel_clear_flag(struct ast_channel *chan, unsigned int flag);
 
 /*!
  * \since 12.4.0
@@ -4510,6 +4530,9 @@ struct ast_bridge_channel *ast_channel_get_bridge_channel(struct ast_channel *ch
  * it cannot be used any further. Always use the returned channel instead.
  *
  * \note absolutely _NO_ channel locks should be held before calling this function.
+ *
+ * \note The dialplan location on the returned channel is where the channel
+ * should be started in the dialplan if it is returned to it.
  *
  * \param yankee The channel to gain control of
  * \retval NULL Could not gain control of the channel

@@ -69,8 +69,8 @@ static enum pjsip_status_code check_content_type(const pjsip_rx_data *rdata)
 			&rdata->msg_info.msg->body->content_type, "text", "plain");
 	} else {
 		res = rdata->msg_info.ctype &&
-			!pj_strcmp2(&rdata->msg_info.ctype->media.type, "text") &&
-			!pj_strcmp2(&rdata->msg_info.ctype->media.subtype, "plain");
+			ast_sip_is_content_type(
+				&rdata->msg_info.ctype->media, "text", "plain");
 	}
 
 	return res ? PJSIP_SC_OK : PJSIP_SC_UNSUPPORTED_MEDIA_TYPE;
@@ -512,7 +512,7 @@ static enum pjsip_status_code rx_data_to_ast_msg(pjsip_rx_data *rdata, struct as
 	buf[size] = '\0';
 	res |= ast_msg_set_from(msg, "%s", buf);
 
-	field = pj_sockaddr_print(&rdata->pkt_info.src_addr, buf, sizeof(buf) - 1, 1);
+	field = pj_sockaddr_print(&rdata->pkt_info.src_addr, buf, sizeof(buf) - 1, 3);
 	res |= ast_msg_set_var(msg, "PJSIP_RECVADDR", field);
 
 	switch (rdata->tp_info.transport->key.type) {

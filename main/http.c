@@ -451,9 +451,12 @@ void ast_http_send(struct ast_tcptls_session_instance *ser,
 	struct timeval now = ast_tvnow();
 	struct ast_tm tm;
 	char timebuf[80];
+	char buf[256];
+	int len;
 	int content_length = 0;
 	int close_connection;
 	struct ast_str *server_header_field = ast_str_create(MAX_SERVER_NAME_LENGTH);
+	int send_content;
 
 	if (!ser || !ser->f || !server_header_field) {
 		/* The connection is not open. */
@@ -504,8 +507,10 @@ void ast_http_send(struct ast_tcptls_session_instance *ser,
 		lseek(fd, 0, SEEK_SET);
 	}
 
+	send_content = method != AST_HTTP_HEAD || status_code >= 400;
+
 	/* send http header */
-	fprintf(ser->f,
+	if (fprintf(ser->f,
 		"HTTP/1.1 %d %s\r\n"
 		"%s"
 		"Date: %s\r\n"
@@ -513,35 +518,30 @@ void ast_http_send(struct ast_tcptls_session_instance *ser,
 		"%s"
 		"%s"
 		"Content-Length: %d\r\n"
-		"\r\n",
+		"\r\n"
+		"%s",
 		status_code, status_title ? status_title : "OK",
 		ast_str_buffer(server_header_field),
 		timebuf,
 		close_connection ? "Connection: close\r\n" : "",
 		static_content ? "" : "Cache-Control: no-cache, no-store\r\n",
 		http_header ? ast_str_buffer(http_header) : "",
-		content_length
-		);
-
-	/* send content */
-	if (method != AST_HTTP_HEAD || status_code >= 400) {
-		if (out && ast_str_strlen(out)) {
-			if (fwrite(ast_str_buffer(out), ast_str_strlen(out), 1, ser->f) != 1) {
-				ast_log(LOG_ERROR, "fwrite() failed: %s\n", strerror(errno));
+		content_length,
+		send_content && out && ast_str_strlen(out) ? ast_str_buffer(out) : ""
+		) <= 0) {
+		ast_debug(1, "fprintf() failed: %s\n", strerror(errno));
+		close_connection = 1;
+	} else if (send_content && fd) {
+		/* send file content */
+		while ((len = read(fd, buf, sizeof(buf))) > 0) {
+			/*
+			 * NOTE: Because ser->f is a non-standard FILE *, fwrite() will probably not
+			 * behave exactly as documented.
+			 */
+			if (fwrite(buf, len, 1, ser->f) != 1) {
+				ast_debug(1, "fwrite() failed: %s\n", strerror(errno));
 				close_connection = 1;
-			}
-		}
-
-		if (fd) {
-			char buf[256];
-			int len;
-
-			while ((len = read(fd, buf, sizeof(buf))) > 0) {
-				if (fwrite(buf, len, 1, ser->f) != 1) {
-					ast_log(LOG_WARNING, "fwrite() failed: %s\n", strerror(errno));
-					close_connection = 1;
-					break;
-				}
+				break;
 			}
 		}
 	}
@@ -923,6 +923,11 @@ static int http_body_read_contents(struct ast_tcptls_session_instance *ser, char
 {
 	int res;
 
+	/*
+	 * NOTE: Because ser->f is a non-standard FILE *, fread() does not behave as
+	 * documented.
+	 */
+
 	/* Stay in fread until get all the expected data or timeout. */
 	res = fread(buf, length, 1, ser->f);
 	if (res < 1) {
@@ -949,6 +954,11 @@ static int http_body_discard_contents(struct ast_tcptls_session_instance *ser, i
 {
 	int res;
 	char buf[MAX_HTTP_LINE_LENGTH];/* Discard buffer */
+
+	/*
+	 * NOTE: Because ser->f is a non-standard FILE *, fread() does not behave as
+	 * documented.
+	 */
 
 	/* Stay in fread until get all the expected data or timeout. */
 	while (sizeof(buf) < length) {
@@ -1065,6 +1075,11 @@ static int http_body_check_chunk_sync(struct ast_tcptls_session_instance *ser)
 {
 	int res;
 	char chunk_sync[2];
+
+	/*
+	 * NOTE: Because ser->f is a non-standard FILE *, fread() does not behave as
+	 * documented.
+	 */
 
 	/* Stay in fread until get the expected CRLF or timeout. */
 	res = fread(chunk_sync, sizeof(chunk_sync), 1, ser->f);
@@ -1940,9 +1955,7 @@ static void *httpd_helper_thread(void *data)
 	}
 
 	/* make sure socket is non-blocking */
-	flags = fcntl(ser->fd, F_GETFL);
-	flags |= O_NONBLOCK;
-	fcntl(ser->fd, F_SETFL, flags);
+	ast_fd_set_flags(ser->fd, O_NONBLOCK);
 
 	/* Setup HTTP worker private data to keep track of request body reading. */
 	ao2_cleanup(ser->private_data);

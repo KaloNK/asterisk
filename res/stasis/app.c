@@ -591,6 +591,7 @@ static int message_received_handler(const char *endpoint_id, struct ast_json *js
 {
 	RAII_VAR(struct ast_endpoint_snapshot *, snapshot, NULL, ao2_cleanup);
 	struct ast_json *json_endpoint;
+	struct ast_json *message;
 	struct stasis_app *app = pvt;
 	char *tech;
 	char *resource;
@@ -616,11 +617,15 @@ static int message_received_handler(const char *endpoint_id, struct ast_json *js
 		return -1;
 	}
 
-	app_send(app, ast_json_pack("{s: s, s: o, s: o, s: o}",
+	message = ast_json_pack("{s: s, s: o, s: o, s: o}",
 		"type", "TextMessageReceived",
 		"timestamp", ast_json_timeval(ast_tvnow(), NULL),
 		"endpoint", json_endpoint,
-		"message", ast_json_ref(json_msg)));
+		"message", ast_json_ref(json_msg));
+	if (message) {
+		app_send(app, message);
+		ast_json_unref(message);
+	}
 
 	return 0;
 }
@@ -874,9 +879,21 @@ int stasis_app_get_debug(struct stasis_app *app)
 
 int stasis_app_get_debug_by_name(const char *app_name)
 {
-	RAII_VAR(struct stasis_app *, app, stasis_app_get_by_name(app_name), ao2_cleanup);
+	int debug_enabled = 0;
 
-	return (app ? app->debug : 0) || global_debug;
+	if (global_debug) {
+		debug_enabled = 1;
+	} else {
+		struct stasis_app *app = stasis_app_get_by_name(app_name);
+
+		if (app) {
+			if (app->debug) {
+				debug_enabled = 1;
+			}
+			ao2_ref(app, -1);
+		}
+	}
+	return debug_enabled;
 }
 
 void stasis_app_set_global_debug(int debug)
