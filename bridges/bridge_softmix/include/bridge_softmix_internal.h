@@ -167,6 +167,8 @@ struct softmix_channel {
 	short our_buf[MAX_DATALEN];
 	/*! Data pertaining to talker mode for video conferencing */
 	struct video_follow_talker_data video_talker;
+	/*! The ideal stream topology for the channel */
+	struct ast_stream_topology *topology;
 };
 
 struct softmix_bridge_data {
@@ -198,6 +200,8 @@ struct softmix_bridge_data {
 	 * (does not guarantee success)
 	 */
 	unsigned int binaural_init;
+	/*! The last time a video update was sent into the bridge */
+	struct timeval last_video_update;
 };
 
 struct softmix_mixing_array {

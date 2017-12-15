@@ -766,6 +766,7 @@ static struct ast_bridge *bridge_create_common(const char *type, const char *nam
 	int flags = AST_BRIDGE_FLAG_MERGE_INHIBIT_FROM | AST_BRIDGE_FLAG_MERGE_INHIBIT_TO
 		| AST_BRIDGE_FLAG_SWAP_INHIBIT_FROM | AST_BRIDGE_FLAG_SWAP_INHIBIT_TO
 		| AST_BRIDGE_FLAG_TRANSFER_BRIDGE_ONLY;
+	enum ast_bridge_video_mode_type video_mode = AST_BRIDGE_VIDEO_MODE_TALKER_SRC;
 
 	if (invisible) {
 		flags |= AST_BRIDGE_FLAG_INVISIBLE;
@@ -782,7 +783,15 @@ static struct ast_bridge *bridge_create_common(const char *type, const char *nam
 		} else if (!strcmp(requested_type, "dtmf_events") ||
 			!strcmp(requested_type, "proxy_media")) {
 			capabilities &= ~AST_BRIDGE_CAPABILITY_NATIVE;
+		} else if (!strcmp(requested_type, "video_sfu")) {
+			video_mode = AST_BRIDGE_VIDEO_MODE_SFU;
 		}
+	}
+
+	/* For an SFU video bridge we ensure it always remains in multimix for the best experience. */
+	if (video_mode == AST_BRIDGE_VIDEO_MODE_SFU) {
+		capabilities = AST_BRIDGE_CAPABILITY_MULTIMIX;
+		flags &= ~AST_BRIDGE_FLAG_SMART;
 	}
 
 	if (!capabilities
@@ -794,7 +803,15 @@ static struct ast_bridge *bridge_create_common(const char *type, const char *nam
 
 	bridge = bridge_stasis_new(capabilities, flags, name, id);
 	if (bridge) {
-		ast_bridge_set_talker_src_video_mode(bridge);
+		if (video_mode == AST_BRIDGE_VIDEO_MODE_SFU) {
+			ast_bridge_set_sfu_video_mode(bridge);
+			/* We require a minimum 5 seconds between video updates to stop floods from clients,
+			 * this should rarely be changed but should become configurable in the future.
+			 */
+			ast_bridge_set_video_update_discard(bridge, 5);
+		} else {
+			ast_bridge_set_talker_src_video_mode(bridge);
+		}
 		if (!ao2_link(app_bridges, bridge)) {
 			ast_bridge_destroy(bridge, 0);
 			bridge = NULL;
@@ -1069,8 +1086,18 @@ static void channel_stolen_cb(void *data, struct ast_channel *old_chan, struct a
 {
 	struct stasis_app_control *control;
 
-	/* find control */
-	control = ao2_callback(app_controls, 0, masq_match_cb, old_chan);
+	/*
+	 * At this point, old_chan is the channel pointer that is in Stasis() and
+	 * has the unknown channel's name in it while new_chan is the channel pointer
+	 * that is not in Stasis(), but has the guts of the channel that Stasis() knows
+	 * about.
+	 *
+	 * Find and unlink control since the channel has a new name/uniqueid
+	 * and its hash has changed.  Since the channel is leaving stasis don't
+	 * bother putting it back into the container.  Nobody is going to
+	 * remove it from the container later.
+	 */
+	control = ao2_callback(app_controls, OBJ_UNLINK, masq_match_cb, old_chan);
 	if (!control) {
 		ast_log(LOG_ERROR, "Could not find control for masqueraded channel\n");
 		return;
@@ -1111,8 +1138,10 @@ static void channel_replaced_cb(void *data, struct ast_channel *old_chan, struct
 		return;
 	}
 
-	/* find, unlink, and relink control since the channel has a new name and
-	 * its hash has likely changed */
+	/*
+	 * Find, unlink, and relink control since the channel has a new
+	 * name/uniqueid and its hash has changed.
+	 */
 	control = ao2_callback(app_controls, OBJ_UNLINK, masq_match_cb, new_chan);
 	if (!control) {
 		ast_log(LOG_ERROR, "Could not find control for masquerading channel\n");
@@ -2126,8 +2155,8 @@ static int load_module(void)
 	return AST_MODULE_LOAD_SUCCESS;
 }
 
-AST_MODULE_INFO(ASTERISK_GPL_KEY, AST_MODFLAG_GLOBAL_SYMBOLS, "Stasis application support",
-	.load_pri = AST_MODPRI_APP_DEPEND,
+AST_MODULE_INFO(ASTERISK_GPL_KEY, AST_MODFLAG_GLOBAL_SYMBOLS | AST_MODFLAG_LOAD_ORDER, "Stasis application support",
+	.load_pri = AST_MODPRI_APP_DEPEND - 1,
 	.support_level = AST_MODULE_SUPPORT_CORE,
 	.load = load_module,
 	.unload = unload_module,

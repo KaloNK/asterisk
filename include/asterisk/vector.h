@@ -48,6 +48,12 @@
 		size_t current;			\
 	}
 
+/*! \brief Integer vector definition */
+AST_VECTOR(ast_vector_int, int);
+
+/*! \brief String vector definition */
+AST_VECTOR(ast_vector_string, char *);
+
 /*!
  * \brief Define a vector structure with a read/write lock
  *
@@ -85,6 +91,26 @@
 		(vec)->max = 0;						\
 	}								\
 	(alloc_size == 0 || (vec)->elems != NULL) ? 0 : -1;		\
+})
+
+/*!
+ * \brief Steal the elements from a vector and reinitialize.
+ *
+ * \param vec Vector to operate on.
+ *
+ * This allows you to use vector.h to construct a list and use the
+ * data as a bare array.
+ *
+ * \note The stolen array must eventually be released using ast_free.
+ *
+ * \warning AST_VECTOR_SIZE and AST_VECTOR_MAX_SIZE are both reset
+ *          to 0.  If either are needed they must be saved to a local
+ *          variable before stealing the elements.
+ */
+#define AST_VECTOR_STEAL_ELEMENTS(vec) ({ \
+	typeof((vec)->elems) __elems = (vec)->elems; \
+	AST_VECTOR_INIT((vec), 0); \
+	(__elems); \
 })
 
 /*!
@@ -241,6 +267,29 @@
 })
 
 /*!
+ * \brief Default a vector up to size with the given value.
+ *
+ * \note If a size of 0 is given then all elements in the given vector are set.
+ * \note The vector will grow to the given size if needed.
+ *
+ * \param vec Vector to default.
+ * \param size The number of elements to default
+ * \param value The default value to set each element to
+ */
+#define AST_VECTOR_DEFAULT(vec, size, value) ({ \
+	int res = 0;							\
+	typeof((size)) __size = (size) ? (size) : AST_VECTOR_SIZE(vec);	\
+	size_t idx;							\
+	for (idx = 0; idx < __size; ++idx) {				\
+		res = AST_VECTOR_REPLACE(vec, idx, value);		\
+		if (res == -1) {					\
+			break;						\
+		}							\
+	}								\
+	res;								\
+})
+
+/*!
  * \brief Insert an element at a specific position in a vector, growing the vector if needed.
  *
  * \param vec Vector to insert into.
@@ -278,27 +327,31 @@
  * \brief Add an element into a sorted vector
  *
  * \param vec Sorted vector to add to.
- * \param elem Element to insert.
+ * \param elem Element to insert. Must not be an array type.
  * \param cmp A strcmp compatible compare function.
  *
  * \return 0 on success.
  * \return Non-zero on failure.
  *
  * \warning Use of this macro on an unsorted vector will produce unpredictable results
+ * \warning 'elem' must not be an array type so passing 'x' where 'x' is defined as
+ *          'char x[4]' will fail to compile. However casting 'x' as 'char *' does
+ *          result in a value that CAN be used.
  */
 #define AST_VECTOR_ADD_SORTED(vec, elem, cmp) ({ \
 	int res = 0; \
 	size_t __idx = (vec)->current; \
+	typeof(elem) __elem = (elem); \
 	do { \
 		if (__make_room((vec)->current, vec) != 0) { \
 			res = -1; \
 			break; \
 		} \
-		while (__idx > 0 && (cmp((vec)->elems[__idx - 1], elem) > 0)) { \
+		while (__idx > 0 && (cmp((vec)->elems[__idx - 1], __elem) > 0)) { \
 			(vec)->elems[__idx] = (vec)->elems[__idx - 1]; \
 			__idx--; \
 		} \
-		(vec)->elems[__idx] = elem; \
+		(vec)->elems[__idx] = __elem; \
 		(vec)->current++; \
 	} while (0); \
 	res; \
@@ -518,6 +571,14 @@
 #define AST_VECTOR_SIZE(vec) (vec)->current
 
 /*!
+ * \brief Get the maximum number of elements the vector can currently hold.
+ *
+ * \param vec Vector to query.
+ * \return Maximum number of elements the vector can currently hold.
+ */
+#define AST_VECTOR_MAX_SIZE(vec) (vec)->max
+
+/*!
  * \brief Reset vector.
  *
  * \param vec Vector to reset.
@@ -551,6 +612,42 @@
 	ast_assert(__idx < (vec)->current);	\
 	(vec)->elems[__idx];			\
 })
+
+/*!
+ * \brief Get the nth index from a vector that matches the given comparison
+ *
+ * \param vec Vector to get from.
+ * \param nth The nth index to find
+ * \param value Value to pass into comparator.
+ * \param cmp Comparator function/macros (called as \c cmp(elem, value))
+ *
+ * \return a pointer to the element that was found or NULL
+ */
+#define AST_VECTOR_GET_INDEX_NTH(vec, nth, value, cmp) ({ \
+	int res = -1; \
+	size_t idx; \
+	typeof(nth) __nth = (nth); \
+	typeof(value) __value = (value); \
+	for (idx = 0; idx < (vec)->current; ++idx) { \
+		if (cmp((vec)->elems[idx], __value) && !(--__nth)) {	\
+			res = (int)idx;					\
+			break; \
+		} \
+	} \
+	res; \
+})
+
+/*!
+ * \brief Get the 1st index from a vector that matches the given comparison
+ *
+ * \param vec Vector to get from.
+ * \param value Value to pass into comparator.
+ * \param cmp Comparator function/macros (called as \c cmp(elem, value))
+ *
+ * \return a pointer to the element that was found or NULL
+ */
+#define AST_VECTOR_GET_INDEX(vec, value, cmp) \
+	AST_VECTOR_GET_INDEX_NTH(vec, 1, value, cmp)
 
 /*!
  * \brief Get an element from a vector that matches the given comparison

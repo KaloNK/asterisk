@@ -137,6 +137,8 @@ enum {
 	AST_FRFLAG_HAS_TIMING_INFO = (1 << 0),
 	/*! This frame has been requeued */
 	AST_FRFLAG_REQUEUED = (1 << 1),
+	/*! This frame contains a valid sequence number */
+	AST_FRFLAG_HAS_SEQUENCE_NUMBER = (1 << 2),
 };
 
 struct ast_frame_subclass {
@@ -299,6 +301,7 @@ enum ast_control_frame_type {
 	AST_CONTROL_MASQUERADE_NOTIFY = 34,	/*!< A masquerade is about to begin/end. (Never sent as a frame but directly with ast_indicate_data().) */
 	AST_CONTROL_STREAM_TOPOLOGY_REQUEST_CHANGE = 35,    /*!< Channel indication that a stream topology change has been requested */
 	AST_CONTROL_STREAM_TOPOLOGY_CHANGED = 36,           /*!< Channel indication that a stream topology change has occurred */
+	AST_CONTROL_STREAM_TOPOLOGY_SOURCE_CHANGED = 37,    /*!< Channel indication that one of the source streams has changed its source */
 
 	/*
 	 * WARNING WARNING WARNING WARNING WARNING WARNING WARNING WARNING WARNING

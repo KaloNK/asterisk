@@ -61,6 +61,9 @@ ifeq ($(SPECIAL_TARGETS),)
                 TARGETS += source/pjsip-apps/src/python/_pjsua.so
             endif
         endif
+        ifeq ($(AST_DEVMODE),yes)
+            CF += -DPJPROJECT_BUNDLED_ASSERTIONS=yes
+        endif
         ifeq ($(findstring MALLOC_DEBUG,$(MENUSELECT_CFLAGS)),MALLOC_DEBUG)
             CF += -DMALLOC_DEBUG
             MALLOC_DEBUG_LIBS = source/pjsip-apps/lib/libasterisk_malloc_debug.a
@@ -86,18 +89,23 @@ SHELL_ECHO_PREFIX := echo '[pjproject] '
 
 _all: $(TARGETS)
 
+define tarball_exists
+	(if [ -f $(TARBALL) -a -f $(PJMD5SUM) ] ; then exit 0 ;\
+	else exit 1; fi; )
+endef
+
 define verify_tarball
 	($(SHELL_ECHO_PREFIX) Verifying $(TARBALL) &&\
-	tarball_sum=$$($(CAT) $(TARBALL) | $(MD5) | $(SED) -n -r -e "s/^([^ ]+)\s+.*/\1/gp") ;\
-	required_sum=$$($(SED) -n -r -e "s/^([^ ]+)\s+$(TARBALL_FILE)/\1/gp" $(PJMD5SUM)) ;\
-	if [ "$$tarball_sum" != "$$required_sum" ] ; then $(SHELL_ECHO_PREFIX) Verify failed ; exit 1 ;\
+	tarball_sum=$$($(CAT) $(TARBALL) | $(MD5) | $(CUT) -d' ' -f1) ;\
+	required_sum=$$($(GREP) -e $(TARBALL_FILE) $(PJMD5SUM) | $(CUT) -d' ' -f1) ;\
+	if [ -z "$$required_sum" -o "$$tarball_sum" != "$$required_sum" ] ; then $(SHELL_ECHO_PREFIX) Verify failed ; exit 1 ;\
 	else $(SHELL_ECHO_PREFIX) Verify successful ; exit 0 ; fi; )
 endef
 
 define download_from_pjproject
 	($(SHELL_ECHO_PREFIX) Downloading $(TARBALL_URL) to $(TARBALL) ;\
 	$(DOWNLOAD_TO_STDOUT) $(call DOWNLOAD_TIMEOUT,5,60) $(TARBALL_URL) > $(TARBALL) &&\
-	$(SHELL_ECHO_PREFIX) Downloading $(PJPROJECT_URL)/MD5SUM to $(PJMD5SUM) &&\
+	$(SHELL_ECHO_PREFIX) Downloading $(PJPROJECT_URL)/MD5SUM.TXT to $(PJMD5SUM) &&\
 	$(DOWNLOAD_TO_STDOUT) $(call DOWNLOAD_TIMEOUT,5,60) $(PJPROJECT_URL)/MD5SUM.TXT > $(PJMD5SUM) &&\
 	$(verify_tarball))
 endef
@@ -111,18 +119,19 @@ TARBALL_URL = $(PJPROJECT_URL)/$(TARBALL_FILE)
 PJMD5SUM = $(patsubst %.tar.bz2,%.md5,$(TARBALL))
 
 $(TARBALL): ../versions.mak
-	$(CMD_PREFIX) $(download_from_pjproject) || (rm -rf $@ ;\
+	$(CMD_PREFIX) ($(tarball_exists) && $(verify_tarball) && touch $@) || (rm -rf $@ ;\
+	$(download_from_pjproject)) || (rm -rf $@ ;\
 	$(SHELL_ECHO_PREFIX) Retrying download ; $(download_from_pjproject))
 
 source/.unpacked: $(DOWNLOAD_DIR)/pjproject-$(PJPROJECT_VERSION).tar.bz2
-	($(verify_tarball)) || (rm -rf $@ ;\
+	$(CMD_PREFIX) $(verify_tarball) || (rm -rf $@ ;\
 	$(SHELL_ECHO_PREFIX) Retrying download ; $(download_from_pjproject))
 	$(ECHO_PREFIX) Unpacking $<
 	-@rm -rf source pjproject-* >/dev/null 2>&1
 	$(CMD_PREFIX) $(TAR) -xjf $<
 	@mv pjproject-$(PJPROJECT_VERSION) source
-	$(ECHO_PREFIX) Applying patches
-	$(CMD_PREFIX) ./apply_patches $(QUIET_CONFIGURE) patches source
+	$(ECHO_PREFIX) Applying patches "$(realpath patches)" "$(realpath .)/source"
+	$(CMD_PREFIX) ./apply_patches $(QUIET_CONFIGURE) "$(realpath patches)" "$(realpath .)/source"
 	-@touch source/.unpacked
 
 source/version.mak: source/.unpacked
@@ -144,7 +153,8 @@ source/build.mak: Makefile.rules source/version.mak source/user.mak $(addprefix 
 	$(CMD_PREFIX) (cd source ; ./aconfigure $(QUIET_CONFIGURE) $(PJPROJECT_CONFIG_OPTS))
 
 build.mak: source/build.mak
-	$(CMD_PREFIX) $(SED) -r -e "/prefix|export PJ_SHARED_LIBRARIES|MACHINE_NAME|OS_NAME|HOST_NAME|CC_NAME|CROSS_COMPILE|LINUX_POLL/d" source/build.mak > build.mak
+	$(CMD_PREFIX) $(GREP) -v -e prefix -e "export PJ_SHARED_LIBRARIES" -e MACHINE_NAME \
+		-e OS_NAME -e HOST_NAME -e CC_NAME -e CROSS_COMPILE -e LINUX_POLL $< > $@
 
 configure: source/build.mak
 

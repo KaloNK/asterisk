@@ -81,6 +81,12 @@ extern "C" {
 /*! Maximum number of payload types RTP can support. */
 #define AST_RTP_MAX_PT 128
 
+/*!
+ * Last RTP payload type statically assigned, see
+ * http://www.iana.org/assignments/rtp-parameters
+ */
+#define AST_RTP_PT_LAST_STATIC 34
+
 /*! First dynamic RTP payload type */
 #define AST_RTP_PT_FIRST_DYNAMIC 96
 
@@ -114,6 +120,8 @@ enum ast_rtp_property {
 	AST_RTP_PROPERTY_STUN,
 	/*! Enable RTCP support */
 	AST_RTP_PROPERTY_RTCP,
+	/*! Enable Asymmetric RTP Codecs */
+	AST_RTP_PROPERTY_ASYMMETRIC_CODEC,
 
 	/*!
 	 * \brief Maximum number of RTP properties supported
@@ -500,6 +508,7 @@ struct ast_rtp_dtls_cfg {
 	char *cipher;                          /*!< Cipher to use */
 	char *cafile;                          /*!< Certificate authority file */
 	char *capath;                          /*!< Path to certificate authority */
+	unsigned int ephemeral_cert:1;         /*!< Whether to not to generate an ephemeral certificate - defaults to 0 (off) */
 };
 
 /*! \brief Structure that represents the optional DTLS SRTP support within an RTP engine */
@@ -593,6 +602,16 @@ struct ast_rtp_engine {
 	void (*available_formats)(struct ast_rtp_instance *instance, struct ast_format_cap *to_endpoint, struct ast_format_cap *to_asterisk, struct ast_format_cap *result);
 	/*! Callback to send CNG */
 	int (*sendcng)(struct ast_rtp_instance *instance, int level);
+	/*! Callback to retrieve local SSRC */
+	unsigned int (*ssrc_get)(struct ast_rtp_instance *instance);
+	/*! Callback to retrieve RTCP SDES CNAME */
+	const char *(*cname_get)(struct ast_rtp_instance *instance);
+	/*! Callback to bundle an RTP instance to another */
+	int (*bundle)(struct ast_rtp_instance *child, struct ast_rtp_instance *parent);
+	/*! Callback to set remote SSRC information */
+	void (*set_remote_ssrc)(struct ast_rtp_instance *instance, unsigned int ssrc);
+	/*! Callback to set the stream identifier */
+	void (*set_stream_num)(struct ast_rtp_instance *instance, int stream_num);
 	/*! Callback to pointer for optional ICE support */
 	struct ast_rtp_engine_ice *ice;
 	/*! Callback to pointer for optional DTLS SRTP support */
@@ -630,12 +649,13 @@ struct ast_rtp_glue {
 	/*!
 	 * \brief Used to prevent two channels from remotely bridging audio rtp if the channel tech has a
 	 *        reason for prohibiting it based on qualities that need to be compared from both channels.
-	 * \note This function may be NULL for a given channel driver. This should be accounted for and if that is the case, function this is not used.
+	 * \note This function may be NULL for a given channel driver. This should be accounted for and if that is the case, this function is not used.
 	 */
 	int (*allow_rtp_remote)(struct ast_channel *chan1, struct ast_rtp_instance *instance);
 	/*!
 	 * \brief Callback for retrieving the RTP instance carrying video
 	 * \note This function increases the reference count on the returned RTP instance.
+	 * \note This function may be NULL for a given channel driver. This should be accounted for and if that is the case, this function is not used.
 	 */
 	enum ast_rtp_glue_result (*get_vrtp_info)(struct ast_channel *chan, struct ast_rtp_instance **instance);
 	/*!
@@ -648,11 +668,15 @@ struct ast_rtp_glue {
 	/*!
 	 * \brief Callback for retrieving the RTP instance carrying text
 	 * \note This function increases the reference count on the returned RTP instance.
+	 * \note This function may be NULL for a given channel driver. This should be accounted for and if that is the case, this function is not used.
 	 */
 	enum ast_rtp_glue_result (*get_trtp_info)(struct ast_channel *chan, struct ast_rtp_instance **instance);
 	/*! Callback for updating the destination that the remote side should send RTP to */
 	int (*update_peer)(struct ast_channel *chan, struct ast_rtp_instance *instance, struct ast_rtp_instance *vinstance, struct ast_rtp_instance *tinstance, const struct ast_format_cap *cap, int nat_active);
-	/*! Callback for retrieving codecs that the channel can do.  Result returned in result_cap. */
+	/*!
+	 * \brief Callback for retrieving codecs that the channel can do.  Result returned in result_cap.
+	 * \note This function may be NULL for a given channel driver. This should be accounted for and if that is the case, this function is not used.
+	 */
 	void (*get_codec)(struct ast_channel *chan, struct ast_format_cap *result_cap);
 	/*! Linked list information */
 	AST_RWLIST_ENTRY(ast_rtp_glue) entry;
@@ -1497,6 +1521,20 @@ void ast_rtp_codecs_payload_formats(struct ast_rtp_codecs *codecs, struct ast_fo
 int ast_rtp_codecs_payload_code(struct ast_rtp_codecs *codecs, int asterisk_format, struct ast_format *format, int code);
 
 /*!
+ * \brief Set a payload code for use with a specific Asterisk format
+ *
+ * \param codecs Codecs structure to manipulate
+ * \param code The payload code
+ * \param format Asterisk format
+ *
+ * \retval 0 Payload was set to the given format
+ * \retval -1 Payload was in use or could not be set
+ *
+ * \since 15.0.0
+ */
+int ast_rtp_codecs_payload_set_rx(struct ast_rtp_codecs *codecs, int code, struct ast_format *format);
+
+/*!
  * \brief Retrieve a tx mapped payload type based on whether it is an Asterisk format and the code
  * \since 14.0.0
  *
@@ -2256,6 +2294,8 @@ int ast_rtp_instance_sendcng(struct ast_rtp_instance *instance, int level);
  *
  * \retval 0 Success
  * \retval non-zero Failure
+ *
+ * \note If no remote policy is provided any existing SRTP policies are left and the new local policy is added
  */
 int ast_rtp_instance_add_srtp_policy(struct ast_rtp_instance *instance, struct ast_srtp_policy* remote_policy, struct ast_srtp_policy *local_policy, int rtcp);
 
@@ -2309,6 +2349,16 @@ struct ast_rtp_engine_dtls *ast_rtp_instance_get_dtls(struct ast_rtp_instance *i
  * \retval -1 if not handled
  */
 int ast_rtp_dtls_cfg_parse(struct ast_rtp_dtls_cfg *dtls_cfg, const char *name, const char *value);
+
+/*!
+ * \brief Validates DTLS related configuration options
+ *
+ * \param dtls_cfg a DTLS configuration structure
+ *
+ * \retval 0 if valid
+ * \retval -1 if invalid
+ */
+int ast_rtp_dtls_cfg_validate(struct ast_rtp_dtls_cfg *dtls_cfg);
 
 /*!
  * \brief Copy contents of a DTLS configuration structure
@@ -2382,6 +2432,54 @@ time_t ast_rtp_instance_get_last_rx(const struct ast_rtp_instance *rtp);
  * \param time The last reception time
  */
 void ast_rtp_instance_set_last_rx(struct ast_rtp_instance *rtp, time_t time);
+
+/*!
+ * \brief Retrieve the local SSRC value that we will be using
+ *
+ * \param rtp The RTP instance
+ * \return The SSRC value
+ */
+unsigned int ast_rtp_instance_get_ssrc(struct ast_rtp_instance *rtp);
+
+/*!
+ * \brief Retrieve the CNAME used in RTCP SDES items
+ *
+ * This is a pointer directly into the RTP struct, not a copy.
+ *
+ * \param rtp The RTP instance
+ * \return the CNAME
+ */
+const char *ast_rtp_instance_get_cname(struct ast_rtp_instance *rtp);
+
+/*!
+ * \brief Request that an RTP instance be bundled with another
+ * \since 15.0.0
+ *
+ * \param child The child RTP instance
+ * \param parent The parent RTP instance the child should be bundled with
+ *
+ * \retval 0 success
+ * \retval -1 failure
+ */
+int ast_rtp_instance_bundle(struct ast_rtp_instance *child, struct ast_rtp_instance *parent);
+
+/*!
+ * \brief Set the remote SSRC for an RTP instance
+ * \since 15.0.0
+ *
+ * \param rtp The RTP instance
+ * \param ssrc The remote SSRC
+ */
+void ast_rtp_instance_set_remote_ssrc(struct ast_rtp_instance *rtp, unsigned int ssrc);
+
+/*!
+ * \brief Set the stream number for an RTP instance
+ * \since 15.0.0
+ *
+ * \param rtp The RTP instance
+ * \param stream_num The stream identifier number
+ */
+void ast_rtp_instance_set_stream_num(struct ast_rtp_instance *instance, int stream_num);
 
 /*! \addtogroup StasisTopicsAndMessages
  * @{

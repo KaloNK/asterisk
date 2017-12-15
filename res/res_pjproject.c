@@ -227,11 +227,16 @@ static void log_forwarder(int level, const char *data, int len)
 
 static void capture_buildopts_cb(int level, const char *data, int len)
 {
+	char *dup;
+
 	if (strstr(data, "Teluu") || strstr(data, "Dumping")) {
 		return;
 	}
 
-	AST_VECTOR_ADD_SORTED(&buildopts, ast_strdup(ast_skip_blanks(data)), strcmp);
+	dup = ast_strdup(ast_skip_blanks(data));
+	if (dup && AST_VECTOR_ADD_SORTED(&buildopts, dup, strcmp)) {
+		ast_free(dup);
+	}
 }
 
 #pragma GCC diagnostic ignored "-Wformat-nonliteral"
@@ -544,7 +549,7 @@ static int unload_module(void)
 	pj_log_set_log_func(log_cb_orig);
 	pj_log_set_decor(decor_orig);
 
-	AST_VECTOR_REMOVE_CMP_UNORDERED(&buildopts, NULL, NOT_EQUALS, ast_free);
+	AST_VECTOR_CALLBACK_VOID(&buildopts, ast_free);
 	AST_VECTOR_FREE(&buildopts);
 
 	ast_debug(3, "Stopped PJPROJECT logging to Asterisk logger\n");

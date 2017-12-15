@@ -628,6 +628,25 @@
 			<ref type="managerEvent">AttendedTransfer</ref>
 		</see-also>
 	</manager>
+	<manager name="CancelAtxfer" language="en_US">
+		<synopsis>
+			Cancel an attended transfer.
+		</synopsis>
+		<syntax>
+			<xi:include xpointer="xpointer(/docs/manager[@name='Login']/syntax/parameter[@name='ActionID'])" />
+			<parameter name="Channel" required="true">
+				<para>The transferer channel.</para>
+			</parameter>
+		</syntax>
+		<description>
+			<para>Cancel an attended transfer. Note, this uses the configured cancel attended transfer
+			feature option (atxferabort) to cancel the transfer. If not available this action will fail.
+			</para>
+		</description>
+		<see-also>
+			<ref type="managerEvent">AttendedTransfer</ref>
+		</see-also>
+	</manager>
 	<manager name="Originate" language="en_US">
 		<synopsis>
 			Originate a call.
@@ -1634,8 +1653,10 @@ static AST_RWLIST_HEAD_STATIC(actions, manager_action);
 /*! \brief list of hooks registered */
 static AST_RWLIST_HEAD_STATIC(manager_hooks, manager_custom_hook);
 
+#ifdef AST_XML_DOCS
 /*! \brief A container of event documentation nodes */
 static AO2_GLOBAL_OBJ_STATIC(event_docs);
+#endif
 
 static int __attribute__((format(printf, 9, 0))) __manager_event_sessions(
 	struct ao2_container *sessions,
@@ -2286,7 +2307,9 @@ static int manager_displayconnects(struct mansession_session *session)
 	return ret;
 }
 
+#ifdef AST_XML_DOCS
 static void print_event_instance(struct ast_cli_args *a, struct ast_xml_doc_item *instance);
+#endif
 
 static char *handle_showmancmd(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a)
 {
@@ -2905,14 +2928,13 @@ int ast_hook_send_action(struct manager_custom_hook *hook, const char *msg)
 	return ret;
 }
 
-
 /*!
  * helper function to send a string to the socket.
  * Return -1 on error (e.g. buffer full).
  */
 static int send_string(struct mansession *s, char *string)
 {
-	struct ast_iostream *stream = s->stream ? s->stream : s->session->stream;
+	struct ast_iostream *stream;
 	int len, res;
 
 	/* It's a result from one of the hook's action invocation */
@@ -2924,6 +2946,8 @@ static int send_string(struct mansession *s, char *string)
 		s->hook->helper(EVENT_FLAG_HOOKRESPONSE, "HookResponse", string);
 		return 0;
 	}
+
+	stream = s->stream ? s->stream : s->session->stream;
 
 	len = strlen(string);
 	ast_iostream_set_timeout_inactivity(stream, s->session->writetimeout);
@@ -2971,7 +2995,7 @@ void astman_append(struct mansession *s, const char *fmt, ...)
 		return;
 	}
 
-	if (s->tcptls_session != NULL && s->tcptls_session->stream != NULL) {
+	if (s->hook || (s->tcptls_session != NULL && s->tcptls_session->stream != NULL)) {
 		send_string(s, ast_str_buffer(buf));
 	} else {
 		ast_verbose("No connection stream in astman_append, should not happen\n");
@@ -4847,14 +4871,10 @@ static int action_redirect(struct mansession *s, const struct message *m)
 
 	/* Release the bridge wait. */
 	if (chan1_wait) {
-		ast_channel_lock(chan);
-		ast_clear_flag(ast_channel_flags(chan), AST_FLAG_BRIDGE_DUAL_REDIRECT_WAIT);
-		ast_channel_unlock(chan);
+		ast_channel_clear_flag(chan, AST_FLAG_BRIDGE_DUAL_REDIRECT_WAIT);
 	}
 	if (chan2_wait) {
-		ast_channel_lock(chan2);
-		ast_clear_flag(ast_channel_flags(chan2), AST_FLAG_BRIDGE_DUAL_REDIRECT_WAIT);
-		ast_channel_unlock(chan2);
+		ast_channel_clear_flag(chan2, AST_FLAG_BRIDGE_DUAL_REDIRECT_WAIT);
 	}
 
 	chan2 = ast_channel_unref(chan2);
@@ -4961,6 +4981,47 @@ static int action_atxfer(struct mansession *s, const struct message *m)
 
 	return 0;
 }
+
+static int action_cancel_atxfer(struct mansession *s, const struct message *m)
+{
+	const char *name = astman_get_header(m, "Channel");
+	struct ast_channel *chan = NULL;
+	char *feature_code;
+	const char *digit;
+
+	if (ast_strlen_zero(name)) {
+		astman_send_error(s, m, "No channel specified");
+		return 0;
+	}
+
+	if (!(chan = ast_channel_get_by_name(name))) {
+		astman_send_error(s, m, "Channel specified does not exist");
+		return 0;
+	}
+
+	ast_channel_lock(chan);
+	feature_code = ast_get_chan_features_atxferabort(chan);
+	ast_channel_unlock(chan);
+
+	if (!feature_code) {
+		astman_send_error(s, m, "No disconnect feature code found");
+		ast_channel_unref(chan);
+		return 0;
+	}
+
+	for (digit = feature_code; *digit; ++digit) {
+		struct ast_frame f = { AST_FRAME_DTMF, .subclass.integer = *digit };
+		ast_queue_frame(chan, &f);
+	}
+	ast_free(feature_code);
+
+	chan = ast_channel_unref(chan);
+
+	astman_send_ack(s, m, "CancelAtxfer successfully queued");
+
+	return 0;
+}
+
 
 static int check_blacklist(const char *cmd)
 {
@@ -6119,7 +6180,7 @@ static int action_coreshowchannels(struct mansession *s, const struct message *m
 	for (; (msg = ao2_iterator_next(&it_chans)); ao2_ref(msg, -1)) {
 		struct ast_channel_snapshot *cs = stasis_message_data(msg);
 		struct ast_str *built = ast_manager_build_channel_state_string_prefix(cs, "");
-		char durbuf[10] = "";
+		char durbuf[16] = "";
 
 		if (!built) {
 			continue;
@@ -8682,6 +8743,7 @@ static void manager_shutdown(void)
 	ast_manager_unregister("ListCategories");
 	ast_manager_unregister("Redirect");
 	ast_manager_unregister("Atxfer");
+	ast_manager_unregister("CancelAtxfer");
 	ast_manager_unregister("Originate");
 	ast_manager_unregister("Command");
 	ast_manager_unregister("ExtensionState");
@@ -8736,6 +8798,10 @@ static void manager_shutdown(void)
 	ami_tls_cfg.pvtfile = NULL;
 	ast_free(ami_tls_cfg.cipher);
 	ami_tls_cfg.cipher = NULL;
+	ast_free(ami_tls_cfg.cafile);
+	ami_tls_cfg.cafile = NULL;
+	ast_free(ami_tls_cfg.capath);
+	ami_tls_cfg.capath = NULL;
 
 	ao2_global_obj_release(mgr_sessions);
 
@@ -8836,6 +8902,10 @@ static void manager_set_defaults(void)
 	ami_tls_cfg.pvtfile = ast_strdup("");
 	ast_free(ami_tls_cfg.cipher);
 	ami_tls_cfg.cipher = ast_strdup("");
+	ast_free(ami_tls_cfg.cafile);
+	ami_tls_cfg.cafile = ast_strdup("");
+	ast_free(ami_tls_cfg.capath);
+	ami_tls_cfg.capath = ast_strdup("");
 }
 
 static int __init_manager(int reload, int by_external_config)
@@ -8889,6 +8959,7 @@ static int __init_manager(int reload, int by_external_config)
 		ast_manager_register_xml_core("ListCategories", EVENT_FLAG_CONFIG, action_listcategories);
 		ast_manager_register_xml_core("Redirect", EVENT_FLAG_CALL, action_redirect);
 		ast_manager_register_xml_core("Atxfer", EVENT_FLAG_CALL, action_atxfer);
+		ast_manager_register_xml_core("CancelAtxfer", EVENT_FLAG_CALL, action_cancel_atxfer);
 		ast_manager_register_xml_core("Originate", EVENT_FLAG_ORIGINATE, action_originate);
 		ast_manager_register_xml_core("Command", EVENT_FLAG_COMMAND, action_command);
 		ast_manager_register_xml_core("ExtensionState", EVENT_FLAG_CALL | EVENT_FLAG_REPORTING, action_extensionstate);

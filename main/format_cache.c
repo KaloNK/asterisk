@@ -191,6 +191,11 @@ struct ast_format *ast_format_mp4;
 struct ast_format *ast_format_vp8;
 
 /*!
+ * \brief Built-in cached vp9 format.
+ */
+struct ast_format *ast_format_vp9;
+
+/*!
  * \brief Built-in cached jpeg format.
  */
 struct ast_format *ast_format_jpeg;
@@ -229,6 +234,11 @@ struct ast_format *ast_format_t140;
  * \brief Built-in cached t140 red format.
  */
 struct ast_format *ast_format_t140_red;
+
+/*!
+ * \brief Built-in cached T.38 format.
+ */
+struct ast_format *ast_format_t38;
 
 /*!
  * \brief Built-in "null" format.
@@ -340,8 +350,10 @@ static void format_cache_shutdown(void)
 	ao2_replace(ast_format_h264, NULL);
 	ao2_replace(ast_format_mp4, NULL);
 	ao2_replace(ast_format_vp8, NULL);
+	ao2_replace(ast_format_vp9, NULL);
 	ao2_replace(ast_format_t140_red, NULL);
 	ao2_replace(ast_format_t140, NULL);
+	ao2_replace(ast_format_t38, NULL);
 	ao2_replace(ast_format_none, NULL);
 	ao2_replace(ast_format_silk8, NULL);
 	ao2_replace(ast_format_silk12, NULL);
@@ -438,10 +450,14 @@ static void set_cached_format(const char *name, struct ast_format *format)
 		ao2_replace(ast_format_mp4, format);
 	} else if (!strcmp(name, "vp8")) {
 		ao2_replace(ast_format_vp8, format);
+	} else if (!strcmp(name, "vp9")) {
+		ao2_replace(ast_format_vp9, format);
 	} else if (!strcmp(name, "red")) {
 		ao2_replace(ast_format_t140_red, format);
 	} else if (!strcmp(name, "t140")) {
 		ao2_replace(ast_format_t140, format);
+	} else if (!strcmp(name, "t38")) {
+		ao2_replace(ast_format_t38, format);
 	} else if (!strcmp(name, "none")) {
 		ao2_replace(ast_format_none, format);
 	} else if (!strcmp(name, "silk8")) {

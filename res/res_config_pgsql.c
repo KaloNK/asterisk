@@ -1,7 +1,7 @@
 /*
  * Asterisk -- An open source telephony toolkit.
  *
- * Copyright (C) 1999 - 2016, Digium, Inc.
+ * Copyright (C) 1999 - 2017, Digium, Inc.
  *
  * Manuel Guesdon <mguesdon@oxymium.net> - PostgreSQL RealTime Driver Author/Adaptor
  * Mark Spencer <markster@digium.com>  - Asterisk Author
@@ -52,6 +52,7 @@ AST_THREADSTORAGE(semibuf_buf);
 static PGconn *pgsqlConn = NULL;
 static int version;
 #define has_schema_support	(version > 70300 ? 1 : 0)
+#define USE_BACKSLASH_AS_STRING	(version >= 90100 ? 1 : 0)
 
 #define MAX_DB_OPTION_SIZE 64
 
@@ -384,7 +385,7 @@ static struct columns *find_column(struct tables *t, const char *colname)
 }
 
 #define IS_SQL_LIKE_CLAUSE(x) ((x) && ast_ends_with(x, " LIKE"))
-static char *ESCAPE_CLAUSE = " ESCAPE '\\'";
+#define ESCAPE_CLAUSE (USE_BACKSLASH_AS_STRING ? " ESCAPE '\\'" : " ESCAPE '\\\\'")
 
 static struct ast_variable *realtime_pgsql(const char *database, const char *tablename, const struct ast_variable *fields)
 {
@@ -1035,7 +1036,7 @@ static int store_pgsql(const char *database, const char *table, const struct ast
 	numrows = atoi(PQcmdTuples(result));
 	ast_mutex_unlock(&pgsql_lock);
 
-	ast_debug(1, "PostgreSQL RealTime: row inserted on table: %s.", table);
+	ast_debug(1, "PostgreSQL RealTime: row inserted on table: %s.\n", table);
 
 	/* From http://dev.pgsql.com/doc/pgsql/en/pgsql-affected-rows.html
 	 * An integer greater than zero indicates the number of rows affected
@@ -1294,7 +1295,7 @@ static int require_pgsql(const char *database, const char *tablename, va_list ap
 					/* Size is minimum length; make it at least 50% greater,
 					 * just to be sure, because PostgreSQL doesn't support
 					 * resizing columns. */
-					snprintf(fieldtype, sizeof(fieldtype), "CHAR(%d)",
+					snprintf(fieldtype, sizeof(fieldtype), "CHAR(%hhu)",
 						size < 15 ? size * 2 :
 						(size * 3 / 2 > 255) ? 255 : size * 3 / 2);
 				} else if (type == RQ_INTEGER1 || type == RQ_UINTEGER1 || type == RQ_INTEGER2) {

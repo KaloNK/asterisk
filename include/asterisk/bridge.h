@@ -102,6 +102,10 @@ enum ast_bridge_video_mode_type {
 	/*! A single user's video feed is distributed to all bridge channels, but
 	 *  that feed is automatically picked based on who is talking the most. */
 	AST_BRIDGE_VIDEO_MODE_TALKER_SRC,
+	/*! Operate as a selective forwarding unit. Video from each participant is
+	 * cloned to a dedicated stream on a subset of the remaining participants.
+	 */
+	AST_BRIDGE_VIDEO_MODE_SFU,
 };
 
 /*! \brief This is used for both SINGLE_SRC mode to set what channel
@@ -130,6 +134,7 @@ struct ast_bridge_video_mode {
 		struct ast_bridge_video_single_src_data single_src_data;
 		struct ast_bridge_video_talker_src_data talker_src_data;
 	} mode_data;
+	unsigned int video_update_discard;
 };
 
 /*!
@@ -267,6 +272,8 @@ struct ast_bridge_softmix {
 	unsigned int binaural_active;
 };
 
+AST_LIST_HEAD_NOLOCK(ast_bridge_channels_list, ast_bridge_channel);
+
 /*!
  * \brief Structure that contains information about a bridge
  */
@@ -284,7 +291,7 @@ struct ast_bridge {
 	/*! Call ID associated with the bridge */
 	ast_callid callid;
 	/*! Linked list of channels participating in the bridge */
-	AST_LIST_HEAD_NOLOCK(, ast_bridge_channel) channels;
+	struct ast_bridge_channels_list channels;
 	/*! Queue of actions to perform on the bridge. */
 	AST_LIST_HEAD_NOLOCK(, ast_frame) action_queue;
 	/*! Softmix technology parameters. */
@@ -323,6 +330,9 @@ struct ast_bridge {
 		/*! Immutable bridge UUID. */
 		AST_STRING_FIELD(uniqueid);
 	);
+
+	/*! Type mapping used for media routing */
+	struct ast_vector_int media_types;
 };
 
 /*! \brief Bridge base class virtual method table. */
@@ -887,6 +897,19 @@ void ast_bridge_set_single_src_video_mode(struct ast_bridge *bridge, struct ast_
  * video as the single source video feed
  */
 void ast_bridge_set_talker_src_video_mode(struct ast_bridge *bridge);
+
+/*!
+ * \brief Set the bridge to be a selective forwarding unit
+ */
+void ast_bridge_set_sfu_video_mode(struct ast_bridge *bridge);
+
+/*!
+ * \brief Set the amount of time to discard subsequent video updates after a video update has been sent
+ *
+ * \param bridge Bridge to set the minimum video update wait time on
+ * \param video_update_discard Amount of time after sending a video update that others should be discarded
+ */
+void ast_bridge_set_video_update_discard(struct ast_bridge *bridge, unsigned int video_update_discard);
 
 /*!
  * \brief Update information about talker energy for talker src video mode.

@@ -41,7 +41,7 @@
  */
 
 /*** MODULEINFO
-	<support_level>core</support_level>
+	<support_level>extended</support_level>
  ***/
 
 #include "asterisk.h"
@@ -608,12 +608,11 @@ static void *smdi_read(void *iface_p)
 
 			ast_debug(1, "Read a 'D' ... it's an MD message.\n");
 
-			if (!(md_msg = ast_calloc(1, sizeof(*md_msg)))) {
+			md_msg = ao2_alloc(sizeof(*md_msg), NULL);
+			if (!md_msg) {
 				ao2_ref(iface, -1);
 				return NULL;
 			}
-
-			md_msg = ao2_alloc(sizeof(*md_msg), NULL);
 
 			/* read the message desk number */
 			for (i = 0; i < sizeof(md_msg->mesg_desk_num) - 1; i++) {
@@ -710,12 +709,11 @@ static void *smdi_read(void *iface_p)
 
 			ast_debug(1, "Read a 'W', it's an MWI message. (No more debug coming for MWI messages)\n");
 
-			if (!(mwi_msg = ast_calloc(1, sizeof(*mwi_msg)))) {
+			mwi_msg = ao2_alloc(sizeof(*mwi_msg), NULL);
+			if (!mwi_msg) {
 				ao2_ref(iface, -1);
 				return NULL;
 			}
-
-			mwi_msg = ao2_alloc(sizeof(*mwi_msg), NULL);
 
 			/* discard the 'I' (from 'MWI') */
 			fgetc(iface->file);
@@ -1407,6 +1405,10 @@ static int _unload_module(int fromload)
 	}
 
 	smdi_loaded = 0;
+
+	/* For Optional API. */
+	ast_module_shutdown_ref(AST_MODULE_SELF);
+
 	return 0;
 }
 
@@ -1431,7 +1433,7 @@ static int reload(void)
 }
 
 AST_MODULE_INFO(ASTERISK_GPL_KEY, AST_MODFLAG_GLOBAL_SYMBOLS | AST_MODFLAG_LOAD_ORDER, "Simplified Message Desk Interface (SMDI) Resource",
-	.support_level = AST_MODULE_SUPPORT_CORE,
+	.support_level = AST_MODULE_SUPPORT_EXTENDED,
 	.load = load_module,
 	.unload = unload_module,
 	.reload = reload,

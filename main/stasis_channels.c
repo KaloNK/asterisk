@@ -236,22 +236,24 @@ struct ast_channel_snapshot *ast_channel_snapshot_create(struct ast_channel *cha
 		S_COR(ast_channel_caller(chan)->id.name.valid, ast_channel_caller(chan)->id.name.str, ""));
 	ast_string_field_set(snapshot, caller_number,
 		S_COR(ast_channel_caller(chan)->id.number.valid, ast_channel_caller(chan)->id.number.str, ""));
-	ast_string_field_set(snapshot, caller_dnid, S_OR(ast_channel_dialed(chan)->number.str, ""));
 	ast_string_field_set(snapshot, caller_subaddr,
 		S_COR(ast_channel_caller(chan)->id.subaddress.valid, ast_channel_caller(chan)->id.subaddress.str, ""));
-	ast_string_field_set(snapshot, dialed_subaddr,
-		S_COR(ast_channel_dialed(chan)->subaddress.valid, ast_channel_dialed(chan)->subaddress.str, ""));
 	ast_string_field_set(snapshot, caller_ani,
 		S_COR(ast_channel_caller(chan)->ani.number.valid, ast_channel_caller(chan)->ani.number.str, ""));
+
 	ast_string_field_set(snapshot, caller_rdnis,
 		S_COR(ast_channel_redirecting(chan)->from.number.valid, ast_channel_redirecting(chan)->from.number.str, ""));
+
 	ast_string_field_set(snapshot, caller_dnid,
 		S_OR(ast_channel_dialed(chan)->number.str, ""));
+	ast_string_field_set(snapshot, dialed_subaddr,
+		S_COR(ast_channel_dialed(chan)->subaddress.valid, ast_channel_dialed(chan)->subaddress.str, ""));
 
 	ast_string_field_set(snapshot, connected_name,
 		S_COR(ast_channel_connected(chan)->id.name.valid, ast_channel_connected(chan)->id.name.str, ""));
 	ast_string_field_set(snapshot, connected_number,
 		S_COR(ast_channel_connected(chan)->id.number.valid, ast_channel_connected(chan)->id.number.str, ""));
+
 	ast_string_field_set(snapshot, language, ast_channel_language(chan));
 
 	if ((bridge = ast_channel_get_bridge(chan))) {
@@ -891,7 +893,7 @@ struct ast_json *ast_channel_snapshot_to_json(
 	const struct ast_channel_snapshot *snapshot,
 	const struct stasis_message_sanitizer *sanitize)
 {
-	RAII_VAR(struct ast_json *, json_chan, NULL, ast_json_unref);
+	struct ast_json *json_chan;
 
 	if (snapshot == NULL
 		|| (sanitize && sanitize->channel_snapshot
@@ -924,7 +926,7 @@ struct ast_json *ast_channel_snapshot_to_json(
 		ast_json_object_set(json_chan, "channelvars", ast_json_channel_vars(snapshot->ari_vars));
 	}
 
-	return ast_json_ref(json_chan);
+	return json_chan;
 }
 
 int ast_channel_snapshot_cep_equal(

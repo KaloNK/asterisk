@@ -4300,8 +4300,10 @@ static enum ast_pbx_result __ast_pbx_run(struct ast_channel *c,
 	ast_channel_pbx(c)->rtimeoutms = 10000;
 	ast_channel_pbx(c)->dtimeoutms = 5000;
 
+	ast_channel_lock(c);
 	autoloopflag = ast_test_flag(ast_channel_flags(c), AST_FLAG_IN_AUTOLOOP);	/* save value to restore at the end */
 	ast_set_flag(ast_channel_flags(c), AST_FLAG_IN_AUTOLOOP);
+	ast_channel_unlock(c);
 
 	if (ast_strlen_zero(ast_channel_exten(c))) {
 		/* If not successful fall back to 's' - but only if there is no given exten  */
@@ -4546,8 +4548,10 @@ static enum ast_pbx_result __ast_pbx_run(struct ast_channel *c,
 		ast_pbx_hangup_handler_run(c);
 	}
 
+	ast_channel_lock(c);
 	ast_set2_flag(ast_channel_flags(c), autoloopflag, AST_FLAG_IN_AUTOLOOP);
 	ast_clear_flag(ast_channel_flags(c), AST_FLAG_BRIDGE_HANGUP_RUN); /* from one round to the next, make sure this gets cleared */
+	ast_channel_unlock(c);
 	pbx_destroy(ast_channel_pbx(c));
 	ast_channel_pbx_set(c, NULL);
 
@@ -6688,7 +6692,11 @@ int ast_context_add_include2(struct ast_context *con, const char *value,
 	}
 
 	/* ... include new context into context list, unlock, return */
-	AST_VECTOR_APPEND(&con->includes, new_include);
+	if (AST_VECTOR_APPEND(&con->includes, new_include)) {
+		include_free(new_include);
+		ast_unlock_context(con);
+		return -1;
+	}
 	ast_verb(3, "Including context '%s' in context '%s'\n",
 		ast_get_include_name(new_include), ast_get_context_name(con));
 
@@ -6750,7 +6758,11 @@ int ast_context_add_switch2(struct ast_context *con, const char *value,
 	}
 
 	/* ... sw new context into context list, unlock, return */
-	AST_VECTOR_APPEND(&con->alts, new_sw);
+	if (AST_VECTOR_APPEND(&con->alts, new_sw)) {
+		sw_free(new_sw);
+		ast_unlock_context(con);
+		return -1;
+	}
 
 	ast_verb(3, "Including switch '%s/%s' in context '%s'\n",
 		ast_get_switch_name(new_sw), ast_get_switch_data(new_sw), ast_get_context_name(con));
@@ -6838,7 +6850,11 @@ int ast_context_add_ignorepat2(struct ast_context *con, const char *value, const
 			return -1;
 		}
 	}
-	AST_VECTOR_APPEND(&con->ignorepats, ignorepat);
+	if (AST_VECTOR_APPEND(&con->ignorepats, ignorepat)) {
+		ignorepat_free(ignorepat);
+		ast_unlock_context(con);
+		return -1;
+	}
 	ast_unlock_context(con);
 
 	return 0;
@@ -8302,56 +8318,6 @@ static void presence_state_cb(void *unused, struct stasis_subscription *sub, str
 	ast_free(hint_app);
 }
 
-/*!
- * \internal
- * \brief Implements the hints data provider.
- */
-static int hints_data_provider_get(const struct ast_data_search *search,
-	struct ast_data *data_root)
-{
-	struct ast_data *data_hint;
-	struct ast_hint *hint;
-	int watchers;
-	struct ao2_iterator i;
-
-	if (ao2_container_count(hints) == 0) {
-		return 0;
-	}
-
-	i = ao2_iterator_init(hints, 0);
-	for (; (hint = ao2_iterator_next(&i)); ao2_ref(hint, -1)) {
-		watchers = ao2_container_count(hint->callbacks);
-		data_hint = ast_data_add_node(data_root, "hint");
-		if (!data_hint) {
-			continue;
-		}
-		ast_data_add_str(data_hint, "extension", ast_get_extension_name(hint->exten));
-		ast_data_add_str(data_hint, "context", ast_get_context_name(ast_get_extension_context(hint->exten)));
-		ast_data_add_str(data_hint, "application", ast_get_extension_app(hint->exten));
-		ast_data_add_str(data_hint, "state", ast_extension_state2str(hint->laststate));
-		ast_data_add_str(data_hint, "presence_state", ast_presence_state2str(hint->last_presence_state));
-		ast_data_add_str(data_hint, "presence_subtype", S_OR(hint->last_presence_subtype, ""));
-		ast_data_add_str(data_hint, "presence_subtype", S_OR(hint->last_presence_message, ""));
-		ast_data_add_int(data_hint, "watchers", watchers);
-
-		if (!ast_data_search_match(search, data_hint)) {
-			ast_data_remove_node(data_root, data_hint);
-		}
-	}
-	ao2_iterator_destroy(&i);
-
-	return 0;
-}
-
-static const struct ast_data_handler hints_data_provider = {
-	.version = AST_DATA_HANDLER_VERSION,
-	.get = hints_data_provider_get
-};
-
-static const struct ast_data_entry pbx_data_providers[] = {
-	AST_DATA_ENTRY("asterisk/core/hints", &hints_data_provider),
-};
-
 static int action_extensionstatelist(struct mansession *s, const struct message *m)
 {
 	const char *action_id = astman_get_header(m, "ActionID");
@@ -8427,7 +8393,6 @@ static void unload_pbx(void)
 	ast_cli_unregister_multiple(pbx_cli, ARRAY_LEN(pbx_cli));
 	ast_custom_function_unregister(&exception_function);
 	ast_custom_function_unregister(&testtime_function);
-	ast_data_unregister(NULL);
 }
 
 int load_pbx(void)
@@ -8441,7 +8406,6 @@ int load_pbx(void)
 
 	ast_verb(2, "Registering builtin functions:\n");
 	ast_cli_register_multiple(pbx_cli, ARRAY_LEN(pbx_cli));
-	ast_data_register_multiple_core(pbx_data_providers, ARRAY_LEN(pbx_data_providers));
 	__ast_custom_function_register(&exception_function, NULL);
 	__ast_custom_function_register(&testtime_function, NULL);
 

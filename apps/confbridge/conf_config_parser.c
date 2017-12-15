@@ -391,6 +391,10 @@
 								is the single source of video distribution among all participants. If
 								that user leaves, the marked user to join after them becomes the source.</para>
 							</enum>
+							<enum name="sfu">
+								<para>Selective Forwarding Unit - Sets multi-stream
+								operation for a multi-party video conference.</para>
+							</enum>
 						</enumlist>
 					</description>
 				</configOption>
@@ -449,6 +453,16 @@
 							<enum name="sound_error_menu"><para>The sound played when an invalid menu option is entered.</para></enum>
 						</enumlist>
 					</description>
+				</configOption>
+				<configOption name="video_update_discard" default="2000">
+					<synopsis>Sets the amount of time in milliseconds after sending a video update to discard subsequent video updates</synopsis>
+					<description><para>
+						Sets the amount of time in milliseconds after sending a video update request
+						that subsequent video updates should be discarded. This means that if we
+						send a video update we will discard any other video update requests until
+						after the configured amount of time has elapsed. This prevents flooding of
+						video update requests from clients.
+					</para></description>
 				</configOption>
 				<configOption name="template">
 					<synopsis>When using the CONFBRIDGE dialplan function, use a bridge profile as a template for creating a new temporary profile</synopsis>
@@ -1652,6 +1666,8 @@ static char *handle_cli_confbridge_show_bridge_profile(struct ast_cli_entry *e, 
 		break;
 	}
 
+	ast_cli(a->fd,"Video Update Discard: %u\n", b_profile.video_update_discard);
+
 	ast_cli(a->fd,"sound_only_person:    %s\n", conf_get_sound(CONF_SOUND_ONLY_PERSON, b_profile.sounds));
 	ast_cli(a->fd,"sound_only_one:       %s\n", conf_get_sound(CONF_SOUND_ONLY_ONE, b_profile.sounds));
 	ast_cli(a->fd,"sound_has_joined:     %s\n", conf_get_sound(CONF_SOUND_HAS_JOINED, b_profile.sounds));
@@ -1952,25 +1968,36 @@ static int video_mode_handler(const struct aco_option *opt, struct ast_variable 
 		ast_set_flags_to(b_profile,
 			BRIDGE_OPT_VIDEO_SRC_FIRST_MARKED
 				| BRIDGE_OPT_VIDEO_SRC_LAST_MARKED
-				| BRIDGE_OPT_VIDEO_SRC_FOLLOW_TALKER,
+				| BRIDGE_OPT_VIDEO_SRC_FOLLOW_TALKER
+				| BRIDGE_OPT_VIDEO_SRC_SFU,
 			BRIDGE_OPT_VIDEO_SRC_FIRST_MARKED);
 	} else if (!strcasecmp(var->value, "last_marked")) {
 		ast_set_flags_to(b_profile,
 			BRIDGE_OPT_VIDEO_SRC_FIRST_MARKED
 				| BRIDGE_OPT_VIDEO_SRC_LAST_MARKED
-				| BRIDGE_OPT_VIDEO_SRC_FOLLOW_TALKER,
+				| BRIDGE_OPT_VIDEO_SRC_FOLLOW_TALKER
+				| BRIDGE_OPT_VIDEO_SRC_SFU,
 			BRIDGE_OPT_VIDEO_SRC_LAST_MARKED);
 	} else if (!strcasecmp(var->value, "follow_talker")) {
 		ast_set_flags_to(b_profile,
 			BRIDGE_OPT_VIDEO_SRC_FIRST_MARKED
 				| BRIDGE_OPT_VIDEO_SRC_LAST_MARKED
-				| BRIDGE_OPT_VIDEO_SRC_FOLLOW_TALKER,
+				| BRIDGE_OPT_VIDEO_SRC_FOLLOW_TALKER
+				| BRIDGE_OPT_VIDEO_SRC_SFU,
 			BRIDGE_OPT_VIDEO_SRC_FOLLOW_TALKER);
 	} else if (!strcasecmp(var->value, "none")) {
 		ast_clear_flag(b_profile,
 			BRIDGE_OPT_VIDEO_SRC_FIRST_MARKED
 				| BRIDGE_OPT_VIDEO_SRC_LAST_MARKED
-				| BRIDGE_OPT_VIDEO_SRC_FOLLOW_TALKER);
+				| BRIDGE_OPT_VIDEO_SRC_FOLLOW_TALKER
+				| BRIDGE_OPT_VIDEO_SRC_SFU);
+	} else if (!strcasecmp(var->value, "sfu")) {
+		ast_set_flags_to(b_profile,
+			BRIDGE_OPT_VIDEO_SRC_FIRST_MARKED
+				| BRIDGE_OPT_VIDEO_SRC_LAST_MARKED
+				| BRIDGE_OPT_VIDEO_SRC_FOLLOW_TALKER
+				| BRIDGE_OPT_VIDEO_SRC_SFU,
+			BRIDGE_OPT_VIDEO_SRC_SFU);
 	} else {
 		return -1;
 	}
@@ -2077,7 +2104,7 @@ static int conf_menu_profile_copy(struct conf_menu *dst, struct conf_menu *src)
 static int menu_template_handler(const struct aco_option *opt, struct ast_variable *var, void *obj)
 {
 	struct conf_menu *dst_menu = obj;
-	struct confbridge_cfg *cfg = aco_pending_config(&cfg_info);
+	RAII_VAR(struct confbridge_cfg *, cfg, ao2_global_obj_ref(cfg_handle), ao2_cleanup);
 	RAII_VAR(struct conf_menu *, src_menu, NULL, ao2_cleanup);
 
 	if (!cfg) {
@@ -2112,6 +2139,7 @@ static int verify_default_profiles(void)
 	RAII_VAR(struct user_profile *, user_profile, NULL, ao2_cleanup);
 	RAII_VAR(struct bridge_profile *, bridge_profile, NULL, ao2_cleanup);
 	RAII_VAR(struct conf_menu *, menu_profile, NULL, ao2_cleanup);
+	/* We can only be called as a result of an aco_process_config so this is safe */
 	struct confbridge_cfg *cfg = aco_pending_config(&cfg_info);
 
 	if (!cfg) {
@@ -2208,11 +2236,13 @@ int conf_load_config(void)
 	aco_option_register(&cfg_info, "regcontext", ACO_EXACT, bridge_types, NULL, OPT_CHAR_ARRAY_T, 0, CHARFLDSET(struct bridge_profile, regcontext));
 	aco_option_register(&cfg_info, "language", ACO_EXACT, bridge_types, "en", OPT_CHAR_ARRAY_T, 0, CHARFLDSET(struct bridge_profile, language));
 	aco_option_register_custom(&cfg_info, "^sound_", ACO_REGEX, bridge_types, NULL, sound_option_handler, 0);
+	aco_option_register(&cfg_info, "video_update_discard", ACO_EXACT, bridge_types, "2000", OPT_UINT_T, 0, FLDSET(struct bridge_profile, video_update_discard));
 	/* This option should only be used with the CONFBRIDGE dialplan function */
 	aco_option_register_custom(&cfg_info, "template", ACO_EXACT, bridge_types, NULL, bridge_template_handler, 0);
 
 	/* Menu options */
 	aco_option_register(&cfg_info, "type", ACO_EXACT, menu_types, NULL, OPT_NOOP_T, 0, 0);
+	/* This option should only be used with the CONFBRIDGE dialplan function */
 	aco_option_register_custom(&cfg_info, "template", ACO_EXACT, menu_types, NULL, menu_template_handler, 0);
 	aco_option_register_custom(&cfg_info, "^[0-9A-D*#]+$", ACO_REGEX, menu_types, NULL, menu_option_handler, 0);
 

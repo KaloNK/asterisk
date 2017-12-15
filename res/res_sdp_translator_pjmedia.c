@@ -26,7 +26,7 @@
 #include "asterisk/test.h"
 #include "asterisk/module.h"
 
-#include "../include/asterisk/sdp.h"
+#include "asterisk/sdp.h"
 #ifdef HAVE_PJPROJECT
 #include <pjlib.h>
 #include <pjmedia.h>
@@ -36,6 +36,45 @@
 	<depend>pjproject</depend>
 	<support_level>core</support_level>
  ***/
+
+/*
+ * XXX TODO: The memory in the pool is held onto longer than necessary.  It
+ * is kept and grows for the duration of the associated chan_pjsip session.
+ *
+ * The translation API does not need to be so generic.  The users will know
+ * at compile time what the non-Asterisk SDP format they have or need.  They
+ * should simply call the specific translation functions.  However, to make
+ * this a loadable module we need to be able to keep it in memory when a
+ * dependent module is loaded.
+ *
+ * To address both issues I propose this API:
+ *
+ * void ast_sdp_translate_pjmedia_ref(void) - Inc this module's user ref
+ * void ast_sdp_translate_pjmedia_unref(void) - Dec this module's user ref.
+ *    The res_pjsip_session.c:ast_sip_session_alloc() can call the module ref
+ *    and the session's destructor can call the module unref.
+ *
+ * struct ast_sdp *ast_sdp_translate_pjmedia_from(const pjmedia_sdp_session *pjmedia_sdp);
+ *
+ * pjmedia_sdp_session *ast_sdp_translate_pjmedia_to(const struct ast_sdp *sdp, pj_pool_t *pool);
+ *    Passing in a memory pool allows the memory to be obtained from an
+ *    rdata memory pool that will be released when the message processing
+ *    is complete.  This prevents memory from accumulating for the duration
+ *    of a call.
+ *
+ * int ast_sdp_translate_pjmedia_set_remote_sdp(struct ast_sdp_state *sdp_state, const pjmedia_sdp_session *remote);
+ * const pjmedia_sdp_session *ast_sdp_translate_pjmedia_get_local_sdp(struct ast_sdp_state *sdp_state, pj_pool_t *pool);
+ *    These two functions just do the bookkeeping to translate and set or get
+ *    the requested SDP.
+ *
+ *
+ * XXX TODO: This code doesn't handle allocation failures very well.  i.e.,
+ *   It assumes they will never happen.
+ *
+ * XXX TODO: This code uses ast_alloca() inside loops.  Doing so if the number
+ *   of times through the loop is unconstrained will blow the stack.
+ *   See dupa_pj_str() usage.
+ */
 
 static pj_caching_pool sdp_caching_pool;
 
@@ -89,7 +128,7 @@ static struct ast_sdp_m_line *pjmedia_copy_m_line(struct pjmedia_sdp_media *pjme
 	return m_line;
 }
 
-static void pjmedia_copy_a_lines(struct ast_sdp *new_sdp, pjmedia_sdp_session *pjmedia_sdp)
+static void pjmedia_copy_a_lines(struct ast_sdp *new_sdp, const pjmedia_sdp_session *pjmedia_sdp)
 {
 	int i;
 
@@ -100,7 +139,7 @@ static void pjmedia_copy_a_lines(struct ast_sdp *new_sdp, pjmedia_sdp_session *p
 }
 
 static void pjmedia_copy_m_lines(struct ast_sdp *new_sdp,
-	struct pjmedia_sdp_session *pjmedia_sdp)
+	const struct pjmedia_sdp_session *pjmedia_sdp)
 {
 	int i;
 
@@ -109,9 +148,9 @@ static void pjmedia_copy_m_lines(struct ast_sdp *new_sdp,
 	}
 }
 
-static struct ast_sdp *pjmedia_to_sdp(void *in, void *translator_priv)
+static struct ast_sdp *pjmedia_to_sdp(const void *in, void *translator_priv)
 {
-	struct pjmedia_sdp_session *pjmedia_sdp = in;
+	const struct pjmedia_sdp_session *pjmedia_sdp = in;
 
 	struct ast_sdp_o_line *o_line = ast_sdp_o_alloc(dupa_pj_str(pjmedia_sdp->origin.user),
 		pjmedia_sdp->origin.id, pjmedia_sdp->origin.version,
@@ -239,7 +278,7 @@ static void copy_m_lines_pjmedia(pj_pool_t *pool, pjmedia_sdp_session *pjmedia_s
 	}
 }
 
-static void *sdp_to_pjmedia(const struct ast_sdp *sdp, void *translator_priv)
+static const void *sdp_to_pjmedia(const struct ast_sdp *sdp, void *translator_priv)
 {
 	pj_pool_t *pool = translator_priv;
 	pjmedia_sdp_session *pjmedia_sdp;
@@ -445,7 +484,7 @@ AST_TEST_DEFINE(pjmedia_to_sdp_test)
 	}
 
 cleanup:
-	ast_sdp_free(sdp);
+	ao2_cleanup(sdp);
 	ast_sdp_translator_free(translator);
 	pj_pool_release(pool);
 	return res;
@@ -470,7 +509,7 @@ AST_TEST_DEFINE(sdp_to_pjmedia_test)
       "a=rtpmap:32 MPV/90000\r\n\r\n";
 	pj_pool_t *pool;
 	pjmedia_sdp_session *pjmedia_sdp_orig;
-	pjmedia_sdp_session *pjmedia_sdp_dup;
+	const pjmedia_sdp_session *pjmedia_sdp_dup;
 	struct ast_sdp *sdp = NULL;
 	pj_status_t status;
 	enum ast_test_result_state res = AST_TEST_PASS;
@@ -521,7 +560,7 @@ AST_TEST_DEFINE(sdp_to_pjmedia_test)
 	}
 
 cleanup:
-	ast_sdp_free(sdp);
+	ao2_cleanup(sdp);
 	ast_sdp_translator_free(translator);
 	pj_pool_release(pool);
 	return res;
@@ -546,7 +585,7 @@ static int unload_module(void)
 	ast_sdp_unregister_translator(&pjmedia_translator);
 	pj_caching_pool_destroy(&sdp_caching_pool);
 	AST_TEST_UNREGISTER(pjmedia_to_sdp_test);
-	AST_TEST_REGISTER(sdp_to_pjmedia_test);
+	AST_TEST_UNREGISTER(sdp_to_pjmedia_test);
 	return 0;
 }
 

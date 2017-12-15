@@ -34,6 +34,7 @@
 #include "asterisk/config_options.h"
 #include "asterisk/stringfields.h"
 #include "asterisk/acl.h"
+#include "asterisk/app.h"
 #include "asterisk/frame.h"
 #include "asterisk/xmldoc.h"
 #include "asterisk/cli.h"
@@ -79,7 +80,6 @@ struct aco_option {
 
 #ifdef AST_XML_DOCS
 static struct ao2_container *xmldocs;
-#endif /* AST_XML_DOCS */
 
 /*! \brief Value of the aco_option_type enum as strings */
 static char *aco_option_type_string[] = {
@@ -97,6 +97,7 @@ static char *aco_option_type_string[] = {
 	"Unsigned Integer",	/* OPT_UINT_T, */
 	"Boolean",			/* OPT_YESNO_T, */
 };
+#endif /* AST_XML_DOCS */
 
 void *aco_pending_config(struct aco_info *info)
 {
@@ -118,6 +119,7 @@ static void config_option_destroy(void *obj)
 
 static int int_handler_fn(const struct aco_option *opt, struct ast_variable *var, void *obj);
 static int uint_handler_fn(const struct aco_option *opt, struct ast_variable *var, void *obj);
+static int timelen_handler_fn(const struct aco_option *opt, struct ast_variable *var, void *obj);
 static int double_handler_fn(const struct aco_option *opt, struct ast_variable *var, void *obj);
 static int sockaddr_handler_fn(const struct aco_option *opt, struct ast_variable *var, void *obj);
 static int stringfield_handler_fn(const struct aco_option *opt, struct ast_variable *var, void *obj);
@@ -151,6 +153,7 @@ static aco_option_handler ast_config_option_default_handler(enum aco_option_type
 	case OPT_SOCKADDR_T: return sockaddr_handler_fn;
 	case OPT_STRINGFIELD_T: return stringfield_handler_fn;
 	case OPT_UINT_T: return uint_handler_fn;
+	case OPT_TIMELEN_T: return timelen_handler_fn;
 
 	case OPT_CUSTOM_T: return NULL;
 	}
@@ -586,10 +589,13 @@ enum aco_process_status aco_process_ast_config(struct aco_info *info, struct aco
 	};
 
 	ao2_cleanup(info->internal->pending);
+	info->internal->pending = NULL;
 	return ACO_PROCESS_OK;
 
 error:
 	ao2_cleanup(info->internal->pending);
+	info->internal->pending = NULL;
+
 	return ACO_PROCESS_ERROR;
 }
 
@@ -702,6 +708,8 @@ try_alias:
 
 end:
 	ao2_cleanup(info->internal->pending);
+	info->internal->pending = NULL;
+
 	return res;
 }
 int aco_process_var(struct aco_type *type, const char *cat, struct ast_variable *var, void *obj)
@@ -990,11 +998,11 @@ static int xmldoc_update_config_type(const char *module, const char *name, const
 
 	/* If we already have a syntax element, bail. This isn't an error, since we may unload a module which
 	 * has updated the docs and then load it again. */
-	if ((results = ast_xmldoc_query("//configInfo[@name='%s']/*/configObject[@name='%s']/syntax", module, name))) {
+	if ((results = ast_xmldoc_query("/docs/configInfo[@name='%s']/configFile/configObject[@name='%s']/syntax", module, name))) {
 		return 0;
 	}
 
-	if (!(results = ast_xmldoc_query("//configInfo[@name='%s']/*/configObject[@name='%s']", module, name))) {
+	if (!(results = ast_xmldoc_query("/docs/configInfo[@name='%s']/configFile/configObject[@name='%s']", module, name))) {
 		ast_log(LOG_WARNING, "Cannot update type '%s' in module '%s' because it has no existing documentation!\n", name, module);
 		return XMLDOC_STRICT ? -1 : 0;
 	}
@@ -1060,7 +1068,7 @@ static int xmldoc_update_config_option(struct aco_type **types, const char *modu
 		return XMLDOC_STRICT ? -1 : 0;
 	}
 
-	if (!(results = ast_xmldoc_query("//configInfo[@name='%s']/*/configObject[@name='%s']/configOption[@name='%s']", module, object_name, name))) {
+	if (!(results = ast_xmldoc_query("/docs/configInfo[@name='%s']/configFile/configObject[@name='%s']/configOption[@name='%s']", module, object_name, name))) {
 		ast_log(LOG_WARNING, "Could not find option '%s' with type '%s' in module '%s'\n", name, object_name, module);
 		return XMLDOC_STRICT ? -1 : 0;
 	}
@@ -1368,6 +1376,39 @@ static int uint_handler_fn(const struct aco_option *opt, struct ast_variable *va
 		ast_log(LOG_WARNING, "Attempted to set %s=%s, but set it to %u instead due to default)\n", var->name, var->value, *field);
 	} else {
 		res = ast_parse_arg(var->value, flags, field);
+	}
+
+	return res;
+}
+
+/*! \brief Default option handler for timelen signed integers
+ * \note For a description of the opt->flags and opt->args values, see the documentation for
+ * enum aco_option_type in config_options.h
+ */
+static int timelen_handler_fn(const struct aco_option *opt, struct ast_variable *var, void *obj)
+{
+	int *field = (int *)(obj + opt->args[0]);
+	unsigned int flags = PARSE_TIMELEN | opt->flags;
+	int res = 0;
+	if (opt->flags & PARSE_IN_RANGE) {
+		if (opt->flags & PARSE_DEFAULT) {
+			res = ast_parse_arg(var->value, flags, field, (enum ast_timelen) opt->args[1], (int) opt->args[2], (int) opt->args[3], opt->args[4]);
+		} else {
+			res = ast_parse_arg(var->value, flags, field, (enum ast_timelen) opt->args[1], (int) opt->args[2], (int) opt->args[3]);
+		}
+		if (res) {
+			if (opt->flags & PARSE_RANGE_DEFAULTS) {
+				ast_log(LOG_WARNING, "Failed to set %s=%s. Set to %d instead due to range limit (%d, %d)\n", var->name, var->value, *field, (int) opt->args[2], (int) opt->args[3]);
+				res = 0;
+			} else if (opt->flags & PARSE_DEFAULT) {
+				ast_log(LOG_WARNING, "Failed to set %s=%s, Set to default value %d instead.\n", var->name, var->value, *field);
+				res = 0;
+			}
+		}
+	} else if ((opt->flags & PARSE_DEFAULT) && ast_parse_arg(var->value, flags, field, (enum ast_timelen) opt->args[1], (int) opt->args[2])) {
+		ast_log(LOG_WARNING, "Attempted to set %s=%s, but set it to %d instead due to default)\n", var->name, var->value, *field);
+	} else {
+		res = ast_parse_arg(var->value, flags, field, (enum ast_timelen) opt->args[1]);
 	}
 
 	return res;

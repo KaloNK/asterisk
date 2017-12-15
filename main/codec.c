@@ -376,6 +376,21 @@ const char *ast_codec_media_type2str(enum ast_media_type type)
 	}
 }
 
+enum ast_media_type ast_media_type_from_str(const char *media_type_str)
+{
+	if (!strcasecmp(media_type_str, "audio")) {
+		return AST_MEDIA_TYPE_AUDIO;
+	} else if (!strcasecmp(media_type_str, "video")) {
+		return AST_MEDIA_TYPE_VIDEO;
+	} else if (!strcasecmp(media_type_str, "image")) {
+		return AST_MEDIA_TYPE_IMAGE;
+	} else if (!strcasecmp(media_type_str, "text")) {
+		return AST_MEDIA_TYPE_TEXT;
+	} else {
+		return AST_MEDIA_TYPE_UNKNOWN;
+	}
+}
+
 unsigned int ast_codec_samples_count(struct ast_frame *frame)
 {
 	struct ast_codec *codec;
@@ -391,6 +406,11 @@ unsigned int ast_codec_samples_count(struct ast_frame *frame)
 
 	if (codec->samples_count) {
 		samples = codec->samples_count(frame);
+		if ((int) samples < 0) {
+			ast_log(LOG_WARNING, "Codec %s returned invalid number of samples.\n",
+				ast_format_get_name(frame->subclass.format));
+			samples = 0;
+		}
 	} else {
 		ast_log(LOG_WARNING, "Unable to calculate samples for codec %s\n",
 			ast_format_get_name(frame->subclass.format));

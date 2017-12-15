@@ -58,7 +58,7 @@ static int pidf_generate_body_content(void *body, void *data)
 	struct ast_sip_exten_state_data *state_data = data;
 
 	ast_sip_presence_exten_state_to_str(state_data->exten_state, &statestring,
-			&pidfstate, &pidfnote, &local_state);
+			&pidfstate, &pidfnote, &local_state, 0);
 
 	if (!pjpidf_pres_add_note(state_data->pool, pres, pj_cstr(&note, pidfnote))) {
 		ast_log(LOG_WARNING, "Unable to add note to PIDF presence\n");
@@ -75,7 +75,7 @@ static int pidf_generate_body_content(void *body, void *data)
 	pjpidf_tuple_set_contact(state_data->pool, tuple, pj_cstr(&contact, sanitized));
 	pjpidf_tuple_set_contact_prio(state_data->pool, tuple, pj_cstr(&priority, "1"));
 	pjpidf_status_set_basic_open(pjpidf_tuple_get_status(tuple),
-			local_state == NOTIFY_OPEN);
+			local_state == NOTIFY_OPEN || local_state == NOTIFY_INUSE);
 
 	return 0;
 }

@@ -40,7 +40,7 @@
 static struct ast_frame *g723_read(struct ast_filestream *s, int *whennext)
 {
 	unsigned short size;
-	int res;
+	size_t res;
 	int delay;
 	/* Read the delay for the next packet, and schedule again if necessary */
 	/* XXX is this ignored ? */
@@ -64,8 +64,12 @@ static struct ast_frame *g723_read(struct ast_filestream *s, int *whennext)
 	}
 	/* Read the data into the buffer */
 	AST_FRAME_SET_BUFFER(&s->fr, s->buf, AST_FRIENDLY_OFFSET, size);
-	if ((res = fread(s->fr.data.ptr, 1, s->fr.datalen, s->f)) != size) {
-		ast_log(LOG_WARNING, "Short read (%d of %d bytes) (%s)!\n", res, size, strerror(errno));
+	if ((res = fread(s->fr.data.ptr, 1, s->fr.datalen, s->f)) != s->fr.datalen) {
+		if (res) {
+			ast_log(LOG_WARNING, "Short read of %s data (expected %d bytes, read %zu): %s\n",
+					ast_format_get_name(s->fr.subclass.format), s->fr.datalen, res,
+					strerror(errno));
+		}
 		return NULL;
 	}
 	*whennext = s->fr.samples = 240;

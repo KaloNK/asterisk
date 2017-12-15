@@ -693,9 +693,7 @@ static int channel_spy(struct ast_channel *chan, struct ast_autochan *spyee_auto
 		}
 	}
 
-	ast_channel_lock(chan);
-	ast_set_flag(ast_channel_flags(chan), AST_FLAG_END_DTMF_ONLY);
-	ast_channel_unlock(chan);
+	ast_channel_set_flag(chan, AST_FLAG_END_DTMF_ONLY);
 
 	csth.volfactor = *volfactor;
 
@@ -825,9 +823,7 @@ static int channel_spy(struct ast_channel *chan, struct ast_autochan *spyee_auto
 	else
 		ast_deactivate_generator(chan);
 
-	ast_channel_lock(chan);
-	ast_clear_flag(ast_channel_flags(chan), AST_FLAG_END_DTMF_ONLY);
-	ast_channel_unlock(chan);
+	ast_channel_clear_flag(chan, AST_FLAG_END_DTMF_ONLY);
 
 	if (ast_test_flag(flags, OPTION_WHISPER | OPTION_BARGE | OPTION_DTMF_SWITCH_MODES)) {
 		ast_audiohook_lock(&csth.whisper_audiohook);
@@ -921,7 +917,7 @@ static int common_exec(struct ast_channel *chan, struct ast_flags *flags,
 	if (ast_channel_state(chan) != AST_STATE_UP)
 		ast_answer(chan);
 
-	ast_set_flag(ast_channel_flags(chan), AST_FLAG_SPYING); /* so nobody can spy on us while we are spying */
+	ast_channel_set_flag(chan, AST_FLAG_SPYING);
 
 	waitms = 100;
 
@@ -934,7 +930,7 @@ static int common_exec(struct ast_channel *chan, struct ast_flags *flags,
 			if (!res)
 				res = ast_waitstream(chan, "");
 			else if (res < 0) {
-				ast_clear_flag(ast_channel_flags(chan), AST_FLAG_SPYING);
+				ast_channel_clear_flag(chan, AST_FLAG_SPYING);
 				break;
 			}
 			if (!ast_strlen_zero(exitcontext)) {
@@ -977,7 +973,7 @@ static int common_exec(struct ast_channel *chan, struct ast_flags *flags,
 		res = ast_waitfordigit(chan, waitms);
 		if (res < 0) {
 			iter = ast_channel_iterator_destroy(iter);
-			ast_clear_flag(ast_channel_flags(chan), AST_FLAG_SPYING);
+			ast_channel_clear_flag(chan, AST_FLAG_SPYING);
 			break;
 		}
 		if (!ast_strlen_zero(exitcontext)) {
@@ -1196,7 +1192,7 @@ static int common_exec(struct ast_channel *chan, struct ast_flags *flags,
 	}
 exit:
 
-	ast_clear_flag(ast_channel_flags(chan), AST_FLAG_SPYING);
+	ast_channel_clear_flag(chan, AST_FLAG_SPYING);
 
 	ast_channel_setoption(chan, AST_OPTION_TXGAIN, &zero_volume, sizeof(zero_volume), 0);
 
@@ -1446,7 +1442,7 @@ static int extenspy_exec(struct ast_channel *chan, const char *data)
 static int dahdiscan_exec(struct ast_channel *chan, const char *data)
 {
 	const char *spec = "DAHDI";
-	struct ast_flags flags;
+	struct ast_flags flags = {0};
 	struct spy_dtmf_options user_options = {
 		.cycle = '#',
 		.volume = '\0',

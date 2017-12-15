@@ -33,12 +33,6 @@
  *
  * \section devpolicy Development and Release Policies
  * \arg \ref CodeGuide : The must-read document for all developers
- * \arg \ref CommitMessages : Information on formatting and special tags for commit messages
- * \arg \ref ReleaseStatus : The current support level for various Asterisk releases
- * \arg \ref ReleasePolicies : Asterisk Release and Commit Policies
- * \arg \ref Reviewboard : Reviewboard Usage and Guidelines
- * \arg \ref MantisWorkflow : Workflow Guidelines for Asterisk Open Source Issue Tracker
- * \arg \ref AsteriskGitHowto : How to setup a local GIT mirror of the Asterisk SVN repository
  * \arg \ref AstCREDITS : A Thank You to contributors (unfortunately out of date)
  *
  * \section apisandinterfaces Asterisk APIs and Interfaces
@@ -64,12 +58,12 @@
  * \arg \ref SoundFiles included in the Asterisk distribution
  *
  * \section weblinks Web sites
- * \arg \b Main:  Asterisk Developer's website http://www.asterisk.org/developers/
+ * \arg \b Main:  Asterisk Developer's website https://www.asterisk.org/developers/
  * \arg \b Bugs: The Issue Tracker https://issues.asterisk.org
  * \arg \b Lists: List Server http://lists.digium.com
- * \arg \b Wiki: The Asterisk Wiki 	http://wiki.asterisk..org
+ * \arg \b Wiki: The Asterisk Wiki 	https://wiki.asterisk..org
  * \arg \b Docs: The Asterisk Documentation Project http://www.asteriskdocs.org
- * \arg \b Digium: The Asterisk Company http://www.digium.com
+ * \arg \b Digium: The Asterisk Company https://www.digium.com
  */
 
 /*! 

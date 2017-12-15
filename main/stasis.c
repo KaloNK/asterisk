@@ -908,7 +908,7 @@ struct stasis_forward *stasis_forward_all(struct stasis_topic *from_topic,
 {
 	int res;
 	size_t idx;
-	RAII_VAR(struct stasis_forward *, forward, NULL, ao2_cleanup);
+	struct stasis_forward *forward;
 
 	if (!from_topic || !to_topic) {
 		return NULL;
@@ -921,7 +921,7 @@ struct stasis_forward *stasis_forward_all(struct stasis_topic *from_topic,
 
 	/* Forwards to ourselves are implicit. */
 	if (to_topic == from_topic) {
-		return ao2_bump(forward);
+		return forward;
 	}
 
 	forward->from_topic = ao2_bump(from_topic);
@@ -932,6 +932,7 @@ struct stasis_forward *stasis_forward_all(struct stasis_topic *from_topic,
 	if (res != 0) {
 		ao2_unlock(from_topic);
 		ao2_unlock(to_topic);
+		ao2_ref(forward, -1);
 		return NULL;
 	}
 
@@ -941,7 +942,7 @@ struct stasis_forward *stasis_forward_all(struct stasis_topic *from_topic,
 	ao2_unlock(from_topic);
 	ao2_unlock(to_topic);
 
-	return ao2_bump(forward);
+	return forward;
 }
 
 static void subscription_change_dtor(void *obj)
@@ -1239,10 +1240,9 @@ struct ast_multi_object_blob *ast_multi_object_blob_create(struct ast_json *blob
 void ast_multi_object_blob_add(struct ast_multi_object_blob *multi,
 	enum stasis_user_multi_object_snapshot_type type, void *object)
 {
-	if (!multi || !object) {
-		return;
+	if (!multi || !object || AST_VECTOR_APPEND(&multi->snapshots[type], object)) {
+		ao2_cleanup(object);
 	}
-	AST_VECTOR_APPEND(&multi->snapshots[type],object);
 }
 
 /*! \brief Publish single channel user event (for app_userevent compatibility) */
@@ -1342,7 +1342,7 @@ static struct ast_str *multi_object_blob_to_ami(void *obj)
 
 	for (type = 0; type < STASIS_UMOS_MAX; ++type) {
 		for (i = 0; i < AST_VECTOR_SIZE(&multi->snapshots[type]); ++i) {
-			char *name = "";
+			char *name = NULL;
 			void *snapshot = AST_VECTOR_GET(&multi->snapshots[type], i);
 			ami_snapshot = NULL;
 
@@ -1352,11 +1352,11 @@ static struct ast_str *multi_object_blob_to_ami(void *obj)
 
 			switch (type) {
 			case STASIS_UMOS_CHANNEL:
-				ami_snapshot = ast_manager_build_channel_state_string_prefix(snapshot, name);
+				ami_snapshot = ast_manager_build_channel_state_string_prefix(snapshot, name ?: "");
 				break;
 
 			case STASIS_UMOS_BRIDGE:
-				ami_snapshot = ast_manager_build_bridge_state_string_prefix(snapshot, name);
+				ami_snapshot = ast_manager_build_bridge_state_string_prefix(snapshot, name ?: "");
 				break;
 
 			case STASIS_UMOS_ENDPOINT:
@@ -1367,6 +1367,7 @@ static struct ast_str *multi_object_blob_to_ami(void *obj)
 				ast_str_append(&ami_str, 0, "%s", ast_str_buffer(ami_snapshot));
 				ast_free(ami_snapshot);
 			}
+			ast_free(name);
 		}
 	}
 

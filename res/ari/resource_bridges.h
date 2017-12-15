@@ -52,7 +52,7 @@ struct ast_ari_bridges_list_args {
 void ast_ari_bridges_list(struct ast_variable *headers, struct ast_ari_bridges_list_args *args, struct ast_ari_response *response);
 /*! Argument struct for ast_ari_bridges_create() */
 struct ast_ari_bridges_create_args {
-	/*! Comma separated list of bridge type attributes (mixing, holding, dtmf_events, proxy_media). */
+	/*! Comma separated list of bridge type attributes (mixing, holding, dtmf_events, proxy_media, video_sfu). */
 	const char *type;
 	/*! Unique ID to give to the bridge being created. */
 	const char *bridge_id;
@@ -82,7 +82,7 @@ int ast_ari_bridges_create_parse_body(
 void ast_ari_bridges_create(struct ast_variable *headers, struct ast_ari_bridges_create_args *args, struct ast_ari_response *response);
 /*! Argument struct for ast_ari_bridges_create_with_id() */
 struct ast_ari_bridges_create_with_id_args {
-	/*! Comma separated list of bridge type attributes (mixing, holding, dtmf_events, proxy_media) to set. */
+	/*! Comma separated list of bridge type attributes (mixing, holding, dtmf_events, proxy_media, video_sfu) to set. */
 	const char *type;
 	/*! Unique ID to give to the bridge being created. */
 	const char *bridge_id;
@@ -150,6 +150,10 @@ struct ast_ari_bridges_add_channel_args {
 	char *channel_parse;
 	/*! Channel's role in the bridge */
 	const char *role;
+	/*! Absorb DTMF coming from this channel, preventing it to pass through to the bridge */
+	int absorb_dtmf;
+	/*! Mute audio from this channel, preventing it to pass through to the bridge */
+	int mute;
 };
 /*!
  * \brief Body parsing function for /bridges/{bridgeId}/addChannel.

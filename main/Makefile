@@ -140,12 +140,7 @@ endif
 	$(CMD_PREFIX) rm $@.fix
 
 ast_expr2f.o: _ASTCFLAGS+=-Wno-unused
-
-testexpr2: ast_expr2f.c ast_expr2.c ast_expr2.h
-	$(CC) -g -c -Iinclude -DSTANDALONE ast_expr2f.c
-	$(CC) -g -c -Iinclude -DSTANDALONE ast_expr2.c
-	$(CC) -g -o testexpr2 ast_expr2f.o ast_expr2.o -lm
-	rm ast_expr2.o ast_expr2f.o
+cdr.o: _ASTCFLAGS+=$(AST_NO_FORMAT_TRUNCATION)
 
 ifneq ($(LIBEDIT_INTERNAL),no)
 LIBEDIT_OBJ=editline/libedit.a
@@ -154,7 +149,7 @@ endif
 
 db.o: _ASTCFLAGS+=$(SQLITE3_INCLUDE)
 asterisk.o: _ASTCFLAGS+=$(LIBEDIT_INCLUDE)
-cli.o: _ASTCFLAGS+=$(LIBEDIT_INCLUDE)
+loader.o: _ASTCFLAGS+=$(LIBEDIT_INCLUDE)
 json.o: _ASTCFLAGS+=$(JANSSON_INCLUDE)
 bucket.o: _ASTCFLAGS+=$(URIPARSER_INCLUDE)
 crypt.o: _ASTCFLAGS+=$(CRYPT_INCLUDE)
@@ -278,7 +273,7 @@ endif
 
 $(ASTPJ_LIB).$(ASTPJ_SO_VERSION): _ASTLDFLAGS+=-Wl,-soname=$(ASTPJ_LIB).$(ASTPJ_SO_VERSION) $(PJ_LDFLAGS)
 $(ASTPJ_LIB).$(ASTPJ_SO_VERSION): _ASTCFLAGS+=-fPIC -DAST_MODULE=\"asteriskpj\" -DAST_NOT_MODULE $(PJ_CFLAGS)
-$(ASTPJ_LIB).$(ASTPJ_SO_VERSION): LIBS+=$(PJPROJECT_LDLIBS) -lssl -lcrypto -luuid -lm -lpthread $(RT_LIB)
+$(ASTPJ_LIB).$(ASTPJ_SO_VERSION): LIBS+=$(PJPROJECT_LDLIBS) $(OPENSSL_LIB) $(UUID_LIB) -lm -lpthread $(RT_LIB)
 ifeq ($(GNU_LD),1)
     $(ASTPJ_LIB).$(ASTPJ_SO_VERSION): SO_SUPPRESS_SYMBOLS=-Wl,--version-script,libasteriskpj.exports,--warn-common
 endif
@@ -303,7 +298,7 @@ ASTPJ_LIB:=libasteriskpj.dylib
 # /lib or /usr/lib
 $(ASTPJ_LIB): _ASTLDFLAGS+=-dynamiclib -install_name $(ASTLIBDIR)/$(ASTPJ_LIB) $(PJ_LDFLAGS)
 $(ASTPJ_LIB): _ASTCFLAGS+=-fPIC -DAST_MODULE=\"asteriskpj\" $(PJ_CFLAGS) -DAST_NOT_MODULE
-$(ASTPJ_LIB): LIBS+=$(PJPROJECT_LIBS)  -lssl -lcrypto -luuid -lm -lpthread $(RT_LIB)
+$(ASTPJ_LIB): LIBS+=$(PJPROJECT_LIBS)  $(OPENSSL_LIB) $(UUID_LIB) -lm -lpthread $(RT_LIB)
 $(ASTPJ_LIB): SOLINK=$(DYLINK)
 
 # Special rules for building a shared library (not a dynamically loadable module)
@@ -314,7 +309,7 @@ endif
 
 endif
 
-tcptls.o: _ASTCFLAGS+=$(OPENSSL_INCLUDE)
+tcptls.o: _ASTCFLAGS+=$(OPENSSL_INCLUDE) -Wno-deprecated-declarations
 
 $(MAIN_TGT): $(OBJS) $(ASTSSL_LIB) $(ASTPJ_LIB) $(LIBEDIT_OBJ)
 	@$(CC) -c -o buildinfo.o $(_ASTCFLAGS) buildinfo.c $(ASTCFLAGS)

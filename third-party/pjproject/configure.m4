@@ -1,3 +1,8 @@
+#
+# If this file is changed, be sure to run ASTTOPDIR/bootstrap.sh
+# before committing.
+#
+
 AC_DEFUN([_PJPROJECT_CONFIGURE],
 [
 	if test "${ac_mandatory_list#*PJPROJECT*}" != "$ac_mandatory_list" ; then
@@ -34,18 +39,37 @@ AC_DEFUN([_PJPROJECT_CONFIGURE],
 	if test "${CAT}" = ":" ; then
 		AC_MSG_ERROR(cat is required to build bundled pjproject)
 	fi
+	if test "${CUT}" = ":" ; then
+		AC_MSG_ERROR(cut is required to build bundled pjproject)
+	fi
+	if test "${GREP}" = ":" ; then
+		AC_MSG_ERROR(grep is required to build bundled pjproject)
+	fi
 
-	export TAR PATCH SED NM EXTERNALS_CACHE_DIR DOWNLOAD_TO_STDOUT DOWNLOAD_TIMEOUT DOWNLOAD MD5 CAT
-	${GNU_MAKE} --quiet --no-print-directory -C ${PJPROJECT_DIR} EXTERNALS_CACHE_DIR=${EXTERNALS_CACHE_DIR} configure
+	AC_ARG_VAR([PJPROJECT_CONFIGURE_OPTS],[Additional configure options to pass to bundled pjproject])
+	this_host=$(./config.sub $(./config.guess))
+	if test "$build" != "$this_host" ; then
+		PJPROJECT_CONFIGURE_OPTS+=" --build=$build"
+	fi
+	if test "$host" != "$this_host" ; then
+		PJPROJECT_CONFIGURE_OPTS+=" --host=$host"
+	fi
+
+	export TAR PATCH SED NM EXTERNALS_CACHE_DIR AST_DOWNLOAD_CACHE DOWNLOAD_TO_STDOUT DOWNLOAD_TIMEOUT DOWNLOAD MD5 CAT CUT GREP
+	export NOISY_BUILD
+	${GNU_MAKE} --quiet --no-print-directory -C ${PJPROJECT_DIR} \
+		PJPROJECT_CONFIGURE_OPTS="$PJPROJECT_CONFIGURE_OPTS" \
+		EXTERNALS_CACHE_DIR="${EXTERNALS_CACHE_DIR:-${AST_DOWNLOAD_CACHE}}" \
+		configure
 	if test $? -ne 0 ; then
 		AC_MSG_RESULT(failed)
 		AC_MSG_NOTICE(Unable to configure ${PJPROJECT_DIR})
-		AC_MSG_ERROR(Run "${GNU_MAKE} -C ${PJPROJECT_DIR} NOISY_BUILD=yes configure" to see error details.)
+		AC_MSG_ERROR(Re-run the ./configure command with 'NOISY_BUILD=yes' appended to see error details.)
 	fi
 
 	AC_MSG_CHECKING(for bundled pjproject)
 
-	PJPROJECT_INCLUDE=$(${GNU_MAKE} --quiet --no-print-directory -C ${PJPROJECT_DIR} EXTERNALS_CACHE_DIR=${EXTERNALS_CACHE_DIR} echo_cflags)
+	PJPROJECT_INCLUDE=$(${GNU_MAKE} --quiet --no-print-directory -C ${PJPROJECT_DIR} PJPROJECT_CONFIGURE_OPTS="$PJPROJECT_CONFIGURE_OPTS" EXTERNALS_CACHE_DIR="${EXTERNALS_CACHE_DIR:-${AST_DOWNLOAD_CACHE}}" echo_cflags)
 	PJPROJECT_CFLAGS="$PJPROJECT_INCLUDE"
 	PBX_PJPROJECT=1
 
@@ -62,7 +86,6 @@ AC_DEFUN([_PJPROJECT_CONFIGURE],
 	AC_DEFINE([HAVE_PJSIP_EVSUB_GRP_LOCK], 1, [Define if your system has PJSIP_EVSUB_GRP_LOCK])
 	AC_DEFINE([HAVE_PJSIP_INV_SESSION_REF], 1, [Define if your system has PJSIP_INV_SESSION_REF])
 	AC_DEFINE([HAVE_PJSIP_AUTH_CLT_DEINIT], 1, [Define if your system has pjsip_auth_clt_deinit declared.])
-	AC_DEFINE([HAVE_PJSIP_EVSUB_SET_UAS_TIMEOUT], 1, [Define if your system has pjsip_evsub_set_uas_timeout declared.])
 	AC_DEFINE([HAVE_PJSIP_TSX_LAYER_FIND_TSX2], 1, [Define if your system has pjsip_tsx_layer_find_tsx2 declared.])
 
 	AC_SUBST([PJPROJECT_BUNDLED])

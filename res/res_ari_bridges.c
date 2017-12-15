@@ -430,6 +430,14 @@ int ast_ari_bridges_add_channel_parse_body(
 	if (field) {
 		args->role = ast_json_string_get(field);
 	}
+	field = ast_json_object_get(body, "absorbDTMF");
+	if (field) {
+		args->absorb_dtmf = ast_json_is_true(field);
+	}
+	field = ast_json_object_get(body, "mute");
+	if (field) {
+		args->mute = ast_json_is_true(field);
+	}
 	return 0;
 }
 
@@ -498,6 +506,12 @@ static void ast_ari_bridges_add_channel_cb(
 		} else
 		if (strcmp(i->name, "role") == 0) {
 			args.role = (i->value);
+		} else
+		if (strcmp(i->name, "absorbDTMF") == 0) {
+			args.absorb_dtmf = ast_true(i->value);
+		} else
+		if (strcmp(i->name, "mute") == 0) {
+			args.mute = ast_true(i->value);
 		} else
 		{}
 	}
@@ -1547,6 +1561,10 @@ static int unload_module(void)
 static int load_module(void)
 {
 	int res = 0;
+
+	CHECK_ARI_MODULE_LOADED();
+
+
 	stasis_app_ref();
 	res |= ast_ari_add_handler(&bridges);
 	if (res) {

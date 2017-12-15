@@ -298,6 +298,14 @@ struct ast_sorcery_wizard {
 	/*! \brief Callback for retrieving multiple objects using a regex on their id */
 	void (*retrieve_regex)(const struct ast_sorcery *sorcery, void *data, const char *type, struct ao2_container *objects, const char *regex);
 
+	/*! \brief Optional callback for retrieving multiple objects by matching their id with a prefix */
+	void (*retrieve_prefix)(const struct ast_sorcery *sorcery,
+			void *data,
+			const char *type,
+			struct ao2_container *objects,
+			const char *prefix,
+			const size_t prefix_len);
+
 	/*! \brief Optional callback for retrieving an object using fields */
 	void *(*retrieve_fields)(const struct ast_sorcery *sorcery, void *data, const char *type, const struct ast_variable *fields);
 
@@ -392,9 +400,9 @@ int ast_sorcery_wizard_unregister(const struct ast_sorcery_wizard *interface);
  * \retval non-NULL success
  * \retval NULL if allocation failed
  */
-struct ast_sorcery *__ast_sorcery_open(const char *module);
+struct ast_sorcery *__ast_sorcery_open(const char *module, const char *file, int line, const char *func);
 
-#define ast_sorcery_open() __ast_sorcery_open(AST_MODULE)
+#define ast_sorcery_open() __ast_sorcery_open(AST_MODULE, __FILE__, __LINE__, __PRETTY_FUNCTION__)
 
 /*!
  * \brief Retrieves an existing sorcery instance by module name
@@ -1241,6 +1249,22 @@ void *ast_sorcery_retrieve_by_fields(const struct ast_sorcery *sorcery, const ch
 struct ao2_container *ast_sorcery_retrieve_by_regex(const struct ast_sorcery *sorcery, const char *type, const char *regex);
 
 /*!
+ * \brief Retrieve multiple objects whose id begins with the specified prefix
+ * \since 13.19.0
+ *
+ * \param sorcery Pointer to a sorcery structure
+ * \param type Type of object to retrieve
+ * \param prefix Object id prefix
+ * \param prefix_len The length of prefix in bytes
+ *
+ * \retval non-NULL if error occurs
+ * \retval NULL success
+ *
+ * \note The prefix is matched in a case sensitive manner.
+ */
+struct ao2_container *ast_sorcery_retrieve_by_prefix(const struct ast_sorcery *sorcery, const char *type, const char *prefix, const size_t prefix_len);
+
+/*!
  * \brief Update an object
  *
  * \param sorcery Pointer to a sorcery structure
@@ -1280,8 +1304,13 @@ int ast_sorcery_is_stale(const struct ast_sorcery *sorcery, void *object);
  * \brief Decrease the reference count of a sorcery structure
  *
  * \param sorcery Pointer to a sorcery structure
+ *
+ * \note Prior to 16.0.0 this was a function which had to be used.
+ *       Now you can use any variant of ao2_cleanup or ao2_ref to
+ *       release a reference.
  */
-void ast_sorcery_unref(struct ast_sorcery *sorcery);
+#define ast_sorcery_unref(sorcery) \
+	ao2_cleanup(sorcery)
 
 /*!
  * \brief Get the unique identifier of a sorcery object

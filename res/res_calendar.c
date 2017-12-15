@@ -33,7 +33,7 @@
  */
 
 /*** MODULEINFO
-	<support_level>core</support_level>
+	<support_level>extended</support_level>
  ***/
 
 #include "asterisk.h"
@@ -339,10 +339,7 @@ static void calendar_destructor(void *obj)
 	}
 	ast_calendar_clear_events(cal);
 	ast_string_field_free_memory(cal);
-	if (cal->vars) {
-		ast_variables_destroy(cal->vars);
-		cal->vars = NULL;
-	}
+	ast_variables_destroy(cal->vars);
 	ao2_ref(cal->events, -1);
 	ao2_unlock(cal);
 }
@@ -488,6 +485,13 @@ static struct ast_calendar *build_calendar(struct ast_config *cfg, const char *c
 		}
 	}
 
+	if (cal->autoreminder && ast_strlen_zero(cal->notify_channel)) {
+		ast_log(LOG_WARNING,
+				"You have set 'autoreminder' but not 'channel' for calendar '%s.' "
+				"Notifications will not occur.\n",
+				cal->name);
+	}
+
 	if (new_calendar) {
 		cal->thread = AST_PTHREADT_NULL;
 		ast_cond_init(&cal->unload, NULL);
@@ -495,7 +499,7 @@ static struct ast_calendar *build_calendar(struct ast_config *cfg, const char *c
 		if (ast_pthread_create(&cal->thread, NULL, cal->tech->load_calendar, cal)) {
 			/* If we start failing to create threads, go ahead and return NULL
 			 * and the tech module will be unregistered
-			 */ 
+			 */
 			ao2_unlink(calendars, cal);
 			cal = unref_calendar(cal);
 		}
@@ -741,7 +745,7 @@ static void *do_notify(void *data)
 	struct ast_channel *chan = NULL;
 	struct ast_variable *itervar;
 	char *tech, *dest;
-	char buf[8];
+	char buf[33];
 	struct ast_format_cap *caps;
 
 	tech = ast_strdupa(event->owner->notify_channel);
@@ -954,7 +958,7 @@ static int schedule_calendar_event(struct ast_calendar *cal, struct ast_calendar
 	event = cmp_event ? cmp_event : old_event;
 
 	ao2_lock(event);
-	if (!cmp_event || old_event->alarm != event->alarm) {
+	if (!ast_strlen_zero(cal->notify_channel) && (!cmp_event || old_event->alarm != event->alarm)) {
 		changed = 1;
 		if (cal->autoreminder) {
 			alarm_notify_sched = (event->start - (60 * cal->autoreminder) - now.tv_sec) * 1000;
@@ -963,7 +967,7 @@ static int schedule_calendar_event(struct ast_calendar *cal, struct ast_calendar
 		}
 
 		/* For now, send the notification if we missed it, but the meeting hasn't happened yet */
-		if (event->start >=  now.tv_sec) {
+		if (event->start >= now.tv_sec) {
 			if (alarm_notify_sched <= 0) {
 				alarm_notify_sched = 1;
 			}
@@ -1596,7 +1600,7 @@ static char *epoch_to_string(char *buf, size_t buflen, time_t epoch)
 
 static char *handle_show_calendar(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a)
 {
-#define FORMAT "%-17.17s : %-20.20s\n"
+#define FORMAT  "%-18.18s : %-20.20s\n"
 #define FORMAT2 "%-12.12s: %-40.60s\n"
 	struct ao2_iterator i;
 	struct ast_calendar *cal;
@@ -1645,7 +1649,13 @@ static char *handle_show_calendar(struct ast_cli_entry *e, int cmd, struct ast_c
 	ast_cli(a->fd, FORMAT, "Notify appdata", cal->notify_appdata);
 	ast_cli(a->fd, "%-17.17s : %d\n", "Refresh time", cal->refresh);
 	ast_cli(a->fd, "%-17.17s : %d\n", "Timeframe", cal->timeframe);
-	ast_cli(a->fd, "%-17.17s : %d\n", "Autoreminder", cal->autoreminder);
+
+	if (cal->autoreminder) {
+		ast_cli(a->fd, "%-17.17s : %d minutes before event\n", "Autoreminder", cal->autoreminder);
+	} else {
+		ast_cli(a->fd, "%-17.17s : None\n", "Autoreminder");
+	}
+
 	ast_cli(a->fd, "%s\n", "Events");
 	ast_cli(a->fd, "%s\n", "------");
 
@@ -1923,7 +1933,7 @@ static int load_module(void)
 	return AST_MODULE_LOAD_SUCCESS;
 }
 AST_MODULE_INFO(ASTERISK_GPL_KEY, AST_MODFLAG_GLOBAL_SYMBOLS | AST_MODFLAG_LOAD_ORDER, "Asterisk Calendar integration",
-	.support_level = AST_MODULE_SUPPORT_CORE,
+	.support_level = AST_MODULE_SUPPORT_EXTENDED,
 	.load = load_module,
 	.unload = unload_module,
 	.reload = reload,

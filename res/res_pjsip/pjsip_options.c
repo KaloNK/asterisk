@@ -1147,7 +1147,24 @@ static int qualify_and_schedule_cb_with_aor(void *obj, void *arg, int flags)
 
 static int qualify_and_schedule_cb_without_aor(void *obj, void *arg, int flags)
 {
-	qualify_and_schedule_contact((struct ast_sip_contact *) obj);
+	/*
+	 * These are really dynamic contacts. We need to retrieve the aor associated
+	 * with the contact since it's possible some of the aor's fields were updated
+	 * since last load.
+	 */
+	struct ast_sip_contact *contact = obj;
+	struct ast_sip_aor *aor = ast_sip_location_retrieve_aor(contact->aor);
+
+	if (aor) {
+		qualify_and_schedule_cb_with_aor(obj, aor, flags);
+		ao2_ref(aor, -1);
+	} else {
+		ast_log(LOG_WARNING, "Unable to locate AOR for contact '%s'. Keeping old "
+			"associated settings: frequency=%d, timeout=%f, authenticate=%s\n",
+			contact->uri, contact->qualify_frequency, contact->qualify_timeout,
+			contact->authenticate_qualify ? "yes" : "no");
+		qualify_and_schedule_contact(contact);
+	}
 
 	return 0;
 }
@@ -1175,32 +1192,21 @@ static int qualify_and_schedule_all_cb(void *obj, void *arg, int flags)
 	return 0;
 }
 
-/*!
- * \internal
- * \brief Unschedule all existing contacts
- */
-static int unschedule_all_cb(void *obj, void *arg, int flags)
-{
-	struct sched_data *data = obj;
-
-	AST_SCHED_DEL_UNREF(sched, data->id, ao2_ref(data, -1));
-
-	return CMP_MATCH;
-}
-
 static void qualify_and_schedule_all(void)
 {
-	struct ast_variable *var = ast_variable_new("qualify_frequency >", "0", "");
 	struct ao2_container *aors;
 	struct ao2_container *contacts;
 
-	if (!var) {
-		return;
-	}
-	aors = ast_sorcery_retrieve_by_fields(ast_sip_get_sorcery(),
-		"aor", AST_RETRIEVE_FLAG_MULTIPLE, var);
+	/*
+	 * It's possible that the AOR had some of it's fields updated prior to a
+	 * reload. For instance qualifying could have been turned on or off by
+	 * setting the qualify_frequency. Due to this we have to iterate through
+	 * all contacts (static and dynamic), and not just ones where the frequency
+	 * is greater than zero, updating any contact fields with the AOR's values.
+	 */
 
-	ao2_callback(sched_qualifies, OBJ_NODATA | OBJ_MULTIPLE | OBJ_UNLINK, unschedule_all_cb, NULL);
+	aors = ast_sorcery_retrieve_by_fields(ast_sip_get_sorcery(),
+		"aor", AST_RETRIEVE_FLAG_MULTIPLE | AST_RETRIEVE_FLAG_ALL, NULL);
 
 	if (aors) {
 		ao2_callback(aors, OBJ_NODATA, qualify_and_schedule_all_cb, NULL);
@@ -1208,14 +1214,11 @@ static void qualify_and_schedule_all(void)
 	}
 
 	contacts = ast_sorcery_retrieve_by_fields(ast_sip_get_sorcery(),
-		"contact", AST_RETRIEVE_FLAG_MULTIPLE, var);
+		"contact", AST_RETRIEVE_FLAG_MULTIPLE | AST_RETRIEVE_FLAG_ALL, NULL);
 	if (contacts) {
 		ao2_callback(contacts, OBJ_NODATA, qualify_and_schedule_cb_without_aor, NULL);
 		ao2_ref(contacts, -1);
 	}
-
-	ast_variables_destroy(var);
-
 }
 
 int ast_sip_format_contact_ami(void *obj, void *arg, int flags)

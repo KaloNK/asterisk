@@ -69,7 +69,6 @@
 #include "asterisk/dial.h"
 #include "asterisk/causes.h"
 #include "asterisk/paths.h"
-#include "asterisk/data.h"
 #include "asterisk/test.h"
 #include "asterisk/stasis.h"
 #include "asterisk/stasis_channels.h"
@@ -2252,20 +2251,23 @@ static char *sla_show_stations(struct ast_cli_entry *e, int cmd, struct ast_cli_
 			if (trunk_ref->ring_timeout) {
 				snprintf(ring_timeout, sizeof(ring_timeout),
 					"%u", trunk_ref->ring_timeout);
-			} else
+			} else {
 				strcpy(ring_timeout, "(none)");
+			}
 			if (trunk_ref->ring_delay) {
 				snprintf(ring_delay, sizeof(ring_delay),
 					"%u", trunk_ref->ring_delay);
-			} else
+			} else {
 				strcpy(ring_delay, "(none)");
-				ast_cli(a->fd, "===    ==> Trunk Name: %s\n"
-			            "===       ==> State:       %s\n"
-			            "===       ==> RingTimeout: %s\n"
-			            "===       ==> RingDelay:   %s\n",
-			            trunk_ref->trunk->name,
-			            trunkstate2str(trunk_ref->state),
-			            ring_timeout, ring_delay);
+			}
+
+			ast_cli(a->fd, "===    ==> Trunk Name: %s\n"
+	            "===       ==> State:       %s\n"
+	            "===       ==> RingTimeout: %s\n"
+	            "===       ==> RingDelay:   %s\n",
+	            trunk_ref->trunk->name,
+	            trunkstate2str(trunk_ref->state),
+	            ring_timeout, ring_delay);
 		}
 		ast_cli(a->fd, "=== ---------------------------------------------------------\n"
 		            "===\n");
@@ -3196,11 +3198,11 @@ static int conf_run(struct ast_channel *chan, struct ast_conference *conf, struc
 	struct timeval now;
 	struct ast_dsp *dsp = NULL;
 	struct ast_app *agi_app;
-	char *agifile, *mod_speex;
+	char *agifile;
 	const char *agifiledefault = "conf-background.agi", *tmpvar;
 	char meetmesecs[30] = "";
 	char exitcontext[AST_MAX_CONTEXT] = "";
-	char recordingtmp[AST_MAX_EXTENSION] = "";
+	char recordingtmp[AST_MAX_EXTENSION * 2] = "";
 	char members[10] = "";
 	int dtmf = 0, opt_waitmarked_timeout = 0;
 	time_t timeout = 0;
@@ -3586,9 +3588,7 @@ static int conf_run(struct ast_channel *chan, struct ast_conference *conf, struc
 	}
 
 	/* Reduce background noise from each participant */
-	if (!ast_test_flag64(confflags, CONFFLAG_DONT_DENOISE) &&
-		(mod_speex = ast_module_helper("", "func_speex", 0, 0, 0, 0))) {
-		ast_free(mod_speex);
+	if (!ast_test_flag64(confflags, CONFFLAG_DONT_DENOISE) && ast_module_check("func_speex.so")) {
 		ast_func_write(chan, "DENOISE(rx)", "on");
 	}
 
@@ -4518,7 +4518,7 @@ static struct ast_conference *find_conf_realtime(struct ast_channel *chan, char 
 		char currenttime[32] = "";
 		char eatime[32] = "";
 		char bookid[51] = "";
-		char recordingtmp[AST_MAX_EXTENSION] = "";
+		char recordingtmp[AST_MAX_EXTENSION * 2] = "";
 		char useropts[OPTIONS_LEN + 1] = ""; /* Used for RealTime conferences */
 		char adminopts[OPTIONS_LEN + 1] = "";
 		struct ast_tm tm, etm;
@@ -4661,7 +4661,7 @@ static struct ast_conference *find_conf_realtime(struct ast_channel *chan, char 
 	if (cnf) {
 		if (confflags->flags && !cnf->chan &&
 		    !ast_test_flag64(confflags, CONFFLAG_QUIET) &&
-		    ast_test_flag64(confflags, CONFFLAG_INTROUSER | CONFFLAG_INTROUSERNOREVIEW) | CONFFLAG_INTROUSER_VMREC) {
+		    ast_test_flag64(confflags, CONFFLAG_INTROUSER | CONFFLAG_INTROUSERNOREVIEW | CONFFLAG_INTROUSER_VMREC)) {
 			ast_log(LOG_WARNING, "No DAHDI channel available for conference, user introduction disabled (is chan_dahdi loaded?)\n");
 			ast_clear_flag64(confflags, CONFFLAG_INTROUSER | CONFFLAG_INTROUSERNOREVIEW | CONFFLAG_INTROUSER_VMREC);
 		}
@@ -8005,186 +8005,6 @@ static int load_config(int reload)
 	return sla_load_config(reload);
 }
 
-#define MEETME_DATA_EXPORT(MEMBER)					\
-	MEMBER(ast_conference, confno, AST_DATA_STRING)			\
-	MEMBER(ast_conference, dahdiconf, AST_DATA_INTEGER)		\
-	MEMBER(ast_conference, users, AST_DATA_INTEGER)			\
-	MEMBER(ast_conference, markedusers, AST_DATA_INTEGER)		\
-	MEMBER(ast_conference, maxusers, AST_DATA_INTEGER)		\
-	MEMBER(ast_conference, isdynamic, AST_DATA_BOOLEAN)		\
-	MEMBER(ast_conference, locked, AST_DATA_BOOLEAN)		\
-	MEMBER(ast_conference, recordingfilename, AST_DATA_STRING)	\
-	MEMBER(ast_conference, recordingformat, AST_DATA_STRING)	\
-	MEMBER(ast_conference, pin, AST_DATA_PASSWORD)			\
-	MEMBER(ast_conference, pinadmin, AST_DATA_PASSWORD)		\
-	MEMBER(ast_conference, start, AST_DATA_TIMESTAMP)		\
-	MEMBER(ast_conference, endtime, AST_DATA_TIMESTAMP)
-
-AST_DATA_STRUCTURE(ast_conference, MEETME_DATA_EXPORT);
-
-#define MEETME_USER_DATA_EXPORT(MEMBER)					\
-	MEMBER(ast_conf_user, user_no, AST_DATA_INTEGER)		\
-	MEMBER(ast_conf_user, talking, AST_DATA_BOOLEAN)		\
-	MEMBER(ast_conf_user, dahdichannel, AST_DATA_BOOLEAN)		\
-	MEMBER(ast_conf_user, jointime, AST_DATA_TIMESTAMP)		\
-	MEMBER(ast_conf_user, kicktime, AST_DATA_TIMESTAMP)		\
-	MEMBER(ast_conf_user, timelimit, AST_DATA_MILLISECONDS)		\
-	MEMBER(ast_conf_user, play_warning, AST_DATA_MILLISECONDS)	\
-	MEMBER(ast_conf_user, warning_freq, AST_DATA_MILLISECONDS)
-
-AST_DATA_STRUCTURE(ast_conf_user, MEETME_USER_DATA_EXPORT);
-
-static int user_add_provider_cb(void *obj, void *arg, int flags)
-{
-	struct ast_data *data_meetme_user;
-	struct ast_data *data_meetme_user_channel;
-	struct ast_data *data_meetme_user_volume;
-
-	struct ast_conf_user *user = obj;
-	struct ast_data *data_meetme_users = arg;
-
-	data_meetme_user = ast_data_add_node(data_meetme_users, "user");
-	if (!data_meetme_user) {
-		return 0;
-	}
-	/* user structure */
-	ast_data_add_structure(ast_conf_user, data_meetme_user, user);
-
-	/* user's channel */
-	data_meetme_user_channel = ast_data_add_node(data_meetme_user, "channel");
-	if (!data_meetme_user_channel) {
-		return 0;
-	}
-
-	ast_channel_data_add_structure(data_meetme_user_channel, user->chan, 1);
-
-	/* volume structure */
-	data_meetme_user_volume = ast_data_add_node(data_meetme_user, "listen-volume");
-	if (!data_meetme_user_volume) {
-		return 0;
-	}
-	ast_data_add_int(data_meetme_user_volume, "desired", user->listen.desired);
-	ast_data_add_int(data_meetme_user_volume, "actual", user->listen.actual);
-
-	data_meetme_user_volume = ast_data_add_node(data_meetme_user, "talk-volume");
-	if (!data_meetme_user_volume) {
-		return 0;
-	}
-	ast_data_add_int(data_meetme_user_volume, "desired", user->talk.desired);
-	ast_data_add_int(data_meetme_user_volume, "actual", user->talk.actual);
-
-	return 0;
-}
-
-/*!
- * \internal
- * \brief Implements the meetme data provider.
- */
-static int meetme_data_provider_get(const struct ast_data_search *search,
-	struct ast_data *data_root)
-{
-	struct ast_conference *cnf;
-	struct ast_data *data_meetme, *data_meetme_users;
-
-	AST_LIST_LOCK(&confs);
-	AST_LIST_TRAVERSE(&confs, cnf, list) {
-		data_meetme = ast_data_add_node(data_root, "meetme");
-		if (!data_meetme) {
-			continue;
-		}
-
-		ast_data_add_structure(ast_conference, data_meetme, cnf);
-
-		if (ao2_container_count(cnf->usercontainer)) {
-			data_meetme_users = ast_data_add_node(data_meetme, "users");
-			if (!data_meetme_users) {
-				ast_data_remove_node(data_root, data_meetme);
-				continue;
-			}
-
-			ao2_callback(cnf->usercontainer, OBJ_NODATA, user_add_provider_cb, data_meetme_users); 
-		}
-
-		if (!ast_data_search_match(search, data_meetme)) {
-			ast_data_remove_node(data_root, data_meetme);
-		}
-	}
-	AST_LIST_UNLOCK(&confs);
-
-	return 0;
-}
-
-static const struct ast_data_handler meetme_data_provider = {
-	.version = AST_DATA_HANDLER_VERSION,
-	.get = meetme_data_provider_get
-};
-
-static const struct ast_data_entry meetme_data_providers[] = {
-	AST_DATA_ENTRY("asterisk/application/meetme/list", &meetme_data_provider),
-};
-
-#ifdef TEST_FRAMEWORK
-AST_TEST_DEFINE(test_meetme_data_provider)
-{
-	struct ast_channel *chan;
-	struct ast_conference *cnf;
-	struct ast_data *node;
-	struct ast_data_query query = {
-		.path = "/asterisk/application/meetme/list",
-		.search = "list/meetme/confno=9898"
-	};
-
-	switch (cmd) {
-	case TEST_INIT:
-		info->name = "meetme_get_data_test";
-		info->category = "/main/data/app_meetme/list/";
-		info->summary = "Meetme data provider unit test";
-		info->description =
-			"Tests whether the Meetme data provider implementation works as expected.";
-		return AST_TEST_NOT_RUN;
-	case TEST_EXECUTE:
-		break;
-	}
-
-	chan = ast_channel_alloc(0, AST_STATE_DOWN, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, "MeetMeTest");
-	if (!chan) {
-		ast_test_status_update(test, "Channel allocation failed\n");
-		return AST_TEST_FAIL;
-	}
-
-	ast_channel_unlock(chan);
-
-	cnf = build_conf("9898", "", "1234", 1, 1, 1, chan, test);
-	if (!cnf) {
-		ast_test_status_update(test, "Build of test conference 9898 failed\n");
-		ast_hangup(chan);
-		return AST_TEST_FAIL;
-	}
-
-	node = ast_data_get(&query);
-	if (!node) {
-		ast_test_status_update(test, "Data query for test conference 9898 failed\n");
-		dispose_conf(cnf);
-		ast_hangup(chan);
-		return AST_TEST_FAIL;
-	}
-
-	if (strcmp(ast_data_retrieve_string(node, "meetme/confno"), "9898")) {
-		ast_test_status_update(test, "Query returned the wrong conference\n");
-		dispose_conf(cnf);
-		ast_hangup(chan);
-		ast_data_free(node);
-		return AST_TEST_FAIL;
-	}
-
-	ast_data_free(node);
-	dispose_conf(cnf);
-	ast_hangup(chan);
-
-	return AST_TEST_PASS;
-}
-#endif
-
 static int unload_module(void)
 {
 	int res = 0;
@@ -8200,11 +8020,6 @@ static int unload_module(void)
 	res |= ast_unregister_application(app);
 	res |= ast_unregister_application(slastation_app);
 	res |= ast_unregister_application(slatrunk_app);
-
-#ifdef TEST_FRAMEWORK
-	AST_TEST_UNREGISTER(test_meetme_data_provider);
-#endif
-	ast_data_unregister(NULL);
 
 	ast_devstate_prov_del("Meetme");
 	ast_devstate_prov_del("SLA");
@@ -8248,11 +8063,6 @@ static int load_module(void)
 	res |= ast_register_application_xml(app, conf_exec);
 	res |= ast_register_application_xml(slastation_app, sla_station_exec);
 	res |= ast_register_application_xml(slatrunk_app, sla_trunk_exec);
-
-#ifdef TEST_FRAMEWORK
-	AST_TEST_REGISTER(test_meetme_data_provider);
-#endif
-	ast_data_register_multiple(meetme_data_providers, ARRAY_LEN(meetme_data_providers));
 
 	res |= ast_devstate_prov_add("Meetme", meetmestate);
 	res |= ast_devstate_prov_add("SLA", sla_state);

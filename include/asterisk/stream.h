@@ -27,6 +27,7 @@
 #define _AST_STREAM_H_
 
 #include "asterisk/codec.h"
+#include "asterisk/vector.h"
 
 /*!
  * \brief Forward declaration for a stream, as it is opaque
@@ -43,45 +44,50 @@ struct ast_format_cap;
  */
 struct ast_stream_topology;
 
+/*!
+ * \brief A mapping of two topologies.
+ */
+struct ast_stream_topology_map;
+
 typedef void (*ast_stream_data_free_fn)(void *);
 
 /*!
  * \brief States that a stream may be in
  */
 enum ast_stream_state {
-    /*!
-     * \brief Set when the stream has been removed
-     */
-    AST_STREAM_STATE_REMOVED = 0,
-    /*!
-     * \brief Set when the stream is sending and receiving media
-     */
-    AST_STREAM_STATE_SENDRECV,
-    /*!
-     * \brief Set when the stream is sending media only
-     */
-    AST_STREAM_STATE_SENDONLY,
-    /*!
-     * \brief Set when the stream is receiving media only
-     */
-    AST_STREAM_STATE_RECVONLY,
-    /*!
-     * \brief Set when the stream is not sending OR receiving media
-     */
-    AST_STREAM_STATE_INACTIVE,
+	/*!
+	 * \brief Set when the stream has been removed/declined
+	 */
+	AST_STREAM_STATE_REMOVED = 0,
+	/*!
+	 * \brief Set when the stream is sending and receiving media
+	 */
+	AST_STREAM_STATE_SENDRECV,
+	/*!
+	 * \brief Set when the stream is sending media only
+	 */
+	AST_STREAM_STATE_SENDONLY,
+	/*!
+	 * \brief Set when the stream is receiving media only
+	 */
+	AST_STREAM_STATE_RECVONLY,
+	/*!
+	 * \brief Set when the stream is not sending OR receiving media
+	 */
+	AST_STREAM_STATE_INACTIVE,
 };
 
 /*!
  * \brief Stream data slots
  */
 enum ast_stream_data_slot {
-    /*!
-     * \brief Data slot for RTP instance
-     */
-	AST_STREAM_DATA_RTP_INSTANCE = 0,
-    /*!
-     * \brief Controls the size of the data pointer array
-     */
+	/*!
+	 * \brief Data slot for RTP instance
+	 */
+	AST_STREAM_DATA_RTP_CODECS = 0,
+	/*!
+	 * \brief Controls the size of the data pointer array
+	 */
 	AST_STREAM_DATA_SLOT_MAX
 };
 
@@ -115,16 +121,17 @@ void ast_stream_free(struct ast_stream *stream);
  * \brief Create a deep clone of an existing stream
  *
  * \param stream The existing stream
+ * \param Optional name for cloned stream. If NULL, then existing stream's name is copied.
  *
  * \retval non-NULL success
  * \retval NULL failure
  *
  * \note Opaque data pointers set with ast_stream_set_data() are not part
- * of the deep clone.  The pointers are simply copied.
+ * of the deep clone.  We have no way to clone the data.
  *
  * \since 15
  */
-struct ast_stream *ast_stream_clone(const struct ast_stream *stream);
+struct ast_stream *ast_stream_clone(const struct ast_stream *stream, const char *name);
 
 /*!
  * \brief Get the name of a stream
@@ -221,6 +228,17 @@ void ast_stream_set_state(struct ast_stream *stream, enum ast_stream_state state
 const char *ast_stream_state2str(enum ast_stream_state state);
 
 /*!
+ * \brief Convert a string to a stream state
+ *
+ * \param str The string to convert
+ *
+ * \return The stream state
+ *
+ * \since 15.0.0
+ */
+enum ast_stream_state ast_stream_str2state(const char *str);
+
+/*!
  * \brief Get the opaque stream data
  *
  * \param stream The media stream
@@ -281,6 +299,20 @@ struct ast_stream_topology *ast_stream_topology_alloc(void);
  */
 struct ast_stream_topology *ast_stream_topology_clone(
 	const struct ast_stream_topology *topology);
+
+/*!
+ * \brief Compare two stream topologies to see if they are equal
+ *
+ * \param left The left topology
+ * \param right The right topology
+ *
+ * \retval 1 topologies are equivalent
+ * \retval 0 topologies differ
+ *
+ * \since 15
+ */
+int ast_stream_topology_equal(const struct ast_stream_topology *left,
+	const struct ast_stream_topology *right);
 
 /*!
  * \brief Destroy a stream topology
@@ -352,11 +384,30 @@ int ast_stream_topology_set_stream(struct ast_stream_topology *topology,
 	unsigned int position, struct ast_stream *stream);
 
 /*!
+ * \brief Delete a specified stream from the given topology.
+ * \since 15.0.0
+ *
+ * \param topology The topology of streams.
+ * \param position The topology position to delete.
+ *
+ * \note Deleting a stream will completely remove it from the topology
+ * as if it never existed in it.  i.e., Any following stream positions
+ * will shift down so there is no gap.
+ *
+ * \retval 0 on success.
+ * \retval -1 on failure.
+ *
+ * \return Nothing
+ */
+int ast_stream_topology_del_stream(struct ast_stream_topology *topology,
+	unsigned int position);
+
+/*!
  * \brief A helper function that, given a format capabilities structure,
  * creates a topology and separates the media types in format_cap into
  * separate streams.
  *
- * \param caps The format capabilities structure
+ * \param caps The format capabilities structure (NULL creates an empty topology)
  *
  * \retval non-NULL success
  * \retval NULL failure
@@ -365,7 +416,7 @@ int ast_stream_topology_set_stream(struct ast_stream_topology *topology,
  * since a new format capabilities structure is created for each media type.
  *
  * \note Each stream will have its name set to the corresponding media type.
- * For example: "AST_MEDIA_TYPE_AUDIO".
+ * For example: "audio".
  *
  * \note Each stream will be set to the sendrecv state.
  *
@@ -375,7 +426,26 @@ struct ast_stream_topology *ast_stream_topology_create_from_format_cap(
 	struct ast_format_cap *cap);
 
 /*!
- * \brief Gets the first stream of a specific type from the topology
+ * \brief Create a format capabilities structure representing the topology.
+ *
+ * \details
+ * A helper function that, given a stream topology, creates a format
+ * capabilities structure containing all formats from all active streams.
+ *
+ * \param topology The topology of streams
+ *
+ * \retval non-NULL success
+ * \retval NULL failure
+ *
+ * \note The stream topology is NOT altered by this function.
+ *
+ * \since 15
+ */
+struct ast_format_cap *ast_format_cap_from_stream_topology(
+	struct ast_stream_topology *topology);
+
+/*!
+ * \brief Gets the first active stream of a specific type from the topology
  *
  * \param topology The topology of streams
  * \param type The media type
@@ -388,5 +458,43 @@ struct ast_stream_topology *ast_stream_topology_create_from_format_cap(
 struct ast_stream *ast_stream_topology_get_first_stream_by_type(
 	const struct ast_stream_topology *topology,
 	enum ast_media_type type);
+
+/*!
+ * \brief Map a given topology's streams to the given types.
+ *
+ * \note The given vectors in which mapping values are placed are reset by
+ *       this function. This means if those vectors already contain mapping
+ *       values they will be lost.
+ *
+ * \param topology The topology to map
+ * \param types The media types to be mapped
+ * \param v0 Index mapping of topology to types
+ * \param v1 Index mapping of types to topology
+ *
+ * \since 15
+ */
+void ast_stream_topology_map(const struct ast_stream_topology *topology,
+	struct ast_vector_int *types, struct ast_vector_int *v0, struct ast_vector_int *v1);
+
+/*!
+ * \brief Get the stream group that a stream is part of
+ *
+ * \param stream The stream
+ *
+ * \return the numerical stream group (-1 if not in a group)
+ *
+ * \since 15.2.0
+ */
+int ast_stream_get_group(const struct ast_stream *stream);
+
+/*!
+ * \brief Set the stream group for a stream
+ *
+ * \param stream The stream
+ * \param group The group the stream is part of
+ *
+ * \since 15.2.0
+ */
+void ast_stream_set_group(struct ast_stream *stream, int group);
 
 #endif /* _AST_STREAM_H */

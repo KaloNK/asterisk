@@ -365,6 +365,7 @@ static struct ast_channel_tech vpb_tech = {
 	capabilities: NULL,
 	properties: 0,
 	requester: vpb_request,
+	requester_with_stream_topology: NULL,
 	devicestate: NULL,
 	presencestate: NULL,
 	send_digit_begin: vpb_digit_begin,
@@ -398,6 +399,7 @@ static struct ast_channel_tech vpb_tech_indicate = {
 	capabilities: NULL,
 	properties: 0,
 	requester: vpb_request,
+	requester_with_stream_topology: NULL,
 	devicestate: NULL,
 	presencestate: NULL,
 	send_digit_begin: vpb_digit_begin,
@@ -1789,7 +1791,7 @@ static int vpb_digit_end(struct ast_channel *ast, char digit, unsigned int durat
 	ast_verb(4, "%s: vpb_digit: asked to play digit[%s]\n", p->dev, s);
 
 	ast_mutex_lock(&p->play_dtmf_lock);
-	strncat(p->play_dtmf, s, sizeof(*p->play_dtmf) - strlen(p->play_dtmf) - 1);
+	strncat(p->play_dtmf, s, sizeof(p->play_dtmf) - strlen(p->play_dtmf) - 1);
 	ast_mutex_unlock(&p->play_dtmf_lock);
 
 	ast_mutex_unlock(&p->lock);

@@ -24,6 +24,7 @@
  */
 
 /*** MODULEINFO
+	<use type="module">func_periodic_hook</use>
 	<support_level>core</support_level>
  ***/
  
@@ -59,17 +60,17 @@
 		<syntax>
 			<parameter name="file_format" argsep=":">
 				<argument name="file_format" required="true">
-					<para>optional, if not set, defaults to <literal>wav</literal></para>
+					<para>Optional.  If not set, defaults to <literal>wav</literal></para>
 				</argument>
 				<argument name="urlbase" />
 			</parameter>
 			<parameter name="fname_base">
-				<para>if set, changes the filename used to the one specified.</para>
+				<para>If set, changes the filename used to the one specified.</para>
 			</parameter>
 			<parameter name="options">
 				<optionlist>
 					<option name="m">
-						<para>when the recording ends mix the two leg files into one and
+						<para>When the recording ends mix the two leg files into one and
 						delete the two leg files. If the variable <variable>MONITOR_EXEC</variable>
 						is set, the application referenced in it will be executed instead of
 						soxmix/sox and the raw leg files will NOT be deleted automatically.
@@ -80,6 +81,13 @@
 						will be passed on as additional arguments to <variable>MONITOR_EXEC</variable>.
 						Both <variable>MONITOR_EXEC</variable> and the Mix flag can be set from the
 						administrator interface.</para>
+						<warning><para>Do not use untrusted strings such as
+						<variable>CALLERID(num)</variable> or <variable>CALLERID(name)</variable>
+						as part of <variable>MONITOR_EXEC</variable> or
+						<variable>MONITOR_EXEC_ARGS</variable>.  You risk a command injection
+						attack executing arbitrary commands if the untrusted strings aren't
+						filtered to remove dangerous characters.  See function
+						<variable>FILTER()</variable>.</para></warning>
 					</option>
 					<option name="b">
 						<para>Don't begin recording unless a call is bridged to another channel.</para>
@@ -457,7 +465,7 @@ int AST_OPTIONAL_API_NAME(ast_monitor_stop)(struct ast_channel *chan, int need_l
 	LOCK_IF_NEEDED(chan, need_lock);
 
 	if (ast_channel_monitor(chan)) {
-		char filename[ FILENAME_MAX ];
+		RAII_VAR(struct ast_str *, tmp, ast_str_create(1024), ast_free);
 
 		if (ast_channel_monitor(chan)->read_stream) {
 			ast_closestream(ast_channel_monitor(chan)->read_stream);
@@ -466,31 +474,29 @@ int AST_OPTIONAL_API_NAME(ast_monitor_stop)(struct ast_channel *chan, int need_l
 			ast_closestream(ast_channel_monitor(chan)->write_stream);
 		}
 
-		if (ast_channel_monitor(chan)->filename_changed && !ast_strlen_zero(ast_channel_monitor(chan)->filename_base)) {
+		if (tmp && ast_channel_monitor(chan)->filename_changed && !ast_strlen_zero(ast_channel_monitor(chan)->filename_base)) {
 			if (ast_fileexists(ast_channel_monitor(chan)->read_filename,NULL,NULL) > 0) {
-				snprintf(filename, FILENAME_MAX, "%s-in", ast_channel_monitor(chan)->filename_base);
-				if (ast_fileexists(filename, NULL, NULL) > 0) {
-					ast_filedelete(filename, NULL);
+				ast_str_set(&tmp, 0, "%s-in", ast_channel_monitor(chan)->filename_base);
+				if (ast_fileexists(ast_str_buffer(tmp), NULL, NULL) > 0) {
+					ast_filedelete(ast_str_buffer(tmp), NULL);
 				}
-				ast_filerename(ast_channel_monitor(chan)->read_filename, filename, ast_channel_monitor(chan)->format);
+				ast_filerename(ast_channel_monitor(chan)->read_filename, ast_str_buffer(tmp), ast_channel_monitor(chan)->format);
 			} else {
 				ast_log(LOG_WARNING, "File %s not found\n", ast_channel_monitor(chan)->read_filename);
 			}
 
-			if (ast_fileexists(ast_channel_monitor(chan)->write_filename,NULL,NULL) > 0) {
-				snprintf(filename, FILENAME_MAX, "%s-out", ast_channel_monitor(chan)->filename_base);
-				if (ast_fileexists(filename, NULL, NULL) > 0) {
-					ast_filedelete(filename, NULL);
+			if (tmp && ast_fileexists(ast_channel_monitor(chan)->write_filename,NULL,NULL) > 0) {
+				ast_str_set(&tmp, 0, "%s-out", ast_channel_monitor(chan)->filename_base);
+				if (ast_fileexists(ast_str_buffer(tmp), NULL, NULL) > 0) {
+					ast_filedelete(ast_str_buffer(tmp), NULL);
 				}
-				ast_filerename(ast_channel_monitor(chan)->write_filename, filename, ast_channel_monitor(chan)->format);
+				ast_filerename(ast_channel_monitor(chan)->write_filename, ast_str_buffer(tmp), ast_channel_monitor(chan)->format);
 			} else {
 				ast_log(LOG_WARNING, "File %s not found\n", ast_channel_monitor(chan)->write_filename);
 			}
 		}
 
-		if (ast_channel_monitor(chan)->joinfiles && !ast_strlen_zero(ast_channel_monitor(chan)->filename_base)) {
-			char tmp[1024];
-			char tmp2[1024];
+		if (tmp && ast_channel_monitor(chan)->joinfiles && !ast_strlen_zero(ast_channel_monitor(chan)->filename_base)) {
 			const char *format = !strcasecmp(ast_channel_monitor(chan)->format,"wav49") ? "WAV" : ast_channel_monitor(chan)->format;
 			char *fname_base = ast_channel_monitor(chan)->filename_base;
 			const char *execute, *execute_args;
@@ -511,16 +517,17 @@ int AST_OPTIONAL_API_NAME(ast_monitor_stop)(struct ast_channel *chan, int need_l
 			if (ast_strlen_zero(execute_args)) {
 				execute_args = "";
 			}
-			
-			snprintf(tmp, sizeof(tmp), "%s \"%s-in.%s\" \"%s-out.%s\" \"%s.%s\" %s &",
+
+			ast_str_set(&tmp, 0, delfiles ? "( " : "");
+			ast_str_append(&tmp, 0, "%s \"%s-in.%s\" \"%s-out.%s\" \"%s.%s\" %s &",
 				execute, fname_base, format, fname_base, format, fname_base, format,execute_args);
 			if (delfiles) {
-				snprintf(tmp2,sizeof(tmp2), "( %s& rm -f \"%s-\"* ) &",tmp, fname_base); /* remove legs when done mixing */
-				ast_copy_string(tmp, tmp2, sizeof(tmp));
+				/* remove legs when done mixing */
+				ast_str_append(&tmp, 0, "& rm -f \"%s-\"* ) &", fname_base);
 			}
-			ast_debug(1,"monitor executing %s\n",tmp);
-			if (ast_safe_system(tmp) == -1)
-				ast_log(LOG_WARNING, "Execute of %s failed.\n",tmp);
+			ast_debug(1,"monitor executing %s\n", ast_str_buffer(tmp));
+			if (ast_safe_system(ast_str_buffer(tmp)) == -1)
+				ast_log(LOG_WARNING, "Execute of %s failed.\n", ast_str_buffer(tmp));
 		}
 
 		if (!ast_strlen_zero(ast_channel_monitor(chan)->beep_id)) {
@@ -977,6 +984,9 @@ static int load_module(void)
 	ast_manager_register_xml("ChangeMonitor", EVENT_FLAG_CALL, change_monitor_action);
 	ast_manager_register_xml("PauseMonitor", EVENT_FLAG_CALL, pause_monitor_action);
 	ast_manager_register_xml("UnpauseMonitor", EVENT_FLAG_CALL, unpause_monitor_action);
+
+	/* For Optional API. */
+	ast_module_shutdown_ref(AST_MODULE_SELF);
 
 	return AST_MODULE_LOAD_SUCCESS;
 }

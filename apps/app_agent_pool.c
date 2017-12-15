@@ -72,7 +72,7 @@
 			when a new call comes in for the agent.  Login failures will continue in
 			the dialplan with <variable>AGENT_STATUS</variable> set.</para>
 			<para>Before logging in, you can setup on the real agent channel the
-			CHANNEL(dtmf-features) an agent will have when talking to a caller
+			CHANNEL(dtmf_features) an agent will have when talking to a caller
 			and you can setup on the channel running this application the
 			CONNECTEDLINE() information the agent will see while waiting for a
 			caller.</para>
@@ -81,7 +81,7 @@
 				<enum name = "INVALID"><para>The specified agent is invalid.</para></enum>
 				<enum name = "ALREADY_LOGGED_IN"><para>The agent is already logged in.</para></enum>
 			</enumlist>
-			<note><para>The Agents:<replaceable>AgentId</replaceable> device state is
+			<note><para>The Agent:<replaceable>AgentId</replaceable> device state is
 			available to monitor the status of the agent.</para></note>
 		</description>
 		<see-also>
@@ -92,7 +92,7 @@
 			<ref type="application">PauseQueueMember</ref>
 			<ref type="application">UnpauseQueueMember</ref>
 			<ref type="function">AGENT</ref>
-			<ref type="function">CHANNEL(dtmf-features)</ref>
+			<ref type="function">CHANNEL(dtmf_features)</ref>
 			<ref type="function">CONNECTEDLINE()</ref>
 			<ref type="filename">agents.conf</ref>
 			<ref type="filename">queues.conf</ref>

@@ -35,6 +35,7 @@
 #include <signal.h>
 
 #include "asterisk/heap.h"
+#include "asterisk/alertpipe.h"
 #include "asterisk/astobj2.h"
 #include "asterisk/stringfields.h"
 #include "asterisk/app.h"
@@ -54,6 +55,7 @@
 #include "asterisk/causes.h"
 #include "asterisk/test.h"
 #include "asterisk/sem.h"
+#include "asterisk/stream.h"
 
 /*!
  * \brief Used to queue an action frame onto a bridge channel and write an action frame into a bridge.
@@ -624,11 +626,11 @@ void ast_bridge_channel_kick(struct ast_bridge_channel *bridge_channel, int caus
 
 /*!
  * \internal
- * \brief Write an \ref ast_frame onto the bridge channel
+ * \brief Write an \ref ast_frame into the bridge
  * \since 12.0.0
  *
- * \param bridge_channel Which channel to queue the frame onto.
- * \param frame The frame to write onto the bridge_channel
+ * \param bridge_channel Which channel is queueing the frame.
+ * \param frame The frame to write into the bridge
  *
  * \retval 0 on success.
  * \retval -1 on error.
@@ -636,18 +638,75 @@ void ast_bridge_channel_kick(struct ast_bridge_channel *bridge_channel, int caus
 static int bridge_channel_write_frame(struct ast_bridge_channel *bridge_channel, struct ast_frame *frame)
 {
 	const struct ast_control_t38_parameters *t38_parameters;
+	int unmapped_stream_num;
+	int deferred;
 
 	ast_assert(frame->frametype != AST_FRAME_BRIDGE_ACTION_SYNC);
 
 	ast_bridge_channel_lock_bridge(bridge_channel);
-/*
- * XXX need to implement a deferred write queue for when there
- * is no peer channel in the bridge (yet or it was kicked).
- *
- * The tech decides if a frame needs to be pushed back for deferral.
- * simple_bridge/native_bridge are likely the only techs that will do this.
- */
-	bridge_channel->bridge->technology->write(bridge_channel->bridge, bridge_channel, frame);
+
+	/* Map the frame to the bridge. */
+	if (ast_channel_is_multistream(bridge_channel->chan)) {
+		unmapped_stream_num = frame->stream_num;
+		switch (frame->frametype) {
+		case AST_FRAME_VOICE:
+		case AST_FRAME_VIDEO:
+		case AST_FRAME_TEXT:
+		case AST_FRAME_IMAGE:
+			/* Media frames need to be mapped to an appropriate write stream */
+			if (frame->stream_num < 0) {
+				/* Map to default stream */
+				frame->stream_num = -1;
+				break;
+			}
+			ast_bridge_channel_lock(bridge_channel);
+			if (frame->stream_num < (int)AST_VECTOR_SIZE(&bridge_channel->stream_map.to_bridge)) {
+				frame->stream_num = AST_VECTOR_GET(
+					&bridge_channel->stream_map.to_bridge, frame->stream_num);
+				if (0 <= frame->stream_num) {
+					ast_bridge_channel_unlock(bridge_channel);
+					break;
+				}
+			}
+			ast_bridge_channel_unlock(bridge_channel);
+			ast_bridge_unlock(bridge_channel->bridge);
+			/*
+			 * Ignore frame because we don't know how to map the frame
+			 * or the bridge is not expecting any media from that
+			 * stream.
+			 */
+			return 0;
+		case AST_FRAME_DTMF_BEGIN:
+		case AST_FRAME_DTMF_END:
+			/*
+			 * XXX It makes sense that DTMF could be on any audio stream.
+			 * For now we will only put it on the default audio stream.
+			 */
+		default:
+			frame->stream_num = -1;
+			break;
+		}
+	} else {
+		unmapped_stream_num = -1;
+		frame->stream_num = -1;
+	}
+
+	deferred = bridge_channel->bridge->technology->write(bridge_channel->bridge, bridge_channel, frame);
+	if (deferred) {
+		struct ast_frame *dup;
+
+		dup = ast_frdup(frame);
+		if (dup) {
+			/*
+			 * We have to unmap the deferred frame so it comes back
+			 * in like a new frame.
+			 */
+			dup->stream_num = unmapped_stream_num;
+			ast_bridge_channel_lock(bridge_channel);
+			AST_LIST_INSERT_HEAD(&bridge_channel->deferred_queue, dup, frame_list);
+			ast_bridge_channel_unlock(bridge_channel);
+		}
+	}
 
 	/* Remember any owed events to the bridge. */
 	switch (frame->frametype) {
@@ -749,6 +808,20 @@ void bridge_channel_settle_owed_events(struct ast_bridge *orig_bridge, struct as
 		bridge_channel->owed.t38_terminate = 0;
 		orig_bridge->technology->write(orig_bridge, NULL, &frame);
 	}
+}
+
+void bridge_channel_queue_deferred_frames(struct ast_bridge_channel *bridge_channel)
+{
+	struct ast_frame *frame;
+
+	ast_bridge_channel_lock(bridge_channel);
+	ast_channel_lock(bridge_channel->chan);
+	while ((frame = AST_LIST_REMOVE_HEAD(&bridge_channel->deferred_queue, frame_list))) {
+		ast_queue_frame_head(bridge_channel->chan, frame);
+		ast_frfree(frame);
+	}
+	ast_channel_unlock(bridge_channel->chan);
+	ast_bridge_channel_unlock(bridge_channel);
 }
 
 /*!
@@ -954,7 +1027,6 @@ static void bridge_frame_free(struct ast_frame *frame)
 int ast_bridge_channel_queue_frame(struct ast_bridge_channel *bridge_channel, struct ast_frame *fr)
 {
 	struct ast_frame *dup;
-	char nudge = 0;
 
 	if (bridge_channel->suspended
 		/* Also defer DTMF frames. */
@@ -983,7 +1055,7 @@ int ast_bridge_channel_queue_frame(struct ast_bridge_channel *bridge_channel, st
 	}
 
 	AST_LIST_INSERT_TAIL(&bridge_channel->wr_queue, dup, frame_list);
-	if (write(bridge_channel->alert_pipe[1], &nudge, sizeof(nudge)) != sizeof(nudge)) {
+	if (ast_alertpipe_write(bridge_channel->alert_pipe)) {
 		ast_log(LOG_ERROR, "We couldn't write alert pipe for %p(%s)... something is VERY wrong\n",
 			bridge_channel, ast_channel_name(bridge_channel->chan));
 	}
@@ -2090,7 +2162,7 @@ void bridge_channel_internal_pull(struct ast_bridge_channel *bridge_channel)
 	    && (ast_channel_is_leaving_bridge(bridge_channel->chan)
 	        || bridge_channel->state == BRIDGE_CHANNEL_STATE_WAIT)) {
 		ast_debug(2, "Channel %s will survive this bridge; clearing outgoing (dialed) flag\n", ast_channel_name(bridge_channel->chan));
-		ast_clear_flag(ast_channel_flags(bridge_channel->chan), AST_FLAG_OUTGOING);
+		ast_channel_clear_flag(bridge_channel->chan, AST_FLAG_OUTGOING);
 	}
 
 	bridge->reconfigured = 1;
@@ -2241,6 +2313,10 @@ static void bridge_channel_handle_control(struct ast_bridge_channel *bridge_chan
 	case AST_CONTROL_ANSWER:
 		if (ast_channel_state(chan) != AST_STATE_UP) {
 			ast_answer(chan);
+			ast_bridge_channel_lock_bridge(bridge_channel);
+			bridge_channel->bridge->reconfigured = 1;
+			bridge_reconfigured(bridge_channel->bridge, 0);
+			ast_bridge_unlock(bridge_channel->bridge);
 		} else {
 			ast_indicate(chan, -1);
 		}
@@ -2249,28 +2325,12 @@ static void bridge_channel_handle_control(struct ast_bridge_channel *bridge_chan
 		/* Should never happen. */
 		ast_assert(0);
 		break;
+	case AST_CONTROL_STREAM_TOPOLOGY_CHANGED:
+		ast_indicate_data(chan, fr->subclass.integer, fr->data.ptr, fr->datalen);
+		break;
 	default:
 		ast_indicate_data(chan, fr->subclass.integer, fr->data.ptr, fr->datalen);
 		break;
-	}
-}
-
-/*!
- * \internal
- * \param bridge_channel Channel to read wr_queue alert pipe.
- *
- * \return Nothing
- */
-static void bridge_channel_read_wr_queue_alert(struct ast_bridge_channel *bridge_channel)
-{
-	char nudge;
-
-	if (read(bridge_channel->alert_pipe[0], &nudge, sizeof(nudge)) < 0) {
-		if (errno != EINTR && errno != EAGAIN) {
-			ast_log(LOG_WARNING, "read() failed for alert pipe on %p(%s): %s\n",
-				bridge_channel, ast_channel_name(bridge_channel->chan),
-				strerror(errno));
-		}
 	}
 }
 
@@ -2287,6 +2347,7 @@ static void bridge_channel_handle_write(struct ast_bridge_channel *bridge_channe
 {
 	struct ast_frame *fr;
 	struct sync_payload *sync_payload;
+	int num;
 
 	ast_bridge_channel_lock(bridge_channel);
 
@@ -2296,7 +2357,7 @@ static void bridge_channel_handle_write(struct ast_bridge_channel *bridge_channe
 		/* No frame, flush the alert pipe of excess alerts. */
 		ast_log(LOG_WARNING, "Weird.  No frame from bridge for %s to process?\n",
 			ast_channel_name(bridge_channel->chan));
-		bridge_channel_read_wr_queue_alert(bridge_channel);
+		ast_alertpipe_read(bridge_channel->alert_pipe);
 		ast_bridge_channel_unlock(bridge_channel);
 		return;
 	}
@@ -2312,7 +2373,7 @@ static void bridge_channel_handle_write(struct ast_bridge_channel *bridge_channe
 				break;
 			}
 		}
-		bridge_channel_read_wr_queue_alert(bridge_channel);
+		ast_alertpipe_read(bridge_channel->alert_pipe);
 		AST_LIST_REMOVE_CURRENT(frame_list);
 		break;
 	}
@@ -2343,9 +2404,27 @@ static void bridge_channel_handle_write(struct ast_bridge_channel *bridge_channe
 	case AST_FRAME_NULL:
 		break;
 	default:
+		/* Assume that there is no mapped stream for this */
+		num = -1;
+
+		if (fr->stream_num > -1) {
+			ast_bridge_channel_lock(bridge_channel);
+			if (fr->stream_num < (int)AST_VECTOR_SIZE(&bridge_channel->stream_map.to_channel)) {
+				num = AST_VECTOR_GET(&bridge_channel->stream_map.to_channel, fr->stream_num);
+			}
+			ast_bridge_channel_unlock(bridge_channel);
+
+			/* If there is no mapped stream after checking the mapping then there is nowhere
+			 * to write this frame to, so drop it.
+			 */
+			if (num == -1) {
+				break;
+			}
+		}
+
 		/* Write the frame to the channel. */
 		bridge_channel->activity = BRIDGE_CHANNEL_THREAD_SIMPLE;
-		ast_write(bridge_channel->chan, fr);
+		ast_write_stream(bridge_channel->chan, num, fr);
 		break;
 	}
 	bridge_frame_free(fr);
@@ -2415,6 +2494,7 @@ static const char *controls[] = {
 static void bridge_handle_trip(struct ast_bridge_channel *bridge_channel)
 {
 	struct ast_frame *frame;
+	int blocked;
 
 	if (!ast_strlen_zero(ast_channel_call_forward(bridge_channel->chan))) {
 		/* TODO If early bridging is ever used by anything other than ARI,
@@ -2428,15 +2508,21 @@ static void bridge_handle_trip(struct ast_bridge_channel *bridge_channel)
 	}
 
 	if (bridge_channel->features->mute) {
-		frame = ast_read_noaudio(bridge_channel->chan);
+		frame = ast_read_stream_noaudio(bridge_channel->chan);
 	} else {
-		frame = ast_read(bridge_channel->chan);
+		frame = ast_read_stream(bridge_channel->chan);
 	}
 
 	if (!frame) {
 		ast_bridge_channel_kick(bridge_channel, 0);
 		return;
 	}
+
+	if (!ast_channel_is_multistream(bridge_channel->chan)) {
+		/* This may not be initialized by non-multistream channel drivers */
+		frame->stream_num = -1;
+	}
+
 	switch (frame->frametype) {
 	case AST_FRAME_CONTROL:
 		switch (frame->subclass.integer) {
@@ -2453,6 +2539,35 @@ static void bridge_handle_trip(struct ast_bridge_channel *bridge_channel)
 		case AST_CONTROL_PROCEEDING:
 		case AST_CONTROL_ANSWER:
 			ast_channel_publish_dial(NULL, bridge_channel->chan, NULL, controls[frame->subclass.integer]);
+			break;
+		case AST_CONTROL_STREAM_TOPOLOGY_REQUEST_CHANGE:
+			ast_bridge_channel_lock_bridge(bridge_channel);
+			blocked = bridge_channel->bridge->technology->stream_topology_request_change
+				&& bridge_channel->bridge->technology->stream_topology_request_change(
+					bridge_channel->bridge, bridge_channel);
+			ast_bridge_unlock(bridge_channel->bridge);
+			if (blocked) {
+				/*
+				 * Topology change was intercepted by the bridge technology
+				 * so drop frame.
+				 */
+				bridge_frame_free(frame);
+				return;
+			}
+			break;
+		case AST_CONTROL_STREAM_TOPOLOGY_CHANGED:
+			/*
+			 * If a stream topology has changed then the bridge_channel's
+			 * media mapping needs to be updated.
+			 */
+			ast_bridge_channel_lock_bridge(bridge_channel);
+			if (bridge_channel->bridge->technology->stream_topology_changed) {
+				bridge_channel->bridge->technology->stream_topology_changed(
+					bridge_channel->bridge, bridge_channel);
+			} else {
+				ast_bridge_channel_stream_map(bridge_channel);
+			}
+			ast_bridge_unlock(bridge_channel->bridge);
 			break;
 		default:
 			break;
@@ -2879,62 +2994,6 @@ int bridge_channel_internal_allows_optimization(struct ast_bridge_channel *bridg
 		&& AST_LIST_EMPTY(&bridge_channel->wr_queue);
 }
 
-/*!
- * \internal
- * \brief Close a pipe.
- * \since 12.0.0
- *
- * \param my_pipe What to close.
- *
- * \return Nothing
- */
-static void pipe_close(int *my_pipe)
-{
-	if (my_pipe[0] > -1) {
-		close(my_pipe[0]);
-		my_pipe[0] = -1;
-	}
-	if (my_pipe[1] > -1) {
-		close(my_pipe[1]);
-		my_pipe[1] = -1;
-	}
-}
-
-/*!
- * \internal
- * \brief Initialize a pipe as non-blocking.
- * \since 12.0.0
- *
- * \param my_pipe What to initialize.
- *
- * \retval 0 on success.
- * \retval -1 on error.
- */
-static int pipe_init_nonblock(int *my_pipe)
-{
-	int flags;
-
-	my_pipe[0] = -1;
-	my_pipe[1] = -1;
-	if (pipe(my_pipe)) {
-		ast_log(LOG_WARNING, "Can't create pipe! Try increasing max file descriptors with ulimit -n\n");
-		return -1;
-	}
-	flags = fcntl(my_pipe[0], F_GETFL);
-	if (fcntl(my_pipe[0], F_SETFL, flags | O_NONBLOCK) < 0) {
-		ast_log(LOG_WARNING, "Unable to set read pipe nonblocking! (%d: %s)\n",
-			errno, strerror(errno));
-		return -1;
-	}
-	flags = fcntl(my_pipe[1], F_GETFL);
-	if (fcntl(my_pipe[1], F_SETFL, flags | O_NONBLOCK) < 0) {
-		ast_log(LOG_WARNING, "Unable to set write pipe nonblocking! (%d: %s)\n",
-			errno, strerror(errno));
-		return -1;
-	}
-	return 0;
-}
-
 /* Destroy elements of the bridge channel structure and the bridge channel structure itself */
 static void bridge_channel_destroy(void *obj)
 {
@@ -2954,12 +3013,20 @@ static void bridge_channel_destroy(void *obj)
 	while ((fr = AST_LIST_REMOVE_HEAD(&bridge_channel->wr_queue, frame_list))) {
 		bridge_frame_free(fr);
 	}
-	pipe_close(bridge_channel->alert_pipe);
+	ast_alertpipe_close(bridge_channel->alert_pipe);
+
+	/* Flush any unhandled deferred_queue frames. */
+	while ((fr = AST_LIST_REMOVE_HEAD(&bridge_channel->deferred_queue, frame_list))) {
+		ast_frfree(fr);
+	}
 
 	ast_cond_destroy(&bridge_channel->cond);
 
 	ao2_cleanup(bridge_channel->write_format);
 	ao2_cleanup(bridge_channel->read_format);
+
+	AST_VECTOR_FREE(&bridge_channel->stream_map.to_bridge);
+	AST_VECTOR_FREE(&bridge_channel->stream_map.to_channel);
 }
 
 struct ast_bridge_channel *bridge_channel_internal_alloc(struct ast_bridge *bridge)
@@ -2971,7 +3038,7 @@ struct ast_bridge_channel *bridge_channel_internal_alloc(struct ast_bridge *brid
 		return NULL;
 	}
 	ast_cond_init(&bridge_channel->cond, NULL);
-	if (pipe_init_nonblock(bridge_channel->alert_pipe)) {
+	if (ast_alertpipe_init(bridge_channel->alert_pipe)) {
 		ao2_ref(bridge_channel, -1);
 		return NULL;
 	}
@@ -2980,5 +3047,18 @@ struct ast_bridge_channel *bridge_channel_internal_alloc(struct ast_bridge *brid
 		ao2_ref(bridge_channel->bridge, +1);
 	}
 
+	/* The stream_map is initialized later - see ast_bridge_channel_stream_map */
+
 	return bridge_channel;
+}
+
+void ast_bridge_channel_stream_map(struct ast_bridge_channel *bridge_channel)
+{
+	ast_bridge_channel_lock(bridge_channel);
+	ast_channel_lock(bridge_channel->chan);
+	ast_stream_topology_map(ast_channel_get_stream_topology(bridge_channel->chan),
+		&bridge_channel->bridge->media_types, &bridge_channel->stream_map.to_bridge,
+		&bridge_channel->stream_map.to_channel);
+	ast_channel_unlock(bridge_channel->chan);
+	ast_bridge_channel_unlock(bridge_channel);
 }

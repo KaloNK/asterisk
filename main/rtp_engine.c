@@ -802,7 +802,10 @@ static void rtp_codecs_payload_replace_rx(struct ast_rtp_codecs *codecs, int pay
 		ao2_t_cleanup(AST_VECTOR_GET(&codecs->payload_mapping_rx, payload),
 			"cleaning up rx mapping vector element about to be replaced");
 	}
-	AST_VECTOR_REPLACE(&codecs->payload_mapping_rx, payload, new_type);
+	if (AST_VECTOR_REPLACE(&codecs->payload_mapping_rx, payload, new_type)) {
+		ao2_ref(new_type, -1);
+		return;
+	}
 
 	payload_mapping_rx_clear_primary(codecs, new_type);
 }
@@ -924,7 +927,10 @@ static void rtp_codecs_payloads_copy_tx(struct ast_rtp_codecs *src, struct ast_r
 			ao2_t_cleanup(AST_VECTOR_GET(&dest->payload_mapping_tx, idx),
 				"cleaning up tx mapping vector element about to be replaced");
 		}
-		AST_VECTOR_REPLACE(&dest->payload_mapping_tx, idx, type);
+		if (AST_VECTOR_REPLACE(&dest->payload_mapping_tx, idx, type)) {
+			ao2_ref(type, -1);
+			continue;
+		}
 
 		if (instance && instance->engine && instance->engine->payload_set) {
 			ao2_lock(instance);
@@ -1038,9 +1044,10 @@ void ast_rtp_codecs_payloads_set_m_type(struct ast_rtp_codecs *codecs, struct as
 			ao2_t_cleanup(AST_VECTOR_GET(&codecs->payload_mapping_tx, payload),
 				"cleaning up replaced tx payload type");
 		}
-		AST_VECTOR_REPLACE(&codecs->payload_mapping_tx, payload, new_type);
 
-		if (instance && instance->engine && instance->engine->payload_set) {
+		if (AST_VECTOR_REPLACE(&codecs->payload_mapping_tx, payload, new_type)) {
+			ao2_ref(new_type, -1);
+		} else if (instance && instance->engine && instance->engine->payload_set) {
 			ao2_lock(instance);
 			instance->engine->payload_set(instance, payload, new_type->asterisk_format, new_type->format, new_type->rtp_code);
 			ao2_unlock(instance);
@@ -1116,9 +1123,10 @@ int ast_rtp_codecs_payloads_set_rtpmap_type_rate(struct ast_rtp_codecs *codecs, 
 				ao2_t_cleanup(AST_VECTOR_GET(&codecs->payload_mapping_tx, pt),
 					"cleaning up replaced tx payload type");
 			}
-			AST_VECTOR_REPLACE(&codecs->payload_mapping_tx, pt, new_type);
 
-			if (instance && instance->engine && instance->engine->payload_set) {
+			if (AST_VECTOR_REPLACE(&codecs->payload_mapping_tx, pt, new_type)) {
+				ao2_ref(new_type, -1);
+			} else if (instance && instance->engine && instance->engine->payload_set) {
 				ao2_lock(instance);
 				instance->engine->payload_set(instance, pt, new_type->asterisk_format, new_type->format, new_type->rtp_code);
 				ao2_unlock(instance);
@@ -1215,7 +1223,9 @@ int ast_rtp_codecs_payload_replace_format(struct ast_rtp_codecs *codecs, int pay
 		if (payload < AST_VECTOR_SIZE(&codecs->payload_mapping_tx)) {
 			ao2_cleanup(AST_VECTOR_GET(&codecs->payload_mapping_tx, payload));
 		}
-		AST_VECTOR_REPLACE(&codecs->payload_mapping_tx, payload, type);
+		if (AST_VECTOR_REPLACE(&codecs->payload_mapping_tx, payload, type)) {
+			ao2_ref(type, -1);
+		}
 	} else {
 		ao2_ref(type, -1);
 	}
@@ -1426,28 +1436,31 @@ static int find_unused_payload(const struct ast_rtp_codecs *codecs)
 	 * https://tools.ietf.org/html/draft-roach-mmusic-unified-plan#section-3.2.1.2
 	 * https://tools.ietf.org/html/draft-wu-avtcore-dynamic-pt-usage#section-3
 	 */
-	res = find_unused_payload_in_range(codecs, MAX(ast_option_rtpptdynamic, 35),
+	res = find_unused_payload_in_range(
+		codecs, MAX(ast_option_rtpptdynamic, AST_RTP_PT_LAST_STATIC + 1),
 		AST_RTP_PT_LAST_REASSIGN, static_RTP_PT);
 	if (res != -1) {
 		return res;
 	}
 
-	/* Yet, reusing mappings below 35 is not supported in Asterisk because
-	 * when Compact Headers are activated, no rtpmap is send for those below
-	 * 35. If you want to use 35 and below
+	/* Yet, reusing mappings below AST_RTP_PT_LAST_STATIC (35) is not supported
+	 * in Asterisk because when Compact Headers are activated, no rtpmap is
+	 * send for those below 35. If you want to use 35 and below
 	 * A) do not use Compact Headers,
 	 * B) remove that code in chan_sip/res_pjsip, or
 	 * C) add a flag that this RTP Payload Type got reassigned dynamically
 	 *    and requires a rtpmap even with Compact Headers enabled.
 	 */
 	res = find_unused_payload_in_range(
-		codecs, MAX(ast_option_rtpptdynamic, 20), 35, static_RTP_PT);
+		codecs, MAX(ast_option_rtpptdynamic, 20),
+		AST_RTP_PT_LAST_STATIC + 1, static_RTP_PT);
 	if (res != -1) {
 		return res;
 	}
 
 	return find_unused_payload_in_range(
-		codecs, MAX(ast_option_rtpptdynamic, 0), 20, static_RTP_PT);
+		codecs, MAX(ast_option_rtpptdynamic, 0),
+		20, static_RTP_PT);
 }
 
 /*!
@@ -1492,21 +1505,24 @@ static int rtp_codecs_find_non_primary_dynamic_rx(struct ast_rtp_codecs *codecs)
  * \param asterisk_format Non-zero if the given Asterisk format is present
  * \param format Asterisk format to look for
  * \param code The format to look for
+ * \param explicit Require the provided code to be explicitly used
  *
  * \note It is assumed that static_RTP_PT_lock is at least read locked before calling.
  *
  * \retval Numerical payload type
  * \retval -1 if could not assign.
  */
-static int rtp_codecs_assign_payload_code_rx(struct ast_rtp_codecs *codecs, int asterisk_format, struct ast_format *format, int code)
+static int rtp_codecs_assign_payload_code_rx(struct ast_rtp_codecs *codecs, int asterisk_format, struct ast_format *format, int code, int explicit)
 {
-	int payload;
+	int payload = code;
 	struct ast_rtp_payload_type *new_type;
 
-	payload = find_static_payload_type(asterisk_format, format, code);
+	if (!explicit) {
+		payload = find_static_payload_type(asterisk_format, format, code);
 
-	if (payload < 0 && (!asterisk_format || ast_option_rtpusedynamic)) {
-		return payload;
+		if (payload < 0 && (!asterisk_format || ast_option_rtpusedynamic)) {
+			return payload;
+		}
 	}
 
 	new_type = rtp_payload_type_alloc(format, payload, code, 1);
@@ -1522,9 +1538,9 @@ static int rtp_codecs_assign_payload_code_rx(struct ast_rtp_codecs *codecs, int 
 		 * The payload type is a static assignment
 		 * or our default dynamic position is available.
 		 */
-               rtp_codecs_payload_replace_rx(codecs, payload, new_type);
-	} else if (-1 < (payload = find_unused_payload(codecs))
-		|| -1 < (payload = rtp_codecs_find_non_primary_dynamic_rx(codecs))) {
+		rtp_codecs_payload_replace_rx(codecs, payload, new_type);
+	} else if (!explicit && (-1 < (payload = find_unused_payload(codecs))
+		|| -1 < (payload = rtp_codecs_find_non_primary_dynamic_rx(codecs)))) {
 		/*
 		 * We found the first available empty dynamic position
 		 * or we found a mapping that should no longer be
@@ -1532,6 +1548,11 @@ static int rtp_codecs_assign_payload_code_rx(struct ast_rtp_codecs *codecs, int 
 		 */
 		new_type->payload = payload;
 		rtp_codecs_payload_replace_rx(codecs, payload, new_type);
+	} else if (explicit) {
+		/*
+		* They explicitly requested this payload number be used but it couldn't be
+		*/
+		payload = -1;
 	} else {
 		/*
 		 * There are no empty or non-primary dynamic positions
@@ -1592,11 +1613,16 @@ int ast_rtp_codecs_payload_code(struct ast_rtp_codecs *codecs, int asterisk_form
 
 	if (payload < 0) {
 		payload = rtp_codecs_assign_payload_code_rx(codecs, asterisk_format, format,
-			code);
+			code, 0);
 	}
 	ast_rwlock_unlock(&static_RTP_PT_lock);
 
 	return payload;
+}
+
+int ast_rtp_codecs_payload_set_rx(struct ast_rtp_codecs *codecs, int code, struct ast_format *format)
+{
+	return rtp_codecs_assign_payload_code_rx(codecs, 1, format, code, 1);
 }
 
 int ast_rtp_codecs_payload_code_tx(struct ast_rtp_codecs *codecs, int asterisk_format, const struct ast_format *format, int code)
@@ -2421,7 +2447,7 @@ int ast_rtp_instance_add_srtp_policy(struct ast_rtp_instance *instance, struct a
 
 	if (!*srtp) {
 		res = res_srtp->create(srtp, instance, remote_policy);
-	} else {
+	} else if (remote_policy) {
 		res = res_srtp->replace(srtp, instance, remote_policy);
 	}
 	if (!res) {
@@ -2701,36 +2727,38 @@ int ast_rtp_dtls_cfg_parse(struct ast_rtp_dtls_cfg *dtls_cfg, const char *name, 
 		if (sscanf(value, "%30u", &dtls_cfg->rekey) != 1) {
 			return -1;
 		}
+	} else if (!strcasecmp(name, "dtlsautogeneratecert")) {
+		dtls_cfg->ephemeral_cert = ast_true(value) ? 1 : 0;
 	} else if (!strcasecmp(name, "dtlscertfile")) {
-		ast_free(dtls_cfg->certfile);
 		if (!ast_strlen_zero(value) && !ast_file_is_readable(value)) {
 			ast_log(LOG_ERROR, "%s file %s does not exist or is not readable\n", name, value);
 			return -1;
 		}
+		ast_free(dtls_cfg->certfile);
 		dtls_cfg->certfile = ast_strdup(value);
 	} else if (!strcasecmp(name, "dtlsprivatekey")) {
-		ast_free(dtls_cfg->pvtfile);
 		if (!ast_strlen_zero(value) && !ast_file_is_readable(value)) {
 			ast_log(LOG_ERROR, "%s file %s does not exist or is not readable\n", name, value);
 			return -1;
 		}
+		ast_free(dtls_cfg->pvtfile);
 		dtls_cfg->pvtfile = ast_strdup(value);
 	} else if (!strcasecmp(name, "dtlscipher")) {
 		ast_free(dtls_cfg->cipher);
 		dtls_cfg->cipher = ast_strdup(value);
 	} else if (!strcasecmp(name, "dtlscafile")) {
-		ast_free(dtls_cfg->cafile);
 		if (!ast_strlen_zero(value) && !ast_file_is_readable(value)) {
 			ast_log(LOG_ERROR, "%s file %s does not exist or is not readable\n", name, value);
 			return -1;
 		}
+		ast_free(dtls_cfg->cafile);
 		dtls_cfg->cafile = ast_strdup(value);
 	} else if (!strcasecmp(name, "dtlscapath") || !strcasecmp(name, "dtlscadir")) {
-		ast_free(dtls_cfg->capath);
 		if (!ast_strlen_zero(value) && !ast_file_is_readable(value)) {
 			ast_log(LOG_ERROR, "%s file %s does not exist or is not readable\n", name, value);
 			return -1;
 		}
+		ast_free(dtls_cfg->capath);
 		dtls_cfg->capath = ast_strdup(value);
 	} else if (!strcasecmp(name, "dtlssetup")) {
 		if (!strcasecmp(value, "active")) {
@@ -2753,6 +2781,25 @@ int ast_rtp_dtls_cfg_parse(struct ast_rtp_dtls_cfg *dtls_cfg, const char *name, 
 	return 0;
 }
 
+int ast_rtp_dtls_cfg_validate(struct ast_rtp_dtls_cfg *dtls_cfg)
+{
+	if (dtls_cfg->ephemeral_cert) {
+		if (!ast_strlen_zero(dtls_cfg->certfile)) {
+			ast_log(LOG_ERROR, "You cannot request automatically generated certificates"
+				" (dtls_auto_generate_cert) and also specify a certificate file"
+				" (dtls_cert_file) at the same time\n");
+			return -1;
+		} else if (!ast_strlen_zero(dtls_cfg->pvtfile)
+				  || !ast_strlen_zero(dtls_cfg->cafile)
+				  || !ast_strlen_zero(dtls_cfg->capath)) {
+			ast_log(LOG_NOTICE, "dtls_pvt_file, dtls_cafile, and dtls_ca_path are"
+				" ignored when dtls_auto_generate_cert is enabled\n");
+		}
+	}
+
+	return 0;
+}
+
 void ast_rtp_dtls_cfg_copy(const struct ast_rtp_dtls_cfg *src_cfg, struct ast_rtp_dtls_cfg *dst_cfg)
 {
 	ast_rtp_dtls_cfg_free(dst_cfg);         /* Prevent a double-call leaking memory via ast_strdup */
@@ -2762,6 +2809,7 @@ void ast_rtp_dtls_cfg_copy(const struct ast_rtp_dtls_cfg *src_cfg, struct ast_rt
 	dst_cfg->rekey = src_cfg->rekey;
 	dst_cfg->suite = src_cfg->suite;
 	dst_cfg->hash = src_cfg->hash;
+	dst_cfg->ephemeral_cert = src_cfg->ephemeral_cert;
 	dst_cfg->certfile = ast_strdup(src_cfg->certfile);
 	dst_cfg->pvtfile = ast_strdup(src_cfg->pvtfile);
 	dst_cfg->cipher = ast_strdup(src_cfg->cipher);
@@ -3252,9 +3300,10 @@ int ast_rtp_engine_init(void)
 	set_next_mime_type(ast_format_siren7, 0, "audio", "G7221", 16000);
 	set_next_mime_type(ast_format_siren14, 0, "audio", "G7221", 32000);
 	set_next_mime_type(ast_format_g719, 0, "audio", "G719", 48000);
-	/* Opus and VP8 */
+	/* Opus, VP8, and VP9 */
 	set_next_mime_type(ast_format_opus, 0,  "audio", "opus", 48000);
 	set_next_mime_type(ast_format_vp8, 0,  "video", "VP8", 90000);
+	set_next_mime_type(ast_format_vp9, 0, "video", "VP9", 90000);
 
 	/* Define the static rtp payload mappings */
 	add_static_payload(0, ast_format_ulaw, 0);
@@ -3295,6 +3344,7 @@ int ast_rtp_engine_init(void)
 	add_static_payload(105, ast_format_t140_red, 0);   /* Real time text chat (with redundancy encoding) */
 	add_static_payload(106, ast_format_t140, 0);     /* Real time text chat */
 	add_static_payload(107, ast_format_opus, 0);
+	add_static_payload(108, ast_format_vp9, 0);
 
 	add_static_payload(110, ast_format_speex, 0);
 	add_static_payload(111, ast_format_g726, 0);
@@ -3336,4 +3386,65 @@ time_t ast_rtp_instance_get_last_rx(const struct ast_rtp_instance *rtp)
 void ast_rtp_instance_set_last_rx(struct ast_rtp_instance *rtp, time_t time)
 {
 	rtp->last_rx = time;
+}
+
+unsigned int ast_rtp_instance_get_ssrc(struct ast_rtp_instance *rtp)
+{
+	unsigned int ssrc = 0;
+
+	ao2_lock(rtp);
+	if (rtp->engine->ssrc_get) {
+		ssrc = rtp->engine->ssrc_get(rtp);
+	}
+	ao2_unlock(rtp);
+
+	return ssrc;
+}
+
+const char *ast_rtp_instance_get_cname(struct ast_rtp_instance *rtp)
+{
+	const char *cname = "";
+
+	ao2_lock(rtp);
+	if (rtp->engine->cname_get) {
+		cname = rtp->engine->cname_get(rtp);
+	}
+	ao2_unlock(rtp);
+
+	return cname;
+}
+
+int ast_rtp_instance_bundle(struct ast_rtp_instance *child, struct ast_rtp_instance *parent)
+{
+	int res = -1;
+
+	if (parent && (child->engine != parent->engine)) {
+		return -1;
+	}
+
+	ao2_lock(child);
+	if (child->engine->bundle) {
+		res = child->engine->bundle(child, parent);
+	}
+	ao2_unlock(child);
+
+	return res;
+}
+
+void ast_rtp_instance_set_remote_ssrc(struct ast_rtp_instance *rtp, unsigned int ssrc)
+{
+	ao2_lock(rtp);
+	if (rtp->engine->set_remote_ssrc) {
+		rtp->engine->set_remote_ssrc(rtp, ssrc);
+	}
+	ao2_unlock(rtp);
+}
+
+void ast_rtp_instance_set_stream_num(struct ast_rtp_instance *rtp, int stream_num)
+{
+	ao2_lock(rtp);
+	if (rtp->engine->set_stream_num) {
+		rtp->engine->set_stream_num(rtp, stream_num);
+	}
+	ao2_unlock(rtp);
 }

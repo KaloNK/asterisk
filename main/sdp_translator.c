@@ -84,17 +84,20 @@ struct ast_sdp_translator *ast_sdp_translator_new(enum ast_sdp_options_impl repr
 
 void ast_sdp_translator_free(struct ast_sdp_translator *translator)
 {
+	if (!translator) {
+		return;
+	}
 	translator->ops->translator_free(translator->translator_priv);
 	ast_free(translator);
 }
 
 struct ast_sdp *ast_sdp_translator_to_sdp(struct ast_sdp_translator *translator,
-	void *native_sdp)
+	const void *native_sdp)
 {
 	return translator->ops->to_sdp(native_sdp, translator->translator_priv);
 }
 
-void *ast_sdp_translator_from_sdp(struct ast_sdp_translator *translator,
+const void *ast_sdp_translator_from_sdp(struct ast_sdp_translator *translator,
 	const struct ast_sdp *ast_sdp)
 {
 	return translator->ops->from_sdp(ast_sdp, translator->translator_priv);

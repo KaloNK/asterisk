@@ -9,6 +9,9 @@
 /* Define to 1 if internal poll should be used. */
 #undef AST_POLL_COMPAT
 
+/* Define to enable XML documentation. */
+#undef AST_XML_DOCS
+
 /* Define to 1 if your system's implementation of mutexes supports comparison
    of a mutex to its initializer. */
 #undef CAN_COMPARE_MUTEX_TO_INIT_VALUE
@@ -118,6 +121,9 @@
    attribute. */
 #undef HAVE_ATTRIBUTE_warn_unused_result
 
+/* Define to 1 if you have the Beanstalk Job Queue library. */
+#undef HAVE_BEANSTALK
+
 /* Define to 1 if you have the Debug symbol decoding library. */
 #undef HAVE_BFD
 
@@ -224,6 +230,10 @@
 
 /* Define to 1 if you have the `euidaccess' function. */
 #undef HAVE_EUIDACCESS
+
+/* Define to 1 if your system supports eventfd and the EFD_NONBLOCK and
+   EFD_SEMAPHORE flags. */
+#undef HAVE_EVENTFD
 
 /* Define to 1 if you have the `exp' function. */
 #undef HAVE_EXP
@@ -581,6 +591,9 @@
 /* Define to 1 if you have the Opus library. */
 #undef HAVE_OPUS
 
+/* Define to 1 if you have the Opusfile library. */
+#undef HAVE_OPUSFILE
+
 /* Define this to indicate the ${OSPTK_DESCRIP} library */
 #undef HAVE_OSPTK
 
@@ -617,10 +630,6 @@
 
 /* Define to 1 if PJPROJECT has the PJSIP EVSUB Group Lock support feature. */
 #undef HAVE_PJSIP_EVSUB_GRP_LOCK
-
-/* Define to 1 if PJPROJECT has the PJSIP EVSUB Set UAS Timeout support
-   feature. */
-#undef HAVE_PJSIP_EVSUB_SET_UAS_TIMEOUT
 
 /* Define to 1 if PJPROJECT has the PJSIP External Resolver Support feature.
    */
@@ -912,6 +921,9 @@
 
 /* Define to 1 if SRTP has the SRTP Library Shutdown Function feature. */
 #undef HAVE_SRTP_SHUTDOWN
+
+/* Define to the version of the srtp library. */
+#undef HAVE_SRTP_VERSION
 
 /* Define to 1 if you have the ISDN SS7 library. */
 #undef HAVE_SS7

@@ -26,6 +26,7 @@
  */
 
 /*** MODULEINFO
+	<use type="external">openssl</use>
 	<support_level>core</support_level>
  ***/
 
@@ -40,6 +41,7 @@
 
 #include "asterisk/compat.h"
 #include "asterisk/tcptls.h"
+#include "asterisk/io.h"
 #include "asterisk/http.h"
 #include "asterisk/utils.h"
 #include "asterisk/strings.h"
@@ -221,7 +223,7 @@ void *ast_tcptls_server_root(void *data)
 	pthread_t launched;
 
 	for (;;) {
-		int i, flags;
+		int i;
 
 		if (desc->periodic_fn) {
 			desc->periodic_fn(desc);
@@ -259,8 +261,7 @@ void *ast_tcptls_server_root(void *data)
 			close(fd);
 			continue;
 		}
-		flags = fcntl(fd, F_GETFL);
-		fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+		ast_fd_clear_flags(fd, O_NONBLOCK);
 
 		tcptls_session->stream = ast_iostream_from_fd(&fd);
 		if (!tcptls_session->stream) {
@@ -314,7 +315,10 @@ static void __ssl_setup_certs(struct ast_tls_config *cfg, const size_t cert_file
 static int __ssl_setup(struct ast_tls_config *cfg, int client)
 {
 #ifndef DO_SSL
-	cfg->enabled = 0;
+	if (cfg->enabled) {
+		ast_log(LOG_NOTICE, "Configured without OpenSSL Development Headers");
+		cfg->enabled = 0;
+	}
 	return 0;
 #else
 	int disable_ssl = 0;
@@ -499,7 +503,7 @@ int ast_ssl_setup(struct ast_tls_config *cfg)
 void ast_ssl_teardown(struct ast_tls_config *cfg)
 {
 #ifdef DO_SSL
-	if (cfg->ssl_ctx) {
+	if (cfg && cfg->ssl_ctx) {
 		SSL_CTX_free(cfg->ssl_ctx);
 		cfg->ssl_ctx = NULL;
 	}
@@ -509,7 +513,6 @@ void ast_ssl_teardown(struct ast_tls_config *cfg)
 struct ast_tcptls_session_instance *ast_tcptls_client_start(struct ast_tcptls_session_instance *tcptls_session)
 {
 	struct ast_tcptls_session_args *desc;
-	int flags;
 
 	if (!(desc = tcptls_session->parent)) {
 		goto client_start_error;
@@ -523,8 +526,7 @@ struct ast_tcptls_session_instance *ast_tcptls_client_start(struct ast_tcptls_se
 		goto client_start_error;
 	}
 
-	flags = fcntl(desc->accept_fd, F_GETFL);
-	fcntl(desc->accept_fd, F_SETFL, flags & ~O_NONBLOCK);
+	ast_fd_clear_flags(desc->accept_fd, O_NONBLOCK);
 
 	if (desc->tls_cfg) {
 		desc->tls_cfg->enabled = 1;
@@ -571,7 +573,8 @@ struct ast_tcptls_session_instance *ast_tcptls_client_create(struct ast_tcptls_s
 
 	/* if a local address was specified, bind to it so the connection will
 	   originate from the desired address */
-	if (!ast_sockaddr_isnull(&desc->local_address)) {
+	if (!ast_sockaddr_isnull(&desc->local_address) &&
+	    !ast_sockaddr_is_any(&desc->local_address)) {
 		setsockopt(desc->accept_fd, SOL_SOCKET, SO_REUSEADDR, &x, sizeof(x));
 		if (ast_bind(desc->accept_fd, &desc->local_address)) {
 			ast_log(LOG_ERROR, "Unable to bind %s to %s: %s\n",
@@ -615,9 +618,9 @@ error:
 
 void ast_tcptls_server_start(struct ast_tcptls_session_args *desc)
 {
-	int flags;
 	int x = 1;
 	int tls_changed = 0;
+	int sd_socket;
 
 	if (desc->tls_cfg) {
 		char hash[41];
@@ -689,6 +692,19 @@ void ast_tcptls_server_start(struct ast_tcptls_session_args *desc)
 		pthread_join(desc->master, NULL);
 	}
 
+	sd_socket = ast_sd_get_fd(SOCK_STREAM, &desc->local_address);
+
+	if (sd_socket != -1) {
+		if (desc->accept_fd != sd_socket) {
+			if (desc->accept_fd != -1) {
+				close(desc->accept_fd);
+			}
+			desc->accept_fd = sd_socket;
+		}
+
+		goto systemd_socket_activation;
+	}
+
 	if (desc->accept_fd != -1) {
 		close(desc->accept_fd);
 	}
@@ -718,8 +734,9 @@ void ast_tcptls_server_start(struct ast_tcptls_session_args *desc)
 		ast_log(LOG_ERROR, "Unable to listen for %s!\n", desc->name);
 		goto error;
 	}
-	flags = fcntl(desc->accept_fd, F_GETFL);
-	fcntl(desc->accept_fd, F_SETFL, flags | O_NONBLOCK);
+
+systemd_socket_activation:
+	ast_fd_set_flags(desc->accept_fd, O_NONBLOCK);
 	if (ast_pthread_create_background(&desc->master, NULL, desc->accept_fn, desc)) {
 		ast_log(LOG_ERROR, "Unable to launch thread for %s on %s: %s\n",
 			desc->name,
@@ -760,7 +777,7 @@ void ast_tcptls_close_session_file(struct ast_tcptls_session_instance *tcptls_se
 		ast_iostream_close(tcptls_session->stream);
 		tcptls_session->stream = NULL;
 	} else {
-		ast_log(LOG_ERROR, "ast_tcptls_close_session_file invoked on session instance without file or file descriptor\n");
+		ast_debug(1, "ast_tcptls_close_session_file invoked on session instance without file or file descriptor\n");
 	}
 }
 

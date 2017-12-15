@@ -23,6 +23,11 @@
  * \author David M. Lee, II <dlee@digium.com>
  */
 
+/*** MODULEINFO
+	<depend type="module">res_http_websocket</depend>
+	<support_level>core</support_level>
+ ***/
+
 #include "asterisk.h"
 
 #include "resource_events.h"
@@ -103,7 +108,9 @@ static void stasis_app_message_handler(
 		        msg_application);
 	} else if (!session->ws_session) {
 		/* If the websocket is NULL, the message goes to the queue */
-		AST_VECTOR_APPEND(&session->message_queue, message);
+		if (!AST_VECTOR_APPEND(&session->message_queue, message)) {
+			ast_json_ref(message);
+		}
 		ast_log(LOG_WARNING,
 				"Queued '%s' message for Stasis app '%s'; websocket is not ready\n",
 				msg_type,

@@ -123,6 +123,7 @@ References:
 #ifndef _ASTERISK_CHANNEL_H
 #define _ASTERISK_CHANNEL_H
 
+#include "asterisk/alertpipe.h"
 #include "asterisk/abstract_jb.h"
 #include "asterisk/astobj2.h"
 #include "asterisk/poll-compat.h"
@@ -173,7 +174,7 @@ extern "C" {
 #include "asterisk/linkedlists.h"
 #include "asterisk/stringfields.h"
 #include "asterisk/datastore.h"
-#include "asterisk/data.h"
+#include "asterisk/format_cap.h"
 #include "asterisk/channelstate.h"
 #include "asterisk/ccss.h"
 #include "asterisk/framehook.h"
@@ -202,6 +203,8 @@ enum ast_bridge_result {
 };
 
 typedef unsigned long long ast_group_t;
+
+struct ast_stream_topology;
 
 /*! \todo Add an explanation of an Asterisk generator
 */
@@ -629,6 +632,26 @@ struct ast_channel_tech {
 	 * \retval non-NULL channel on success
 	 */
 	struct ast_channel *(* const requester)(const char *type, struct ast_format_cap *cap, const struct ast_assigned_ids *assignedids, const struct ast_channel *requestor, const char *addr, int *cause);
+
+	/*!
+	 * \brief Requester - to set up call data structures (pvt's) with stream topology
+	 *
+	 * \param type type of channel to request
+	 * \param topology Stream topology for requested channel
+	 * \param assignedid Unique ID string to assign to channel
+	 * \param requestor channel asking for data
+	 * \param addr destination of the call
+	 * \param cause Cause of failure
+	 *
+	 * \details
+	 * Request a channel of a given type, with addr as optional information used
+	 * by the low level module
+	 *
+	 * \retval NULL failure
+	 * \retval non-NULL channel on success
+	 */
+	struct ast_channel *(* const requester_with_stream_topology)(const char *type, struct ast_stream_topology *topology, const struct ast_assigned_ids *assignedids, const struct ast_channel *requestor, const char *addr, int *cause);
+
 
 	int (* const devicestate)(const char *device_number);	/*!< Devicestate call back */
 	int (* const presencestate)(const char *presence_provider, char **subtype, char **message); /*!< Presencestate callback */
@@ -1396,6 +1419,25 @@ struct ast_channel *ast_channel_release(struct ast_channel *chan);
  */
 struct ast_channel *ast_request(const char *type, struct ast_format_cap *request_cap, const struct ast_assigned_ids *assignedids, const struct ast_channel *requestor, const char *addr, int *cause);
 
+/*!
+ * \brief Requests a channel (specifying stream topology)
+ *
+ * \param type type of channel to request
+ * \param topology Stream topology for requested channel
+ * \param assignedids Unique ID to create channel with
+ * \param requestor channel asking for data
+ * \param addr destination of the call
+ * \param cause Cause of failure
+ *
+ * \details
+ * Request a channel of a given type, with addr as optional information used
+ * by the low level module
+ *
+ * \retval NULL failure
+ * \retval non-NULL channel on success
+ */
+struct ast_channel *ast_request_with_stream_topology(const char *type, struct ast_stream_topology *topology, const struct ast_assigned_ids *assignedids, const struct ast_channel *requestor, const char *addr, int *cause);
+
 enum ast_channel_requestor_relationship {
 	/*! The requestor is the future bridge peer of the channel. */
 	AST_CHANNEL_REQUESTOR_BRIDGE_PEER,
@@ -1991,6 +2033,26 @@ struct ast_frame *ast_read_stream(struct ast_channel *chan);
 struct ast_frame *ast_read_noaudio(struct ast_channel *chan);
 
 /*!
+ * \brief Reads a frame, but does not filter to just the default streams,
+ * returning AST_FRAME_NULL frame if audio.
+ *
+ * \param chan channel to read a frame from
+ *
+ * \return Returns a frame, or NULL on error.  If it returns NULL, you
+ * best just stop reading frames and assume the channel has been
+ * disconnected.
+ *
+ * \note This function will not perform any filtering and will return
+ *       media frames from all streams on the channel. To determine which
+ *       stream a frame originated from the stream_num on it can be
+ *       examined.
+ *
+ * \note Audio is replaced with AST_FRAME_NULL to avoid
+ * transcode when the resulting audio is not necessary.
+ */
+struct ast_frame *ast_read_stream_noaudio(struct ast_channel *chan);
+
+/*!
  * \brief Write a frame to a channel
  * This function writes the given frame to the indicated channel.
  * \param chan destination channel of the frame
@@ -2180,11 +2242,12 @@ int ast_waitfordigit(struct ast_channel *c, int ms);
  * Same as ast_waitfordigit() with audio fd for outputting read audio and ctrlfd to monitor for reading.
  * \param c channel to wait for a digit on
  * \param ms how many milliseconds to wait (<0 for indefinite).
+ * \param breakon string of DTMF digits to break upon or NULL for any.
  * \param audiofd audio file descriptor to write to if audio frames are received
  * \param ctrlfd control file descriptor to monitor for reading
  * \return Returns 1 if ctrlfd becomes available
  */
-int ast_waitfordigit_full(struct ast_channel *c, int ms, int audiofd, int ctrlfd);
+int ast_waitfordigit_full(struct ast_channel *c, int ms, const char *breakon, int audiofd, int ctrlfd);
 
 /*!
  * \brief Reads multiple digits
@@ -3800,27 +3863,6 @@ int ast_channel_connected_line_macro(struct ast_channel *autoservice_chan, struc
 int ast_channel_connected_line_sub(struct ast_channel *autoservice_chan, struct ast_channel *sub_chan, const void *connected_info, int frame);
 
 /*!
- * \brief Insert into an astdata tree, the channel structure.
- * \param[in] tree The ast data tree.
- * \param[in] chan The channel structure to add to tree.
- * \param[in] add_bridged Add the bridged channel to the structure.
- * \retval <0 on error.
- * \retval 0 on success.
- */
-int ast_channel_data_add_structure(struct ast_data *tree, struct ast_channel *chan, int add_bridged);
-
-/*!
- * \brief Compare to channel structures using the data api.
- * \param[in] tree The search tree generated by the data api.
- * \param[in] chan The channel to compare.
- * \param[in] structure_name The name of the node of the channel structure.
- * \retval 0 The structure matches.
- * \retval 1 The structure doesn't matches.
- */
-int ast_channel_data_cmp_structure(const struct ast_data_search *tree, struct ast_channel *chan,
-	const char *structure_name);
-
-/*!
  * \since 1.8
  * \brief Run a redirecting interception macro and update a channel's redirecting information
  * \deprecated You should use the ast_channel_redirecting_sub() function instead.
@@ -4270,12 +4312,6 @@ struct ast_namedgroups *ast_channel_named_pickupgroups(const struct ast_channel 
 void ast_channel_named_pickupgroups_set(struct ast_channel *chan, struct ast_namedgroups *value);
 
 /* Alertpipe accessors--the "internal" functions for channel.c use only */
-typedef enum {
-	AST_ALERT_READ_SUCCESS = 0,
-	AST_ALERT_NOT_READABLE,
-	AST_ALERT_READ_FAIL,
-	AST_ALERT_READ_FATAL,
-} ast_alert_status_t;
 int ast_channel_alert_write(struct ast_channel *chan);
 int ast_channel_alert_writable(struct ast_channel *chan);
 ast_alert_status_t ast_channel_internal_alert_flush(struct ast_channel *chan);
@@ -4402,6 +4438,31 @@ int ast_channel_dialed_causes_add(const struct ast_channel *chan, const struct a
 void ast_channel_dialed_causes_clear(const struct ast_channel *chan);
 
 struct ast_flags *ast_channel_flags(struct ast_channel *chan);
+
+/*!
+ * \since 13.17.0
+ * \brief Set a flag on a channel
+ *
+ * \param chan The channel to set the flag on
+ * \param flag The flag to set
+ *
+ * \note This will lock the channel internally. If the channel is already
+ * locked it is still safe to call.
+ */
+
+void ast_channel_set_flag(struct ast_channel *chan, unsigned int flag);
+
+/*!
+ * \since 13.17.0
+ * \param Clear a flag on a channel
+ *
+ * \param chan The channel to clear the flag from
+ * \param flag The flag to clear
+ *
+ * \note This will lock the channel internally. If the channel is already
+ * locked it is still safe to call.
+ */
+void ast_channel_clear_flag(struct ast_channel *chan, unsigned int flag);
 
 /*!
  * \since 12.4.0
@@ -4606,6 +4667,9 @@ struct ast_bridge_channel *ast_channel_get_bridge_channel(struct ast_channel *ch
  * it cannot be used any further. Always use the returned channel instead.
  *
  * \note absolutely _NO_ channel locks should be held before calling this function.
+ *
+ * \note The dialplan location on the returned channel is where the channel
+ * should be started in the dialplan if it is returned to it.
  *
  * \param yankee The channel to gain control of
  * \retval NULL Could not gain control of the channel
@@ -4871,8 +4935,9 @@ int ast_channel_is_multistream(struct ast_channel *chan);
  *
  * \param chan The channel to change
  * \param topology The new stream topology
+ * \param change_source The source that initiated the change
  *
- * \pre chan is locked
+ * \note Absolutely _NO_ channel locks should be held before calling this function.
  *
  * \retval 0 request has been accepted to be attempted
  * \retval -1 request could not be attempted
@@ -4885,7 +4950,8 @@ int ast_channel_is_multistream(struct ast_channel *chan);
  * \note This interface is provided for applications and resources to request that the topology change.
  *       It is not for use by the channel driver itself.
  */
-int ast_channel_request_stream_topology_change(struct ast_channel *chan, struct ast_stream_topology *topology);
+int ast_channel_request_stream_topology_change(struct ast_channel *chan,
+	struct ast_stream_topology *topology, void *change_source);
 
 /*!
  * \brief Provide notice to a channel that the stream topology has changed
@@ -4893,7 +4959,7 @@ int ast_channel_request_stream_topology_change(struct ast_channel *chan, struct 
  * \param chan The channel to provide notice to
  * \param topology The new stream topology
  *
- * \pre chan is locked
+ * \pre chan is locked  Absolutely _NO_ other channels can be locked.
  *
  * \retval 0 success
  * \retval -1 failure
@@ -4902,5 +4968,14 @@ int ast_channel_request_stream_topology_change(struct ast_channel *chan, struct 
  *       It is not for use by the channel driver itself.
  */
 int ast_channel_stream_topology_changed(struct ast_channel *chan, struct ast_stream_topology *topology);
+
+/*!
+ * \brief Retrieve the source that initiated the last stream topology change
+ *
+ * \param chan The channel
+ *
+ * \retval The channel's stream topology change source
+ */
+void *ast_channel_get_stream_topology_change_source(struct ast_channel *chan);
 
 #endif /* _ASTERISK_CHANNEL_H */

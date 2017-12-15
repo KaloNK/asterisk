@@ -440,6 +440,18 @@ static void bridge_channel_complete_join(struct ast_bridge *bridge, struct ast_b
 	}
 
 	bridge_channel->just_joined = 0;
+
+	/*
+	 * When a channel joins the bridge its streams need to be mapped to the bridge's
+	 * media types vector. This way all streams map to the same media type index for
+	 * a given channel.
+	 */
+	if (bridge_channel->bridge->technology->stream_topology_changed) {
+		bridge_channel->bridge->technology->stream_topology_changed(
+			bridge_channel->bridge, bridge_channel);
+	} else {
+		ast_bridge_channel_stream_map(bridge_channel);
+	}
 }
 
 /*!
@@ -469,6 +481,7 @@ static void bridge_complete_join(struct ast_bridge *bridge)
 	}
 
 	AST_LIST_TRAVERSE(&bridge->channels, bridge_channel, entry) {
+		bridge_channel_queue_deferred_frames(bridge_channel);
 		if (!bridge_channel->just_joined) {
 			continue;
 		}
@@ -689,6 +702,8 @@ static void destroy_bridge(void *obj)
 		bridge->technology = NULL;
 	}
 
+	AST_VECTOR_FREE(&bridge->media_types);
+
 	bridge->callid = 0;
 
 	cleanup_video_mode(bridge);
@@ -743,6 +758,8 @@ struct ast_bridge *bridge_alloc(size_t size, const struct ast_bridge_methods *v_
 	}
 
 	bridge->v_table = v_table;
+
+	AST_VECTOR_INIT(&bridge->media_types, AST_MEDIA_TYPE_END);
 
 	return bridge;
 }
@@ -1724,7 +1741,7 @@ int ast_bridge_join(struct ast_bridge *bridge,
 
 	ao2_ref(bridge_channel, -1);
 
-join_exit:;
+join_exit:
 	ast_bridge_run_after_callback(chan);
 	bridge_channel_impart_signal(chan);
 	if (!(ast_channel_softhangup_internal_flag(chan) & AST_SOFTHANGUP_ASYNCGOTO)
@@ -1741,12 +1758,13 @@ join_exit:;
 static void *bridge_channel_depart_thread(void *data)
 {
 	struct ast_bridge_channel *bridge_channel = data;
+	int res = 0;
 
 	if (bridge_channel->callid) {
 		ast_callid_threadassoc_add(bridge_channel->callid);
 	}
 
-	bridge_channel_internal_join(bridge_channel);
+	res = bridge_channel_internal_join(bridge_channel);
 
 	/*
 	 * cleanup
@@ -1758,7 +1776,8 @@ static void *bridge_channel_depart_thread(void *data)
 	ast_bridge_features_destroy(bridge_channel->features);
 	bridge_channel->features = NULL;
 
-	ast_bridge_discard_after_callback(bridge_channel->chan, AST_BRIDGE_AFTER_CB_REASON_DEPART);
+	ast_bridge_discard_after_callback(bridge_channel->chan,
+		res ? AST_BRIDGE_AFTER_CB_REASON_IMPART_FAILED : AST_BRIDGE_AFTER_CB_REASON_DEPART);
 	/* If join failed there will be impart threads waiting. */
 	bridge_channel_impart_signal(bridge_channel->chan);
 	ast_bridge_discard_after_goto(bridge_channel->chan);
@@ -3767,6 +3786,8 @@ static void cleanup_video_mode(struct ast_bridge *bridge)
 		if (bridge->softmix.video_mode.mode_data.talker_src_data.chan_old_vsrc) {
 			ast_channel_unref(bridge->softmix.video_mode.mode_data.talker_src_data.chan_old_vsrc);
 		}
+	case AST_BRIDGE_VIDEO_MODE_SFU:
+		break;
 	}
 	memset(&bridge->softmix.video_mode, 0, sizeof(bridge->softmix.video_mode));
 }
@@ -3791,6 +3812,21 @@ void ast_bridge_set_talker_src_video_mode(struct ast_bridge *bridge)
 	ast_bridge_lock(bridge);
 	cleanup_video_mode(bridge);
 	bridge->softmix.video_mode.mode = AST_BRIDGE_VIDEO_MODE_TALKER_SRC;
+	ast_bridge_unlock(bridge);
+}
+
+void ast_bridge_set_sfu_video_mode(struct ast_bridge *bridge)
+{
+	ast_bridge_lock(bridge);
+	cleanup_video_mode(bridge);
+	bridge->softmix.video_mode.mode = AST_BRIDGE_VIDEO_MODE_SFU;
+	ast_bridge_unlock(bridge);
+}
+
+void ast_bridge_set_video_update_discard(struct ast_bridge *bridge, unsigned int video_update_discard)
+{
+	ast_bridge_lock(bridge);
+	bridge->softmix.video_mode.video_update_discard = video_update_discard;
 	ast_bridge_unlock(bridge);
 }
 
@@ -3862,6 +3898,8 @@ int ast_bridge_number_video_src(struct ast_bridge *bridge)
 		if (bridge->softmix.video_mode.mode_data.talker_src_data.chan_old_vsrc) {
 			res++;
 		}
+	case AST_BRIDGE_VIDEO_MODE_SFU:
+		break;
 	}
 	ast_bridge_unlock(bridge);
 	return res;
@@ -3886,7 +3924,8 @@ int ast_bridge_is_video_src(struct ast_bridge *bridge, struct ast_channel *chan)
 		} else if (bridge->softmix.video_mode.mode_data.talker_src_data.chan_old_vsrc == chan) {
 			res = 2;
 		}
-
+	case AST_BRIDGE_VIDEO_MODE_SFU:
+		break;
 	}
 	ast_bridge_unlock(bridge);
 	return res;
@@ -3920,6 +3959,8 @@ void ast_bridge_remove_video_src(struct ast_bridge *bridge, struct ast_channel *
 			}
 			bridge->softmix.video_mode.mode_data.talker_src_data.chan_old_vsrc = NULL;
 		}
+	case AST_BRIDGE_VIDEO_MODE_SFU:
+		break;
 	}
 	ast_bridge_unlock(bridge);
 }
@@ -3931,6 +3972,8 @@ const char *ast_bridge_video_mode_to_string(enum ast_bridge_video_mode_type vide
 		return "talker";
 	case AST_BRIDGE_VIDEO_MODE_SINGLE_SRC:
 		return "single";
+	case AST_BRIDGE_VIDEO_MODE_SFU:
+		return "sfu";
 	case AST_BRIDGE_VIDEO_MODE_NONE:
 	default:
 		return "none";
@@ -4247,14 +4290,15 @@ static enum ast_transfer_result attended_transfer_bridge(struct ast_channel *cha
 	BRIDGE_LOCK_ONE_OR_BOTH(bridge1, bridge2);
 
 	if (bridge2) {
+		void *tech;
 		struct ast_channel *locals[2];
 
 		/* Have to lock everything just in case a hangup comes in early */
-		ast_local_lock_all(local_chan, &locals[0], &locals[1]);
+		ast_local_lock_all(local_chan, &tech, &locals[0], &locals[1]);
 		if (!locals[0] || !locals[1]) {
 			ast_log(LOG_ERROR, "Transfer failed probably due to an early hangup - "
 				"missing other half of '%s'\n", ast_channel_name(local_chan));
-			ast_local_unlock_all(local_chan);
+			ast_local_unlock_all(tech, locals[0], locals[1]);
 			ao2_cleanup(local_chan);
 			return AST_BRIDGE_TRANSFER_FAIL;
 		}
@@ -4265,7 +4309,7 @@ static enum ast_transfer_result attended_transfer_bridge(struct ast_channel *cha
 		}
 
 		ast_attended_transfer_message_add_link(transfer_msg, locals);
-		ast_local_unlock_all(local_chan);
+		ast_local_unlock_all(tech, locals[0], locals[1]);
 	} else {
 		ast_attended_transfer_message_add_app(transfer_msg, app, local_chan);
 	}
@@ -4793,7 +4837,7 @@ enum ast_transfer_result ast_bridge_transfer_attended(struct ast_channel *to_tra
 	res = AST_BRIDGE_TRANSFER_SUCCESS;
 
 end:
-	if (res == AST_BRIDGE_TRANSFER_SUCCESS && hangup_target) {
+	if ((res == AST_BRIDGE_TRANSFER_SUCCESS && hangup_target) || res == AST_BRIDGE_TRANSFER_FAIL) {
 		ast_softhangup(to_transfer_target, AST_SOFTHANGUP_DEV);
 	}
 
